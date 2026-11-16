@@ -1,0 +1,948 @@
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	portUI    = 7716 // this computer only: the control panel
+	portLink  = 7717 // helpers connect here (encrypted), and discovery (UDP)
+	portJoin  = 7715 // "add a computer" web page for the local network
+	portChat  = 7720 // this computer only: chat page and OpenAI-compatible API of the running model
+	engineTag = "b12359"
+)
+
+// Node is one computer as the main computer sees it.
+type Node struct {
+	Info     NodeInfo  `json:"info"`
+	Online   bool      `json:"online"`
+	IsMain   bool      `json:"isMain"`
+	Status   string    `json:"status"`
+	Done     int64     `json:"done"`
+	Total    int64     `json:"total"`
+	Role     string    `json:"role"` // head | worker | "" while a model runs
+	Held     int64     `json:"held"` // bytes of the running model on this computer
+	Offer    int64     `json:"offer"`
+	Active   bool      `json:"active"` // allowed to work right now (switch + schedule)
+	LastSeen time.Time `json:"lastSeen"`
+	peer     *Peer
+}
+
+// Pending is a computer that asked to join and waits for a click.
+type Pending struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	OS     string `json:"os"`
+	Addr   string `json:"addr"`
+	Code   string `json:"code"`
+	decide chan bool
+}
+
+// Step is one line of the start-up checklist.
+type Step struct {
+	Text  string `json:"text"`
+	State string `json:"state"` // todo | doing | done | failed
+}
+
+// ClusterState is the running (or starting) model.
+type ClusterState struct {
+	Phase   string    `json:"phase"` // idle | starting | running | stopping | error
+	Model   *ModelRef `json:"model"`
+	Steps   []Step    `json:"steps"`
+	Plan    *Plan     `json:"plan"`
+	Error   string    `json:"error"`
+	Head    string    `json:"head"`
+	Since   time.Time `json:"since"`
+	TPS     float64   `json:"tps"`
+	PTPS    float64   `json:"ptps"`
+	Testing bool      `json:"testing"`
+	Reply   string    `json:"reply"`
+}
+
+// Host is the main computer.
+type Host struct {
+	a   *Agent
+	id  *Identity
+	cfg *ConfigStore
+
+	mu      sync.Mutex
+	nodes   map[string]*Node
+	pending map[string]*Pending
+	tunnels map[string]chan net.Conn
+	cluster ClusterState
+	cancel  context.CancelFunc
+	release map[string]Asset // engine release assets by name
+}
+
+func newHost(a *Agent, id *Identity, cfg *ConfigStore) *Host {
+	h := &Host{a: a, id: id, cfg: cfg, nodes: map[string]*Node{}, pending: map[string]*Pending{}, tunnels: map[string]chan net.Conn{}}
+	h.cluster.Phase = "idle"
+	cfg.Update(func(c *Config) {
+		if c.JoinSecret == "" {
+			c.JoinSecret = randomHex(8)
+		}
+		if c.EngineTag == "" {
+			c.EngineTag = engineTag
+		}
+	})
+	self := &Node{Info: a.Info(), Online: true, IsMain: true}
+	h.nodes[id.FP] = self
+	a.dialTunnel = h.openTunnel
+	a.notify = func(method string, data any) {
+		if p, ok := data.(ProgressNote); ok {
+			h.setProgress(id.FP, p)
+		}
+	}
+	return h
+}
+
+func (h *Host) setProgress(id string, p ProgressNote) {
+	h.mu.Lock()
+	if n := h.nodes[id]; n != nil {
+		n.Status, n.Done, n.Total = p.Msg, p.Done, p.Total
+	}
+	h.mu.Unlock()
+}
+
+// Run starts the network side of the main computer.
+func (h *Host) Run() error {
+	ln, err := tls.Listen("tcp", ":"+strconv.Itoa(portLink), h.id.tlsConfig())
+	if err != nil {
+		return fmt.Errorf("could not open port %d: %w", portLink, err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go h.serveConn(c.(*tls.Conn))
+		}
+	}()
+	go h.discoveryLoop()
+	go h.inventoryLoop()
+	go h.serveJoinPage()
+	go h.serveChatProxy()
+	return nil
+}
+
+func (h *Host) trusted(fp string) bool {
+	_, ok := h.cfg.Get().Trusted[fp]
+	return ok
+}
+
+func (h *Host) serveConn(c *tls.Conn) {
+	_ = c.SetDeadline(time.Now().Add(15 * time.Second))
+	if err := c.Handshake(); err != nil {
+		c.Close()
+		return
+	}
+	fp, err := peerFP(c)
+	if err != nil {
+		c.Close()
+		return
+	}
+	var hello Hello
+	if err := readLine(c, &hello, 15*time.Second); err != nil {
+		c.Close()
+		return
+	}
+	_ = c.SetDeadline(time.Time{})
+	switch hello.Kind {
+	case "control":
+		h.serveControl(c, fp, hello)
+	case "tunnel":
+		if !h.trusted(fp) {
+			_ = writeLine(c, HelloReply{Err: "not paired"})
+			c.Close()
+			return
+		}
+		t, err := h.openTunnel(hello.To, hello.Target)
+		if err != nil {
+			_ = writeLine(c, HelloReply{Err: err.Error()})
+			c.Close()
+			return
+		}
+		if writeLine(c, HelloReply{OK: true}) != nil {
+			c.Close()
+			t.Close()
+			return
+		}
+		pipe(c, t)
+	case "accept":
+		h.mu.Lock()
+		ch := h.tunnels[hello.Session]
+		delete(h.tunnels, hello.Session)
+		h.mu.Unlock()
+		if !h.trusted(fp) || ch == nil || writeLine(c, HelloReply{OK: true}) != nil {
+			c.Close()
+			return
+		}
+		ch <- c
+	default:
+		c.Close()
+	}
+}
+
+func (h *Host) serveControl(c *tls.Conn, fp string, hello Hello) {
+	cfg := h.cfg.Get()
+	name := strings.TrimSpace(hello.Name)
+	if name == "" {
+		name = "Computer " + fp[:4]
+	}
+	ok := h.trusted(fp)
+	if !ok && hello.Secret != "" && hello.Secret == cfg.JoinSecret {
+		ok = true // came with a USB kit or join link made on this computer
+	}
+	if !ok {
+		// Unknown computer on the network: show it in the control panel and wait for a click.
+		p := &Pending{ID: fp, Name: name, OS: hello.OS, Addr: c.RemoteAddr().String(), Code: pairCode(h.id.FP, fp), decide: make(chan bool, 1)}
+		h.mu.Lock()
+		if old := h.pending[fp]; old != nil {
+			old.decide <- false
+		}
+		h.pending[fp] = p
+		h.mu.Unlock()
+		if writeLine(c, HelloReply{OK: true, State: "pending", Code: p.Code, Name: cfg.Name}) != nil {
+			c.Close()
+			return
+		}
+		// Wait for the click. (No reading from the connection meanwhile: a read that times out
+		// can leave an encrypted connection unusable.) If the other computer gives up and asks
+		// again, its new request replaces this one.
+		var yes bool
+		select {
+		case yes = <-p.decide:
+		case <-time.After(20 * time.Minute):
+		}
+		h.mu.Lock()
+		if h.pending[fp] == p {
+			delete(h.pending, fp)
+		}
+		h.mu.Unlock()
+		if !yes {
+			_ = writeLine(c, HelloReply{Err: "declined"})
+			c.Close()
+			return
+		}
+	}
+	h.cfg.Update(func(c *Config) { c.Trusted[fp] = name })
+	var addrs []string
+	for _, ip := range localIPs() {
+		addrs = append(addrs, net.JoinHostPort(ip, strconv.Itoa(portLink)))
+	}
+	if writeLine(c, HelloReply{OK: true, State: "paired", Name: h.selfName(), Addrs: addrs}) != nil {
+		c.Close()
+		return
+	}
+	peer := newPeer(c)
+	peer.OnEvt = func(method string, data json.RawMessage) {
+		if method == "progress" {
+			var p ProgressNote
+			if json.Unmarshal(data, &p) == nil {
+				h.setProgress(fp, p)
+			}
+		}
+	}
+	h.mu.Lock()
+	n := h.nodes[fp]
+	if n == nil {
+		n = &Node{}
+		h.nodes[fp] = n
+	}
+	if n.peer != nil {
+		n.peer.Close()
+	}
+	n.peer, n.Online, n.LastSeen = peer, true, time.Now()
+	if n.Info.ID == "" {
+		n.Info = NodeInfo{ID: fp, Name: name, OS: hello.OS}
+	}
+	h.mu.Unlock()
+	go h.refreshNode(fp)
+	peer.Run()
+	h.mu.Lock()
+	if n.peer == peer {
+		n.peer, n.Online = nil, false
+		n.Status = ""
+	}
+	h.mu.Unlock()
+}
+
+func (h *Host) selfName() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.nodes[h.id.FP].Info.Name
+}
+
+// call runs a request on a node: directly for this computer, over the link for helpers.
+func (h *Host) call(id, method string, in, out any, timeout time.Duration) error {
+	h.mu.Lock()
+	n := h.nodes[id]
+	var peer *Peer
+	if n != nil {
+		peer = n.peer
+	}
+	h.mu.Unlock()
+	if n == nil {
+		return errors.New("unknown computer")
+	}
+	if id == h.id.FP {
+		var raw json.RawMessage
+		if in != nil {
+			raw, _ = json.Marshal(in)
+		}
+		res, err := h.a.Handle(method, raw)
+		if err != nil {
+			return err
+		}
+		if out != nil && res != nil {
+			b, _ := json.Marshal(res)
+			return json.Unmarshal(b, out)
+		}
+		return nil
+	}
+	if peer == nil {
+		return fmt.Errorf("%s is not connected", n.Info.Name)
+	}
+	return peer.Call(method, in, out, timeout)
+}
+
+func (h *Host) refreshNode(id string) {
+	var info NodeInfo
+	if err := h.call(id, "inventory", nil, &info, 15*time.Second); err != nil {
+		// This doubles as the heartbeat. A helper that has said nothing for a while is cut
+		// loose so it can come back over another path.
+		h.mu.Lock()
+		var peer *Peer
+		if n := h.nodes[id]; n != nil {
+			peer = n.peer
+		}
+		h.mu.Unlock()
+		if peer != nil && peer.Quiet() > 25*time.Second {
+			peer.Close()
+		}
+		return
+	}
+	h.mu.Lock()
+	if n := h.nodes[id]; n != nil {
+		info.ID = id
+		n.Info, n.LastSeen = info, time.Now()
+	}
+	h.mu.Unlock()
+}
+
+func (h *Host) inventoryLoop() {
+	for {
+		h.mu.Lock()
+		var ids []string
+		for id, n := range h.nodes {
+			if n.Online {
+				ids = append(ids, id)
+			}
+		}
+		h.mu.Unlock()
+		for _, id := range ids {
+			go h.refreshNode(id)
+		}
+		time.Sleep(6 * time.Second)
+	}
+}
+
+// openTunnel returns a byte stream to a program on another computer ("rpc" = its helper
+// engine, "api" = the model's chat/API port on the head).
+func (h *Host) openTunnel(to, target string) (net.Conn, error) {
+	if to == h.id.FP {
+		port, err := h.a.localPort(target)
+		if err != nil {
+			return nil, err
+		}
+		return net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), 5*time.Second)
+	}
+	session := randomHex(12)
+	ch := make(chan net.Conn, 1)
+	h.mu.Lock()
+	h.tunnels[session] = ch
+	h.mu.Unlock()
+	defer func() { h.mu.Lock(); delete(h.tunnels, session); h.mu.Unlock() }()
+	if err := h.call(to, "open_tunnel", map[string]string{"session": session, "target": target}, nil, 15*time.Second); err != nil {
+		return nil, err
+	}
+	select {
+	case c := <-ch:
+		return c, nil
+	case <-time.After(15 * time.Second):
+		return nil, errors.New("the other computer did not connect back")
+	}
+}
+
+// ---------- discovery ----------
+
+type beacon struct {
+	Potluck string `json:"potluck"` // find | here
+	Name    string `json:"name,omitempty"`
+	FP      string `json:"fp,omitempty"`
+	Port    int    `json:"port,omitempty"`
+}
+
+// discoveryLoop answers helpers that shout "is there a main computer here?" on the local network.
+func (h *Host) discoveryLoop() {
+	pc, err := net.ListenPacket("udp4", ":"+strconv.Itoa(portLink))
+	if err != nil {
+		return
+	}
+	buf := make([]byte, 2048)
+	for {
+		n, addr, err := pc.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		var b beacon
+		if json.Unmarshal(buf[:n], &b) != nil || b.Potluck != "find" {
+			continue
+		}
+		out, _ := json.Marshal(beacon{Potluck: "here", Name: h.selfName(), FP: h.id.FP, Port: portLink})
+		_, _ = pc.WriteTo(out, addr)
+	}
+}
+
+func localIPs() []string {
+	var out []string
+	ifs, _ := net.Interfaces()
+	for _, i := range ifs {
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := i.Addrs()
+		for _, a := range addrs {
+			if ipn, ok := a.(*net.IPNet); ok {
+				if ip4 := ipn.IP.To4(); ip4 != nil && !ip4.IsLinkLocalUnicast() {
+					out = append(out, ip4.String())
+				}
+			}
+		}
+	}
+	// Home network addresses first, VPN-style ones (100.x) last.
+	sort.SliceStable(out, func(i, j int) bool { return rankIP(out[i]) < rankIP(out[j]) })
+	return out
+}
+
+func rankIP(ip string) int {
+	switch {
+	case strings.HasPrefix(ip, "192.168."), strings.HasPrefix(ip, "10."):
+		return 0
+	case strings.HasPrefix(ip, "172."):
+		return 1
+	}
+	return 2
+}
+
+// ---------- chat / API proxy ----------
+
+// serveChatProxy exposes the running model's chat page and OpenAI-compatible API on this
+// computer, wherever the head actually is.
+func (h *Host) serveChatProxy() {
+	target, _ := url.Parse("http://model.invalid")
+	rp := httputil.NewSingleHostReverseProxy(target)
+	rp.Transport = &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			h.mu.Lock()
+			head, phase := h.cluster.Head, h.cluster.Phase
+			h.mu.Unlock()
+			if phase != "running" || head == "" {
+				return nil, errors.New("no model is running")
+			}
+			return h.openTunnel(head, "api")
+		},
+		MaxIdleConns:    4,
+		IdleConnTimeout: 30 * time.Second,
+	}
+	rp.FlushInterval = 50 * time.Millisecond
+	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		http.Error(w, "Potluck: "+err.Error()+". Start a model in the control panel first.", http.StatusBadGateway)
+	}
+	srv := &http.Server{Addr: "127.0.0.1:" + strconv.Itoa(portChat), Handler: rp}
+	_ = srv.ListenAndServe()
+}
+
+// ---------- engine release lookup ----------
+
+func (h *Host) engineAssets(tag string) (map[string]Asset, error) {
+	h.mu.Lock()
+	if h.release != nil {
+		defer h.mu.Unlock()
+		return h.release, nil
+	}
+	h.mu.Unlock()
+	cache := filepath.Join(h.a.dir, "engine-"+tag+".json")
+	var rel struct {
+		Assets []struct {
+			Name   string `json:"name"`
+			URL    string `json:"browser_download_url"`
+			Digest string `json:"digest"`
+			Size   int64  `json:"size"`
+		} `json:"assets"`
+	}
+	if b, err := os.ReadFile(cache); err == nil {
+		_ = json.Unmarshal(b, &rel)
+	}
+	if len(rel.Assets) == 0 {
+		if err := httpGetJSON("https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/"+tag, &rel); err != nil {
+			return nil, fmt.Errorf("could not look up the AI engine release: %w", err)
+		}
+		if b, err := json.Marshal(rel); err == nil {
+			_ = os.WriteFile(cache, b, 0o644)
+		}
+	}
+	m := map[string]Asset{}
+	for _, a := range rel.Assets {
+		m[a.Name] = Asset{Name: a.Name, URL: a.URL, SHA256: strings.TrimPrefix(a.Digest, "sha256:"), Size: a.Size}
+	}
+	h.mu.Lock()
+	h.release = m
+	h.mu.Unlock()
+	return m, nil
+}
+
+// runtimeSpec picks the engine build for a computer. Helpers use the plain CPU build (or
+// Metal on Apple Silicon); the head also uses its NVIDIA card when it has one.
+func (h *Host) runtimeSpec(info NodeInfo, isHead bool) (RuntimeSpec, error) {
+	tag := h.cfg.Get().EngineTag
+	assets, err := h.engineAssets(tag)
+	if err != nil {
+		return RuntimeSpec{}, err
+	}
+	nvidia := false
+	for _, g := range info.GPUs {
+		if g.Vendor == "nvidia" && g.Usable {
+			nvidia = true
+		}
+	}
+	var variant string
+	var names []string
+	arch := map[string]string{"amd64": "x64", "arm64": "arm64"}[info.Arch]
+	switch info.OS {
+	case "windows":
+		if isHead && nvidia && arch == "x64" {
+			variant = "win-cuda-12.4-x64"
+			names = []string{"llama-" + tag + "-bin-win-cuda-12.4-x64.zip", "cudart-llama-bin-win-cuda-12.4-x64.zip"}
+		} else {
+			variant = "win-cpu-" + arch
+			names = []string{"llama-" + tag + "-bin-win-cpu-" + arch + ".zip"}
+		}
+	case "darwin":
+		variant = "macos-" + arch
+		names = []string{"llama-" + tag + "-bin-macos-" + arch + ".tar.gz"}
+	case "linux":
+		variant = "ubuntu-" + arch
+		names = []string{"llama-" + tag + "-bin-ubuntu-" + arch + ".tar.gz"}
+	}
+	if arch == "" || variant == "" {
+		return RuntimeSpec{}, fmt.Errorf("%s (%s/%s) is not supported yet", info.Name, info.OS, info.Arch)
+	}
+	spec := RuntimeSpec{Tag: tag, Variant: variant}
+	for _, n := range names {
+		a, ok := assets[n]
+		if !ok {
+			return RuntimeSpec{}, fmt.Errorf("the AI engine release has no file %s", n)
+		}
+		spec.Assets = append(spec.Assets, a)
+	}
+	return spec, nil
+}
+
+// ---------- planning ----------
+
+// offer is how much memory a computer lends, after its pedal and a safety reserve.
+func offer(info NodeInfo, held int64) (cpu, gpu int64, unified bool) {
+	reserve := int64(info.RAMTotal / 8)
+	if reserve < 1536<<20 {
+		reserve = 1536 << 20
+	}
+	avail := int64(info.RAMAvail) + held
+	if avail > int64(info.RAMTotal) {
+		avail = int64(info.RAMTotal)
+	}
+	usable := avail - reserve
+	if usable < 0 {
+		usable = 0
+	}
+	pedal := int64(info.Limits.Pedal)
+	cpu = usable * pedal / 100
+	if g := info.usableGPU(); g != nil {
+		if g.Unified {
+			return 0, cpu, true
+		}
+		v := int64(g.VRAMFree) - (500 << 20)
+		if v > 0 {
+			gpu = v * pedal / 100
+		}
+	}
+	return cpu, gpu, false
+}
+
+// planNodes lists the computers that may work right now, with what each offers.
+func (h *Host) planNodes() []PlanNode {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := time.Now()
+	loaded := h.cluster.Phase == "running"
+	var out []PlanNode
+	for id, n := range h.nodes {
+		n.Active = n.Online && n.Info.Limits.ActiveNow(now)
+		held := n.Held
+		if !loaded {
+			held = 0 // nothing is in memory yet while a model is still starting
+		}
+		cpu, gpu, uni := offer(n.Info, held)
+		n.Offer = cpu + gpu
+		if !n.Active {
+			n.Offer = 0
+			continue
+		}
+		out = append(out, PlanNode{ID: id, Name: n.Info.Name, CPUBytes: cpu, GPUBytes: gpu, Unified: uni, Cores: n.Info.Cores})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// ---------- starting and stopping a model ----------
+
+func (h *Host) step(text string) func(err error) {
+	h.mu.Lock()
+	h.cluster.Steps = append(h.cluster.Steps, Step{Text: text, State: "doing"})
+	i := len(h.cluster.Steps) - 1
+	h.mu.Unlock()
+	return func(err error) {
+		h.mu.Lock()
+		if i < len(h.cluster.Steps) {
+			if err != nil {
+				h.cluster.Steps[i].State = "failed"
+			} else {
+				h.cluster.Steps[i].State = "done"
+			}
+		}
+		h.mu.Unlock()
+	}
+}
+
+// Start plans and launches a model across the computers. It returns at once; progress is in
+// the cluster state.
+func (h *Host) Start(model ModelRef, ctxSize int) error {
+	h.mu.Lock()
+	if h.cluster.Phase == "starting" || h.cluster.Phase == "stopping" {
+		h.mu.Unlock()
+		return errors.New("busy: wait for the current start or stop to finish")
+	}
+	running := h.cluster.Phase == "running"
+	h.mu.Unlock()
+	if running {
+		h.Stop()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	h.mu.Lock()
+	h.cancel = cancel
+	h.cluster = ClusterState{Phase: "starting", Model: &model, Since: time.Now()}
+	h.mu.Unlock()
+	h.cfg.Update(func(c *Config) { c.LastModel = &model })
+	go func() {
+		err := h.start(ctx, model, ctxSize)
+		h.mu.Lock()
+		if err != nil {
+			h.cluster.Phase, h.cluster.Error = "error", err.Error()
+			for i := range h.cluster.Steps {
+				if h.cluster.Steps[i].State == "doing" {
+					h.cluster.Steps[i].State = "failed"
+				}
+			}
+		} else {
+			h.cluster.Phase = "running"
+		}
+		h.mu.Unlock()
+		if err != nil {
+			h.stopAll()
+		}
+	}()
+	return nil
+}
+
+func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int) error {
+	done := h.step("Reading the model's blueprint")
+	if err := resolveModel(ctx, &model); err != nil {
+		done(err)
+		return err
+	}
+	h.mu.Lock()
+	h.cluster.Model = &model // now with its title, size and checksum filled in
+	h.mu.Unlock()
+	h.cfg.Update(func(c *Config) { c.LastModel = &model })
+	info, err := fetchHeader(ctx, model.URL)
+	done(err)
+	if err != nil {
+		return fmt.Errorf("could not read the model: %w", err)
+	}
+
+	done = h.step("Working out which computer holds which part")
+	nodes := h.planNodes()
+	plan := planLayout(info, nodes, h.cfg.Get().HeadChoice)
+	h.mu.Lock()
+	h.cluster.Plan, h.cluster.Head = plan, plan.Head
+	h.mu.Unlock()
+	if !plan.Fits {
+		done(errors.New(plan.Reason))
+		return errors.New(plan.Reason)
+	}
+	done(nil)
+
+	// Everyone that takes part, head first.
+	type part struct {
+		id     string
+		isHead bool
+		dev    int // device index in the split, for helpers
+	}
+	parts := []part{{id: plan.Head, isHead: true, dev: -1}}
+	for i, w := range plan.WorkerOrder {
+		parts = append(parts, part{id: w, dev: i})
+	}
+	h.mu.Lock()
+	for id, n := range h.nodes {
+		n.Role, n.Held = "", 0
+		for _, s := range plan.Shares {
+			if s.ID == id && (s.CPULayers+s.GPULayers > 0 || s.Role == "head") {
+				n.Role, n.Held = s.Role, s.Bytes
+			}
+		}
+	}
+	h.mu.Unlock()
+
+	done = h.step("Installing the AI engine on each computer")
+	if err := parallelDo(parts, func(p part) error {
+		h.mu.Lock()
+		ni := h.nodes[p.id].Info
+		h.mu.Unlock()
+		spec, err := h.runtimeSpec(ni, p.isHead)
+		if err != nil {
+			return err
+		}
+		return h.call(p.id, "ensure_runtime", spec, nil, 2*time.Hour)
+	}); err != nil {
+		done(err)
+		return err
+	}
+	done(nil)
+
+	done = h.step("Downloading the model (each computer fetches its own share)")
+	split := parseSplit(plan.TensorSplit)
+	if err := parallelDo(parts, func(p part) error {
+		if p.isHead {
+			return h.call(p.id, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256}, nil, 24*time.Hour)
+		}
+		var res struct {
+			Port int `json:"port"`
+		}
+		if err := h.call(p.id, "start_rpc", nil, &res, time.Minute); err != nil {
+			return err
+		}
+		var items []SeedItem
+		for _, t := range info.Tensors {
+			layer := t.Layer
+			if layer < 0 {
+				if t.Name != "output.weight" {
+					continue
+				}
+				layer = info.Layers
+			}
+			if t.OK && t.Size > rpcHashThreshold && deviceOfLayer(layer, info.Layers, plan.NGL, split) == p.dev {
+				items = append(items, SeedItem{Off: t.Off, Size: t.Size})
+			}
+		}
+		if err := h.call(p.id, "seed", SeedReq{URL: model.URL, Items: items}, nil, 24*time.Hour); err != nil {
+			// Not fatal: the head can still push this share over the local network.
+			h.setProgress(p.id, ProgressNote{Msg: "Will receive its share from the head instead (" + err.Error() + ")"})
+		}
+		return nil
+	}); err != nil {
+		done(err)
+		return err
+	}
+	done(nil)
+	if ctx.Err() != nil {
+		return errors.New("stopped")
+	}
+
+	done = h.step("Loading the model across the computers")
+	req := StartHeadReq{File: model.File, Workers: plan.WorkerOrder, NGL: plan.NGL, Split: plan.TensorSplit, Ctx: ctxSize}
+	if err := h.call(plan.Head, "start_head", req, nil, time.Minute); err != nil {
+		done(err)
+		return err
+	}
+	deadline := time.Now().Add(3 * time.Hour)
+	for {
+		if ctx.Err() != nil {
+			return errors.New("stopped")
+		}
+		var st AgentStatus
+		if err := h.call(plan.Head, "status", nil, &st, 20*time.Second); err == nil {
+			if st.Ready {
+				break
+			}
+			if !st.Head {
+				err := errors.New("the AI engine stopped while loading: " + lastLogLine(st.HeadLog))
+				done(err)
+				return err
+			}
+		}
+		if time.Now().After(deadline) {
+			err := errors.New("loading took too long")
+			done(err)
+			return err
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(3 * time.Second):
+		}
+	}
+	done(nil)
+	for _, p := range parts {
+		msg := "Holding its part of the model"
+		if p.isHead {
+			msg = "Running the model"
+		}
+		h.setProgress(p.id, ProgressNote{Msg: msg})
+	}
+	return nil
+}
+
+var logNoise = regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+ \w `)
+
+func lastLogLine(log string) string {
+	lines := strings.Split(strings.TrimSpace(log), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := strings.TrimSpace(lines[i])
+		if l != "" && (strings.Contains(strings.ToLower(l), "error") || strings.Contains(l, " E ") || i == len(lines)-1) {
+			return logNoise.ReplaceAllString(l, "")
+		}
+	}
+	return "no details in the log"
+}
+
+// parallelDo runs fn for every item at once and returns the first error.
+func parallelDo[T any](items []T, fn func(T) error) error {
+	errs := make(chan error, len(items))
+	for _, it := range items {
+		go func(it T) { errs <- fn(it) }(it)
+	}
+	var first error
+	for range items {
+		if err := <-errs; err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+// Stop ends the running model everywhere.
+func (h *Host) Stop() {
+	h.mu.Lock()
+	if h.cancel != nil {
+		h.cancel()
+		h.cancel = nil
+	}
+	if h.cluster.Phase == "idle" {
+		h.mu.Unlock()
+		return
+	}
+	h.cluster.Phase = "stopping"
+	h.mu.Unlock()
+	h.stopAll()
+	h.mu.Lock()
+	h.cluster = ClusterState{Phase: "idle"}
+	h.mu.Unlock()
+}
+
+func (h *Host) stopAll() {
+	h.mu.Lock()
+	var ids []string
+	for id, n := range h.nodes {
+		if n.Online {
+			ids = append(ids, id)
+		}
+		n.Role, n.Held, n.Status, n.Done, n.Total = "", 0, "", 0, 0
+	}
+	h.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			_ = h.call(id, "stop", nil, nil, 30*time.Second)
+		}(id)
+	}
+	wg.Wait()
+}
+
+// Test sends one short question to the running model and records the speed.
+func (h *Host) Test() error {
+	h.mu.Lock()
+	if h.cluster.Phase != "running" {
+		h.mu.Unlock()
+		return errors.New("no model is running")
+	}
+	if h.cluster.Testing {
+		h.mu.Unlock()
+		return errors.New("a speed test is already running")
+	}
+	h.cluster.Testing = true
+	h.mu.Unlock()
+	go func() {
+		body := `{"messages":[{"role":"user","content":"In two sentences, what is distributed inference?"}],"max_tokens":96}`
+		c := http.Client{Timeout: 30 * time.Minute}
+		res, err := c.Post("http://127.0.0.1:"+strconv.Itoa(portChat)+"/v1/chat/completions", "application/json", strings.NewReader(body))
+		var out struct {
+			Choices []struct {
+				Message struct {
+					Content   string `json:"content"`
+					Reasoning string `json:"reasoning_content"`
+				} `json:"message"`
+			} `json:"choices"`
+			Timings struct {
+				Predicted float64 `json:"predicted_per_second"`
+				Prompt    float64 `json:"prompt_per_second"`
+			} `json:"timings"`
+		}
+		if err == nil {
+			err = json.NewDecoder(res.Body).Decode(&out)
+			res.Body.Close()
+		}
+		h.mu.Lock()
+		h.cluster.Testing = false
+		if err == nil {
+			h.cluster.TPS, h.cluster.PTPS = out.Timings.Predicted, out.Timings.Prompt
+			if len(out.Choices) > 0 {
+				h.cluster.Reply = strings.TrimSpace(out.Choices[0].Message.Content)
+				if h.cluster.Reply == "" {
+					h.cluster.Reply = strings.TrimSpace(out.Choices[0].Message.Reasoning)
+				}
+			}
+		} else {
+			h.cluster.Reply = "Speed test failed: " + err.Error()
+		}
+		h.mu.Unlock()
+	}()
+	return nil
+}

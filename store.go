@@ -1,0 +1,301 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+// ModelRef names one downloadable model file.
+type ModelRef struct {
+	Source string `json:"source"` // hf | url
+	Repo   string `json:"repo"`
+	File   string `json:"file"`
+	URL    string `json:"url"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+	Title  string `json:"title"`
+}
+
+// StoreFile is one quantisation of a model, with a verdict for this set of computers.
+type StoreFile struct {
+	File    string `json:"file"`
+	Quant   string `json:"quant"`
+	Size    int64  `json:"size"`
+	SHA256  string `json:"sha256"`
+	Parts   int    `json:"parts"`   // >1: split across several files (not supported yet)
+	Verdict string `json:"verdict"` // one | pool | no | split
+	Note    string `json:"note"`
+}
+
+// StoreModel is one entry in the model store.
+type StoreModel struct {
+	Source    string      `json:"source"` // hf | pirateface
+	Repo      string      `json:"repo"`
+	Downloads int64       `json:"downloads"`
+	Likes     int64       `json:"likes"`
+	Blurb     string      `json:"blurb,omitempty"`
+	SizeNote  string      `json:"sizeNote,omitempty"`
+	Seeds     int         `json:"seeds,omitempty"`
+	Magnet    string      `json:"magnet,omitempty"`
+	Files     []StoreFile `json:"files,omitempty"`
+}
+
+// featured is the starting shelf: popular open models from small to very large.
+var featured = []struct{ Repo, Blurb string }{
+	{"unsloth/gemma-4-12B-it-GGUF", "Small and quick. Runs on almost anything."},
+	{"unsloth/Qwen3.8-27B-GGUF", "Strong all-rounder."},
+	{"unsloth/gemma-4-26B-A4B-it-GGUF", "Fast for its size: only part of it runs per word."},
+	{"unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF", "Fast mixture-of-experts model, good first test."},
+	{"unsloth/Qwen3.6-35B-A3B-GGUF", "Good at tools and agent work."},
+	{"NousResearch/Hermes-4.3-36B-GGUF", "Large general model."},
+	{"unsloth/Qwen3.5-122B-A10B-GGUF", "Very large. Needs several computers pooled together."},
+}
+
+var (
+	treeCache   = map[string][]hfEntry{}
+	treeCacheMu sync.Mutex
+)
+
+type hfEntry struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+	LFS  *struct {
+		OID string `json:"oid"`
+	} `json:"lfs"`
+}
+
+func hfTree(repo string) ([]hfEntry, error) {
+	treeCacheMu.Lock()
+	if t, ok := treeCache[repo]; ok {
+		treeCacheMu.Unlock()
+		return t, nil
+	}
+	treeCacheMu.Unlock()
+	var t []hfEntry
+	if err := httpGetJSON("https://huggingface.co/api/models/"+repo+"/tree/main?recursive=true", &t); err != nil {
+		return nil, err
+	}
+	treeCacheMu.Lock()
+	treeCache[repo] = t
+	treeCacheMu.Unlock()
+	return t, nil
+}
+
+var (
+	splitRe = regexp.MustCompile(`-(\d{5})-of-(\d{5})\.gguf$`)
+	quantRe = regexp.MustCompile(`(?i)[-.]((?:UD-)?(?:IQ\d[_A-Z0-9]*|Q\d[_A-Z0-9]*|BF16|F16|F32|MXFP4[_A-Z0-9]*))\.gguf$`)
+)
+
+// hfFiles lists the model files of a Hugging Face repository, smallest first.
+func hfFiles(repo string) ([]StoreFile, error) {
+	tree, err := hfTree(repo)
+	if err != nil {
+		return nil, err
+	}
+	byKey := map[string]*StoreFile{}
+	var order []string
+	for _, e := range tree {
+		low := strings.ToLower(e.Path)
+		base := low[strings.LastIndex(low, "/")+1:]
+		if !strings.HasSuffix(low, ".gguf") || strings.Contains(low, "mmproj") || strings.Contains(low, "imatrix") || strings.HasPrefix(base, "mtp-") {
+			continue // helper files (vision projector, calibration data, speculative head), not the model itself
+		}
+		key, parts := e.Path, 1
+		if m := splitRe.FindStringSubmatch(e.Path); m != nil {
+			key = splitRe.ReplaceAllString(e.Path, ".gguf")
+			parts, _ = strconv.Atoi(m[2])
+		}
+		f := byKey[key]
+		if f == nil {
+			f = &StoreFile{File: e.Path, Parts: parts}
+			if m := quantRe.FindStringSubmatch(key); m != nil {
+				f.Quant = strings.ToUpper(m[1])
+			} else {
+				f.Quant = strings.TrimSuffix(key[strings.LastIndex(key, "/")+1:], ".gguf")
+			}
+			if e.LFS != nil {
+				f.SHA256 = e.LFS.OID
+			}
+			byKey[key] = f
+			order = append(order, key)
+		}
+		f.Size += e.Size
+	}
+	var out []StoreFile
+	for _, k := range order {
+		out = append(out, *byKey[k])
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Size < out[j].Size })
+	// Drop stray small files that sit beside the real model (anything under a tenth of the biggest).
+	if n := len(out); n > 1 {
+		kept := out[:0]
+		for _, f := range out {
+			if f.Size*10 >= out[n-1].Size || f.Size > 2<<30 {
+				kept = append(kept, f)
+			}
+		}
+		out = kept
+	}
+	return out, nil
+}
+
+// judge marks every file with what this set of computers can do with it.
+func (h *Host) judge(files []StoreFile) {
+	nodes := h.planNodes()
+	var sum, biggest int64
+	for _, n := range nodes {
+		c := n.CPUBytes + n.GPUBytes
+		if n.Unified {
+			c = n.GPUBytes
+		}
+		sum += c
+		if c > biggest {
+			biggest = c
+		}
+	}
+	for i := range files {
+		f := &files[i]
+		need := f.Size + f.Size/25 + perDeviceOverhead // a little room for working memory
+		switch {
+		case f.Parts > 1:
+			f.Verdict, f.Note = "split", "Comes in several pieces. Not supported yet."
+		case need <= biggest:
+			f.Verdict, f.Note = "one", "Fits on one of your computers."
+		case need+int64(len(nodes))*perDeviceOverhead <= sum:
+			f.Verdict, f.Note = "pool", "Too big for any one computer. Runs across your computers together."
+		default:
+			f.Verdict, f.Note = "no", fmt.Sprintf("Needs about %s more memory than your computers offer.", humanBytes(need-sum))
+		}
+	}
+}
+
+// storeSearch looks for models on Hugging Face or PirateFace.
+func (h *Host) storeSearch(source, q string) ([]StoreModel, error) {
+	q = strings.TrimSpace(q)
+	if source == "pirateface" {
+		return pirateSearch(q)
+	}
+	if q == "" {
+		out := make([]StoreModel, len(featured))
+		var wg sync.WaitGroup
+		for i, f := range featured {
+			out[i] = StoreModel{Source: "hf", Repo: f.Repo, Blurb: f.Blurb}
+			wg.Add(1)
+			go func(i int, repo string) {
+				defer wg.Done()
+				if files, err := hfFiles(repo); err == nil {
+					h.judge(files)
+					out[i].Files = files
+				}
+			}(i, f.Repo)
+		}
+		wg.Wait()
+		return out, nil
+	}
+	var res []struct {
+		ID        string `json:"id"`
+		Downloads int64  `json:"downloads"`
+		Likes     int64  `json:"likes"`
+	}
+	u := "https://huggingface.co/api/models?filter=gguf&sort=downloads&direction=-1&limit=24&search=" + url.QueryEscape(q)
+	if err := httpGetJSON(u, &res); err != nil {
+		return nil, fmt.Errorf("could not reach Hugging Face: %w", err)
+	}
+	out := make([]StoreModel, 0, len(res))
+	for _, r := range res {
+		out = append(out, StoreModel{Source: "hf", Repo: r.ID, Downloads: r.Downloads, Likes: r.Likes})
+	}
+	return out, nil
+}
+
+var pirateLine = regexp.MustCompile(`^(\S+/\S+)\s+([\d.]+\s*[KMGT]B)\s+(\d+)\s+seeds?\s+(magnet:\S+)`)
+
+// pirateSearch reads PirateFace's plain-text search. PirateFace is an index of community
+// torrents of Hugging Face models; nothing from its site is executed, only the listing is read.
+func pirateSearch(q string) ([]StoreModel, error) {
+	if q == "" {
+		q = "gguf"
+	}
+	req, _ := http.NewRequest("GET", "https://pirateface.co/s/"+url.PathEscape(q), nil)
+	req.Header.Set("User-Agent", userAgent)
+	res, err := apiClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("could not reach PirateFace: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return nil, fmt.Errorf("PirateFace answered %s", res.Status)
+	}
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	var out []StoreModel
+	for _, line := range strings.Split(string(body), "\n") {
+		m := pirateLine.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			continue
+		}
+		seeds, _ := strconv.Atoi(m[3])
+		out = append(out, StoreModel{Source: "pirateface", Repo: m[1], SizeNote: m[2], Seeds: seeds, Magnet: m[4]})
+		if len(out) >= 40 {
+			break
+		}
+	}
+	return out, nil
+}
+
+// resolveModel fills in the download address, size and checksum.
+func resolveModel(ctx context.Context, m *ModelRef) error {
+	if m.URL == "" && m.Repo != "" {
+		if m.File == "" {
+			return errors.New("pick a model file first")
+		}
+		m.Source = "hf"
+		m.URL = "https://huggingface.co/" + m.Repo + "/resolve/main/" + (&url.URL{Path: m.File}).EscapedPath()
+		if tree, err := hfTree(m.Repo); err == nil {
+			for _, e := range tree {
+				if e.Path == m.File {
+					m.Size = e.Size
+					if e.LFS != nil {
+						m.SHA256 = e.LFS.OID
+					}
+				}
+			}
+		}
+	}
+	if m.URL == "" {
+		return errors.New("no download address for this model")
+	}
+	if u, err := url.Parse(m.URL); err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+		return errors.New("the model address must start with https://")
+	}
+	if m.File == "" {
+		u, _ := url.Parse(m.URL)
+		m.File = u.Path[strings.LastIndex(u.Path, "/")+1:]
+	}
+	if !strings.HasSuffix(strings.ToLower(m.File), ".gguf") {
+		return errors.New("only .gguf model files are supported")
+	}
+	if m.Size == 0 {
+		c, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		size, err := remoteSize(c, m.URL)
+		if err != nil {
+			return fmt.Errorf("could not reach the model file: %w", err)
+		}
+		m.Size = size
+	}
+	if m.Title == "" {
+		m.Title = strings.TrimSuffix(m.File[strings.LastIndex(m.File, "/")+1:], ".gguf")
+	}
+	m.File = m.File[strings.LastIndex(m.File, "/")+1:]
+	return nil
+}

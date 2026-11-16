@@ -1,0 +1,6 @@
+/dist/
+/potluck
+/potluck.exe
+potluck-data/
+*.log
+.DS_Store
