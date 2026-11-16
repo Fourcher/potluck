@@ -40,6 +40,7 @@ type Node struct {
 	Held     int64     `json:"held"` // bytes of the running model on this computer
 	Offer    int64     `json:"offer"`
 	Active   bool      `json:"active"` // allowed to work right now (switch + schedule)
+	NoGPU    bool      `json:"noGPU"`  // its engine found no graphics card it can use after all
 	LastSeen time.Time `json:"lastSeen"`
 	peer     *Peer
 }
@@ -622,19 +623,25 @@ func (h *Host) engineAssets(tag string) (map[string]Asset, error) {
 	return m, nil
 }
 
-// usesCUDA says whether a computer gets the NVIDIA build of the engine: Windows PCs with a
-// working NVIDIA card. As the head it then uses the card directly; as a helper it offers the
-// card and its memory as two pools.
-func usesCUDA(info NodeInfo) bool {
-	if info.OS != "windows" || info.Arch != "amd64" {
-		return false
+// gpuBackend says which engine build drives a computer's graphics card: "cuda" (NVIDIA on
+// Windows), "vulkan" (AMD and Intel cards, and NVIDIA on Linux), "metal" (Apple Silicon) or ""
+// for none. POTLUCK_FORCE_VULKAN=1 on the main computer swaps cuda for vulkan, for testing.
+func gpuBackend(info NodeInfo) string {
+	g := info.usableGPU()
+	if g == nil {
+		return ""
 	}
-	for _, g := range info.GPUs {
-		if g.Vendor == "nvidia" && g.Usable {
-			return true
-		}
+	if g.Backend == "cuda" && os.Getenv("POTLUCK_FORCE_VULKAN") == "1" {
+		return "vulkan"
 	}
-	return false
+	return g.Backend
+}
+
+// twoDev says whether a computer, as a helper, offers its graphics card and its memory as
+// two separate pools.
+func twoDev(info NodeInfo) bool {
+	b := gpuBackend(info)
+	return b == "cuda" || b == "vulkan"
 }
 
 // runtimeSpec picks the engine build for a computer.
@@ -649,10 +656,14 @@ func (h *Host) runtimeSpec(info NodeInfo, isHead bool) (RuntimeSpec, error) {
 	arch := map[string]string{"amd64": "x64", "arm64": "arm64"}[info.Arch]
 	switch info.OS {
 	case "windows":
-		if usesCUDA(info) {
+		switch backend := gpuBackend(info); {
+		case backend == "cuda" && arch == "x64":
 			variant = "win-cuda-12.4-x64"
 			names = []string{"llama-" + tag + "-bin-win-cuda-12.4-x64.zip", "cudart-llama-bin-win-cuda-12.4-x64.zip"}
-		} else {
+		case backend == "vulkan" && arch == "x64":
+			variant = "win-vulkan-x64"
+			names = []string{"llama-" + tag + "-bin-win-vulkan-x64.zip"}
+		default:
 			variant = "win-cpu-" + arch
 			names = []string{"llama-" + tag + "-bin-win-cpu-" + arch + ".zip"}
 		}
@@ -661,7 +672,10 @@ func (h *Host) runtimeSpec(info NodeInfo, isHead bool) (RuntimeSpec, error) {
 		names = []string{"llama-" + tag + "-bin-macos-" + arch + ".tar.gz"}
 	case "linux":
 		variant = "ubuntu-" + arch
-		names = []string{"llama-" + tag + "-bin-ubuntu-" + arch + ".tar.gz"}
+		if gpuBackend(info) == "vulkan" && arch == "x64" {
+			variant = "ubuntu-vulkan-x64"
+		}
+		names = []string{"llama-" + tag + "-bin-" + variant + ".tar.gz"}
 	}
 	if arch == "" || variant == "" {
 		return RuntimeSpec{}, fmt.Errorf("%s (%s/%s) is not supported yet", info.Name, info.OS, info.Arch)
@@ -726,19 +740,52 @@ func (h *Host) planNodes() []PlanNode {
 			n.Offer = 0
 			continue
 		}
-		out = append(out, PlanNode{ID: id, Name: n.Info.Name, CPUBytes: cpu, GPUBytes: gpu, Unified: uni, Cores: n.Info.Cores,
-			TwoDev: usesCUDA(n.Info), HasGPU: n.Info.usableGPU() != nil, RAMTotal: int64(n.Info.RAMTotal)})
+		pn := PlanNode{ID: id, Name: n.Info.Name, CPUBytes: cpu, GPUBytes: gpu, Unified: uni, Cores: n.Info.Cores,
+			TwoDev: twoDev(n.Info), HasGPU: n.Info.usableGPU() != nil, RAMTotal: int64(n.Info.RAMTotal)}
+		if n.NoGPU && !uni {
+			pn.GPUBytes, pn.TwoDev, pn.HasGPU = 0, false, false
+		}
+		out = append(out, pn)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
+// modelInfo reads a model's blueprint: from its download address, or from the computer that
+// already has the file.
+func (h *Host) modelInfo(ctx context.Context, m *ModelRef) (*ModelInfo, error) {
+	if m.Source != "local" {
+		return fetchModelHeaders(ctx, m)
+	}
+	var info ModelInfo
+	if err := h.call(m.Node, "read_header", map[string]string{"file": m.File}, &info, 2*time.Minute); err != nil {
+		return nil, err
+	}
+	m.Size = info.FileSize
+	return &info, nil
+}
+
 // plan lays a model out: pooled across the computers, or on one computer alone (solo) with
 // its disk standing in for the memory it lacks.
-func (h *Host) plan(info *ModelInfo, solo string) *Plan {
+func (h *Host) plan(info *ModelInfo, solo string) *Plan { return h.planFor(info, solo, "") }
+
+// planFor is plan with the head fixed: a model file that is already on a computer has to
+// run from that computer.
+func (h *Host) planFor(info *ModelInfo, solo, head string) *Plan {
 	nodes := h.planNodes()
 	if solo == "" {
-		return planLayout(info, nodes, h.cfg.Get().HeadChoice)
+		if head == "" {
+			head = h.cfg.Get().HeadChoice
+		} else {
+			found := false
+			for _, n := range nodes {
+				found = found || n.ID == head
+			}
+			if !found {
+				return &Plan{Reason: "The computer that holds this model file is not available right now."}
+			}
+		}
+		return planLayout(info, nodes, head)
 	}
 	for _, n := range nodes {
 		if n.ID == solo {
@@ -748,10 +795,14 @@ func (h *Host) plan(info *ModelInfo, solo string) *Plan {
 	return &Plan{Reason: "That computer is not available right now."}
 }
 
-// bestSolo finds the computer that could run a model alone with the least help from its disk.
-func (h *Host) bestSolo(info *ModelInfo) *Plan {
+// bestSolo finds the computer that could run a model alone with the least help from its
+// disk. only, when set, limits the search to that computer.
+func (h *Host) bestSolo(info *ModelInfo, only string) *Plan {
 	var best *Plan
 	for _, n := range h.planNodes() {
+		if only != "" && n.ID != only {
+			continue
+		}
 		if p := planSolo(info, n); p.Fits && (best == nil || p.Overflow < best.Overflow) {
 			best = p
 		}
@@ -821,6 +872,7 @@ func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 }
 
 func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo string) error {
+	local := model.Source == "local"
 	done := h.step("Reading the model's blueprint")
 	if err := resolveModel(ctx, &model); err != nil {
 		done(err)
@@ -830,91 +882,128 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 	h.cluster.Model = &model // now with its title, size and checksum filled in
 	h.mu.Unlock()
 	h.cfg.Update(func(c *Config) { c.LastModel = &model })
-	info, err := fetchHeader(ctx, model.URL)
+	info, err := h.modelInfo(ctx, &model)
 	done(err)
 	if err != nil {
 		return fmt.Errorf("could not read the model: %w", err)
 	}
-
 	h.mu.Lock()
 	h.lastInfo = info
 	h.mu.Unlock()
 
-	done = h.step("Working out which computer holds which part")
-	plan := h.plan(info, solo)
-	h.mu.Lock()
-	h.cluster.Plan, h.cluster.Head = plan, plan.Head
-	h.mu.Unlock()
-	if !plan.Fits {
-		done(errors.New(plan.Reason))
-		return errors.New(plan.Reason)
-	}
-	done(nil)
-
-	// Everyone that takes part, head first.
 	type part struct {
 		id     string
 		isHead bool
 	}
-	parts := []part{{id: plan.Head, isHead: true}}
-	for _, w := range plan.WorkerOrder {
-		parts = append(parts, part{id: w})
-	}
-	h.mu.Lock()
-	for id, n := range h.nodes {
-		n.Role, n.Held = "", 0
-		for _, s := range plan.Shares {
-			if s.ID == id && (s.CPULayers+s.GPULayers > 0 || s.Role == "head") {
-				n.Role, n.Held = s.Role, s.Bytes
+	var plan *Plan
+	var parts []part
+	// Plan, install the engine, and check what each engine can really use. If a computer's
+	// graphics card turns out not to be usable, plan once more without it.
+	for attempt := 0; ; attempt++ {
+		done = h.step("Working out which computer holds which part")
+		plan = h.planFor(info, solo, model.Node)
+		h.mu.Lock()
+		h.cluster.Plan, h.cluster.Head = plan, plan.Head
+		h.mu.Unlock()
+		if !plan.Fits {
+			done(errors.New(plan.Reason))
+			return errors.New(plan.Reason)
+		}
+		done(nil)
+
+		// Everyone that takes part, head first.
+		parts = []part{{id: plan.Head, isHead: true}}
+		for _, w := range plan.WorkerOrder {
+			parts = append(parts, part{id: w})
+		}
+		helper := map[string]bool{}
+		for _, w := range plan.WorkerOrder {
+			helper[w] = true
+		}
+		h.mu.Lock()
+		var idle []string
+		for id, n := range h.nodes {
+			n.Role, n.Held = "", 0
+			for _, s := range plan.Shares {
+				if s.ID == id && (s.CPULayers+s.GPULayers > 0 || s.Role == "head") {
+					n.Role, n.Held = s.Role, s.Bytes
+				}
+			}
+			if n.Online && !helper[id] {
+				idle = append(idle, id)
 			}
 		}
-	}
-	h.mu.Unlock()
-
-	// Computers that are not helpers this time do not need a share from an earlier model.
-	helper := map[string]bool{}
-	for _, w := range plan.WorkerOrder {
-		helper[w] = true
-	}
-	h.mu.Lock()
-	var idle []string
-	for id, n := range h.nodes {
-		if n.Online && !helper[id] {
-			idle = append(idle, id)
-		}
-	}
-	h.mu.Unlock()
-	for _, id := range idle {
-		go func(id string) { _ = h.call(id, "prune_cache", nil, nil, 30*time.Second) }(id)
-	}
-
-	done = h.step("Installing the AI engine on each computer")
-	if err := parallelDo(parts, func(p part) error {
-		h.mu.Lock()
-		ni := h.nodes[p.id].Info
 		h.mu.Unlock()
-		spec, err := h.runtimeSpec(ni, p.isHead)
-		if err != nil {
+		// Computers that are not helpers this time do not need a share from an earlier model.
+		for _, id := range idle {
+			go func(id string) { _ = h.call(id, "prune_cache", nil, nil, 30*time.Second) }(id)
+		}
+
+		done = h.step("Installing the AI engine on each computer")
+		var replan sync.Map
+		if err := parallelDo(parts, func(p part) error {
+			h.mu.Lock()
+			ni, noGPU := h.nodes[p.id].Info, h.nodes[p.id].NoGPU
+			h.mu.Unlock()
+			if noGPU {
+				for i := range ni.GPUs {
+					ni.GPUs[i].Usable = false // install the plain build
+				}
+			}
+			spec, err := h.runtimeSpec(ni, p.isHead)
+			if err != nil {
+				return err
+			}
+			var res struct {
+				GPUDevice string `json:"gpuDevice"`
+			}
+			if err := h.call(p.id, "ensure_runtime", spec, &res, 2*time.Hour); err != nil {
+				return err
+			}
+			if twoDev(ni) && res.GPUDevice == "" {
+				replan.Store(p.id, true) // the engine found no card it can use
+			}
+			return nil
+		}); err != nil {
+			done(err)
 			return err
 		}
-		return h.call(p.id, "ensure_runtime", spec, nil, 2*time.Hour)
-	}); err != nil {
-		done(err)
-		return err
+		done(nil)
+		changed := false
+		replan.Range(func(k, _ any) bool {
+			h.mu.Lock()
+			if n := h.nodes[k.(string)]; n != nil && !n.NoGPU {
+				n.NoGPU, changed = true, true
+			}
+			h.mu.Unlock()
+			return true
+		})
+		if !changed || attempt >= 2 {
+			break
+		}
 	}
-	done(nil)
 
-	done = h.step("Downloading the model (each computer fetches its own share)")
+	text := "Downloading the model (each computer fetches its own share)"
+	if local {
+		text = "Getting the helpers ready (the head sends them their share)"
+	}
+	done = h.step(text)
 	split := parseSplit(plan.TensorSplit)
 	if err := parallelDo(parts, func(p part) error {
 		if p.isHead {
-			return h.call(p.id, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256}, nil, 24*time.Hour)
+			if local {
+				return nil // the file is already there
+			}
+			return h.call(p.id, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts}, nil, 24*time.Hour)
 		}
 		var res struct {
 			Port int `json:"port"`
 		}
 		if err := h.call(p.id, "start_rpc", nil, &res, time.Minute); err != nil {
 			return err
+		}
+		if local {
+			return nil // nothing to download from: the head pushes this share over the network
 		}
 		var items []SeedItem
 		for _, t := range info.Tensors {
@@ -929,7 +1018,11 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 				continue
 			}
 			if dev := deviceOfLayer(layer, info.Layers, plan.NGL, split); dev >= 0 && dev < len(plan.DevOwner) && plan.DevOwner[dev] == p.id {
-				items = append(items, SeedItem{Off: t.Off, Size: t.Size})
+				it := SeedItem{Off: t.Off, Size: t.Size}
+				if t.Part < len(model.Parts) {
+					it.URL = model.Parts[t.Part].URL
+				}
+				items = append(items, it)
 			}
 		}
 		if err := h.call(p.id, "seed", SeedReq{URL: model.URL, Items: items}, nil, 24*time.Hour); err != nil {
@@ -947,7 +1040,16 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 	}
 
 	done = h.step("Loading the model across the computers")
-	req := StartHeadReq{File: model.File, Workers: plan.WorkerOrder, NGL: plan.NGL, Split: plan.TensorSplit, Ctx: ctxSize}
+	// Devices the helpers offer, in order; the head's own card (if any) is the last entry
+	// of the plan's device list and is not one of them.
+	rpcDevs, helperLayers := 0, 0
+	for i, owner := range plan.DevOwner {
+		if owner != plan.Head {
+			rpcDevs++
+			helperLayers += plan.DevLayers[i]
+		}
+	}
+	req := StartHeadReq{File: model.File, Workers: plan.WorkerOrder, NGL: plan.NGL, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs}
 	if err := h.call(plan.Head, "start_head", req, nil, time.Minute); err != nil {
 		done(err)
 		return err
@@ -960,6 +1062,13 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		var st AgentStatus
 		if err := h.call(plan.Head, "status", nil, &st, 20*time.Second); err == nil {
 			if st.Ready {
+				// Trust, but verify: the engine's own report must show the helpers holding
+				// something when the plan gave them layers.
+				if helperLayers > 0 && st.HeadLog != "" && !engineUsedHelpers(st.FullLog) {
+					err := errors.New("the AI engine loaded the model without the helpers, which does not match the plan. Please report this; the technical details below show what it did")
+					done(err)
+					return err
+				}
 				break
 			}
 			if !st.Head {
@@ -987,6 +1096,19 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		h.setProgress(p.id, ProgressNote{Msg: msg})
 	}
 	return nil
+}
+
+var rpcBuffer = regexp.MustCompile(`RPC\d+\[[^\]]*\] model buffer size =\s+([\d.]+) MiB`)
+
+// engineUsedHelpers reads the engine's load report and says whether any helper device holds
+// part of the model.
+func engineUsedHelpers(log string) bool {
+	for _, m := range rpcBuffer.FindAllStringSubmatch(log, -1) {
+		if v, err := strconv.ParseFloat(m[1], 64); err == nil && v > 1 {
+			return true
+		}
+	}
+	return !strings.Contains(log, "model buffer size") // no report at all: cannot tell, do not block
 }
 
 var logNoise = regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+ \w `)

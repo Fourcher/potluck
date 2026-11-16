@@ -20,6 +20,7 @@ type GPU struct {
 	VRAMFree  uint64 `json:"vramFree"`
 	Unified   bool   `json:"unified"` // shares system RAM (Apple Silicon)
 	Usable    bool   `json:"usable"`
+	Backend   string `json:"backend"` // which engine build drives it: cuda | vulkan | metal
 }
 
 // Limits is how hard a computer is allowed to work: the "pedal".
@@ -153,7 +154,8 @@ func staticInfo(dataDir string) NodeInfo {
 			}
 		}
 		n.Musl = len(musl) > 0 && !glibc
-		if out := run(4*time.Second, "lspci"); out != "" {
+		n.GPUs = append(n.GPUs, linuxAMDGPUs(n.Musl)...)
+		if out := run(4*time.Second, "lspci"); out != "" && len(n.GPUs) == 0 {
 			re := regexp.MustCompile(`(?i)(VGA compatible controller|3D controller|Display controller): (.+)`)
 			for _, m := range re.FindAllStringSubmatch(out, -1) {
 				n.GPUs = append(n.GPUs, GPU{Name: strings.TrimSpace(regexp.MustCompile(` \(rev .+\)$`).ReplaceAllString(m[2], "")), Vendor: vendorOf(m[2])})
@@ -169,7 +171,7 @@ func staticInfo(dataDir string) NodeInfo {
 			n.RAMTotal = m
 		}
 		if runtime.GOARCH == "arm64" {
-			n.GPUs = []GPU{{Name: "Apple GPU (Metal)", Vendor: "apple", Unified: true, Usable: true, VRAMTotal: n.RAMTotal}}
+			n.GPUs = []GPU{{Name: "Apple GPU (Metal)", Vendor: "apple", Unified: true, Usable: true, Backend: "metal", VRAMTotal: n.RAMTotal}}
 		} else {
 			out := run(8*time.Second, "system_profiler", "SPDisplaysDataType")
 			for _, m := range regexp.MustCompile(`Chipset Model: (.+)`).FindAllStringSubmatch(out, -1) {
@@ -177,14 +179,21 @@ func staticInfo(dataDir string) NodeInfo {
 			}
 		}
 	case "windows":
+		// Video memory comes from the display adapters' registry entries: the usual WMI field
+		// stops at 4 GB.
 		ps := `$os=Get-CimInstance Win32_OperatingSystem;$cpu=Get-CimInstance Win32_Processor|Select-Object -First 1;` +
 			`$g=@(Get-CimInstance Win32_VideoController|ForEach-Object{$_.Name});` +
-			`@{os=$os.Caption;cpu=$cpu.Name;cores=[int](Get-CimInstance Win32_Processor|Measure-Object NumberOfCores -Sum).Sum;gpus=$g}|ConvertTo-Json -Compress`
+			`$v=@(Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0*' -ErrorAction SilentlyContinue|Where-Object{$_.DriverDesc}|ForEach-Object{@{name=[string]$_.DriverDesc;mem=[string]$_.'HardwareInformation.qwMemorySize'}});` +
+			`@{os=$os.Caption;cpu=$cpu.Name;cores=[int](Get-CimInstance Win32_Processor|Measure-Object NumberOfCores -Sum).Sum;gpus=$g;vram=$v}|ConvertTo-Json -Compress -Depth 4`
 		var w struct {
 			OS    string   `json:"os"`
 			CPU   string   `json:"cpu"`
 			Cores int      `json:"cores"`
 			GPUs  []string `json:"gpus"`
+			VRAM  []struct {
+				Name string `json:"name"`
+				Mem  string `json:"mem"`
+			} `json:"vram"`
 		}
 		_ = json.Unmarshal([]byte(run(20*time.Second, "powershell", "-NoProfile", "-NonInteractive", "-Command", ps)), &w)
 		n.OSName, n.CPU = strings.TrimSpace(strings.TrimPrefix(w.OS, "Microsoft ")), strings.TrimSpace(w.CPU)
@@ -193,7 +202,18 @@ func staticInfo(dataDir string) NodeInfo {
 		}
 		for _, g := range w.GPUs {
 			if !regexp.MustCompile(`(?i)virtual|remote|basic|meta `).MatchString(g) {
-				n.GPUs = append(n.GPUs, GPU{Name: g, Vendor: vendorOf(g)})
+				gpu := GPU{Name: g, Vendor: vendorOf(g)}
+				for _, v := range w.VRAM {
+					if mem, err := strconv.ParseUint(v.Mem, 10, 64); err == nil && v.Name == g {
+						gpu.VRAMTotal = mem
+					}
+				}
+				// AMD and Intel cards with real video memory of their own run through Vulkan.
+				// Graphics built into the processor share the computer's RAM, so they add nothing.
+				if (gpu.Vendor == "amd" || gpu.Vendor == "intel") && gpu.VRAMTotal >= 3<<30 && runtime.GOARCH == "amd64" {
+					gpu.Usable, gpu.Backend, gpu.VRAMFree = true, "vulkan", gpu.VRAMTotal-(gpu.VRAMTotal/10)
+				}
+				n.GPUs = append(n.GPUs, gpu)
 			}
 		}
 		if n.OSName == "" {
@@ -214,6 +234,38 @@ func staticInfo(dataDir string) NodeInfo {
 	}
 	n.refresh(dataDir)
 	return n
+}
+
+// vulkanReady says whether this Linux can run the Vulkan build of the engine.
+func vulkanReady(musl bool) bool {
+	if runtime.GOOS != "linux" || musl || runtime.GOARCH != "amd64" {
+		return false
+	}
+	for _, pat := range []string{"/usr/lib/x86_64-linux-gnu/libvulkan.so.1", "/usr/lib64/libvulkan.so.1", "/usr/lib/libvulkan.so.1"} {
+		if _, err := os.Stat(pat); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// linuxAMDGPUs reads AMD cards' video memory from the kernel driver.
+func linuxAMDGPUs(musl bool) []GPU {
+	var out []GPU
+	cards, _ := filepath.Glob("/sys/class/drm/card[0-9]/device")
+	for _, c := range cards {
+		if strings.TrimSpace(readFile(filepath.Join(c, "vendor"))) != "0x1002" {
+			continue
+		}
+		total, _ := strconv.ParseUint(strings.TrimSpace(readFile(filepath.Join(c, "mem_info_vram_total"))), 10, 64)
+		used, _ := strconv.ParseUint(strings.TrimSpace(readFile(filepath.Join(c, "mem_info_vram_used"))), 10, 64)
+		g := GPU{Name: "AMD Radeon graphics card", Vendor: "amd", VRAMTotal: total}
+		if total >= 3<<30 && vulkanReady(musl) {
+			g.Usable, g.Backend, g.VRAMFree = true, "vulkan", total-used
+		}
+		out = append(out, g)
+	}
+	return out
 }
 
 func vendorOf(name string) string {
@@ -247,8 +299,14 @@ func nvidiaGPUs() []GPU {
 		if e1 != nil || e2 != nil {
 			continue
 		}
-		gpus = append(gpus, GPU{Name: "NVIDIA " + strings.TrimPrefix(strings.TrimSpace(f[0]), "NVIDIA "), Vendor: "nvidia", VRAMTotal: total << 20, VRAMFree: free << 20,
-			Usable: runtime.GOOS == "windows"}) // on Linux the plain CPU engine is installed for now
+		g := GPU{Name: "NVIDIA " + strings.TrimPrefix(strings.TrimSpace(f[0]), "NVIDIA "), Vendor: "nvidia", VRAMTotal: total << 20, VRAMFree: free << 20}
+		switch {
+		case runtime.GOOS == "windows" && runtime.GOARCH == "amd64":
+			g.Usable, g.Backend = true, "cuda"
+		case vulkanReady(len(muslLoaders()) > 0):
+			g.Usable, g.Backend = true, "vulkan" // on Linux the Vulkan build needs nothing beyond the driver
+		}
+		gpus = append(gpus, g)
 	}
 	return gpus
 }
@@ -314,6 +372,15 @@ func (n *NodeInfo) refresh(dataDir string) {
 			n.GPUs = append(nv, keep...)
 		}
 	}
+	if runtime.GOOS == "linux" {
+		for _, fresh := range linuxAMDGPUs(n.Musl) {
+			for i := range n.GPUs {
+				if n.GPUs[i].Vendor == "amd" && n.GPUs[i].VRAMTotal == fresh.VRAMTotal {
+					n.GPUs[i].VRAMFree = fresh.VRAMFree
+				}
+			}
+		}
+	}
 	for i := range n.GPUs {
 		if n.GPUs[i].Unified {
 			n.GPUs[i].VRAMTotal, n.GPUs[i].VRAMFree = n.RAMTotal, n.RAMAvail
@@ -330,4 +397,18 @@ func (n *NodeInfo) usableGPU() *GPU {
 		}
 	}
 	return nil
+}
+
+func muslLoaders() []string {
+	m, _ := filepath.Glob("/lib/ld-musl-*")
+	glibc := false
+	for _, p := range []string{"/lib64/ld-linux-x86-64.so.2", "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2", "/lib/ld-linux-aarch64.so.1", "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"} {
+		if _, err := os.Stat(p); err == nil {
+			glibc = true
+		}
+	}
+	if glibc {
+		return nil
+	}
+	return m
 }

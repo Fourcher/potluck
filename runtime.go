@@ -16,7 +16,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -443,6 +445,70 @@ func (p *proc) Stop() {
 	}
 }
 
+// engineCmd prepares one of the engine's programs to run on this computer.
+func (a *Agent) engineCmd(bin string, args ...string) *exec.Cmd {
+	binDir := filepath.Dir(bin)
+	var cmd *exec.Cmd
+	if ld := glibcLoader(filepath.Join(a.dir, "runtime", "glibc")); ld != "" && a.info.Musl {
+		full := append([]string{"--library-path", filepath.Dir(ld) + ":" + binDir, bin}, args...)
+		cmd = exec.Command(ld, full...)
+	} else {
+		cmd = exec.Command(bin, args...)
+	}
+	cmd.Dir = binDir // engine backends are looked up next to the program and in the current folder
+	cmd.Env = append(os.Environ(), "LLAMA_CACHE="+filepath.Join(a.dir, "cache"), "HF_HUB_CACHE="+filepath.Join(a.dir, "cache", "hub"))
+	if runtime.GOOS == "linux" && !a.info.Musl {
+		cmd.Env = append(cmd.Env, "LD_LIBRARY_PATH="+binDir)
+	}
+	hideWindow(cmd)
+	return cmd
+}
+
+var deviceLine = regexp.MustCompile(`(?m)^\s+([A-Za-z]+\d+): (.+) \((\d+) MiB, (\d+) MiB free\)`)
+
+// gpuDeviceName asks the installed engine which graphics device it can use and returns the
+// name the engine gives it ("CUDA0", "Vulkan1", ...). Empty means: no usable card, run on the
+// processor. With several candidates it picks the one that matches the card found in the
+// hardware inventory, so graphics built into the processor are passed over.
+func (a *Agent) gpuDeviceName(rt string) string {
+	base := filepath.Base(rt)
+	if !strings.Contains(base, "cuda") && !strings.Contains(base, "vulkan") {
+		return ""
+	}
+	want := a.info.usableGPU()
+	if want == nil {
+		return ""
+	}
+	cmd := a.engineCmd(findBin(rt, "llama-server"), "--list-devices")
+	done := make(chan []byte, 1)
+	go func() { out, _ := cmd.CombinedOutput(); done <- out }()
+	var out []byte
+	select {
+	case out = <-done:
+	case <-time.After(40 * time.Second):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return ""
+	}
+	best, bestDiff := "", int64(-1)
+	for _, m := range deviceLine.FindAllStringSubmatch(string(out), -1) {
+		name, desc := m[1], m[2]
+		if strings.HasPrefix(name, "RPC") || vendorOf(desc) != want.Vendor {
+			continue
+		}
+		total, _ := strconv.ParseInt(m[3], 10, 64)
+		diff := total<<20 - int64(want.VRAMTotal)
+		if diff < 0 {
+			diff = -diff
+		}
+		if bestDiff < 0 || diff < bestDiff {
+			best, bestDiff = name, diff
+		}
+	}
+	return best
+}
+
 // startProc runs an engine program, keeps its output in a log file, and (for the worker
 // program) starts it again if it stops: it quits when a client hangs up at the wrong moment.
 func (a *Agent) startProc(name, rtDir, bin string, args []string, restart, lowPrio bool) (*proc, error) {
@@ -453,22 +519,9 @@ func (a *Agent) startProc(name, rtDir, bin string, args []string, restart, lowPr
 	if err != nil {
 		return nil, err
 	}
-	binDir := filepath.Dir(bin)
 	build := func() *exec.Cmd {
-		var cmd *exec.Cmd
-		if ld := glibcLoader(filepath.Join(a.dir, "runtime", "glibc")); ld != "" && a.info.Musl {
-			full := append([]string{"--library-path", filepath.Dir(ld) + ":" + binDir, bin}, args...)
-			cmd = exec.Command(ld, full...)
-		} else {
-			cmd = exec.Command(bin, args...)
-		}
-		cmd.Dir = binDir // engine backends are looked up next to the program and in the current folder
-		cmd.Env = append(os.Environ(), "LLAMA_CACHE="+filepath.Join(a.dir, "cache"), "HF_HUB_CACHE="+filepath.Join(a.dir, "cache", "hub"))
-		if runtime.GOOS == "linux" && !a.info.Musl {
-			cmd.Env = append(cmd.Env, "LD_LIBRARY_PATH="+binDir)
-		}
+		cmd := a.engineCmd(bin, args...)
 		cmd.Stdout, cmd.Stderr = logf, logf
-		hideWindow(cmd)
 		return cmd
 	}
 	first := make(chan error, 1)
@@ -519,5 +572,15 @@ func tailFile(path string, maxBytes int64) string {
 		_, _ = f.Seek(-maxBytes, io.SeekEnd)
 	}
 	b, _ := io.ReadAll(f)
+	return string(b)
+}
+
+func headFile(path string, maxBytes int64) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(io.LimitReader(f, maxBytes))
 	return string(b)
 }

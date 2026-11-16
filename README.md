@@ -29,7 +29,9 @@ One self-contained program per platform (about 9 MB, no installer). Written in G
 - **Each computer fetches its own share** (`fetch.go`): the worker caches tensors by hash, so helpers download just their byte ranges of the model file straight from the source instead of receiving them from the head over Wi-Fi.
 - **Security** (`identity.go`, `host.go`, `worker.go`): every computer has its own key. Pairing pins the keys (USB kit and join link carry the main computer's fingerprint and a secret; network discovery uses a 4-digit comparison). All traffic between computers is TLS with those pinned keys. llama.cpp's worker protocol has no authentication, so the engine only ever listens on the computer itself and is reached through that encrypted link.
 - **Helpers only connect outwards.** Only the main computer accepts connections (one firewall permission, with a button for it on macOS and Windows).
-- **Model store** (`store.go`): Hugging Face search, and a read-only listing of PirateFace (a community torrent index of Hugging Face models) for when Hugging Face is unreachable.
+- **Model store** (`store.go`): Hugging Face search, including models that come as several files, and a read-only listing of PirateFace (a community torrent index of Hugging Face models) for when Hugging Face is unreachable.
+- **Your own files:** any `.gguf` file placed in a computer's models folder (shown in the Models tab) can be run from there, for example one fetched with a torrent app. The Models tab can compute its SHA-256 so you can compare it with the one Hugging Face publishes.
+- **Graphics cards:** NVIDIA on Windows (CUDA), AMD and Intel cards with their own memory on Windows and Linux, and NVIDIA on Linux (Vulkan), Apple Silicon (Metal). Each engine reports the device it can really use; if it finds none, the model is planned again without it. After loading, Potluck checks the engine's own report against the plan.
 
 Ports on the main computer: 7716 control panel (this computer only), 7717 helpers (encrypted) and discovery, 7715 join page (local network), 7720 chat and API (this computer only).
 
@@ -53,17 +55,18 @@ Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs 
 
 ## Tested so far
 
-- Main computer: macOS (Apple Silicon). Helpers: Windows 10 (NVIDIA GPU), macOS 15 (Intel), Alpine Linux (musl).
-- All three ways of adding a computer.
-- Lessons already built in: GitHub's "latest" llama.cpp release no longer carries binaries; Alpine needs a private glibc; the Intel macOS engine build is unsigned and must be signed locally; the macOS firewall and Local Network privacy rules; a Windows TCP setting that caps single connections (hence many parallel download streams); firewalls that drop discovery replies (hence the address scan fallback).
+- Main computer: macOS (Apple Silicon), Windows 10, Alpine Linux. Helpers: Windows 10 (NVIDIA card), macOS 15 (Intel), Alpine Linux (musl).
+- All three ways of adding a computer, and all three USB-kit launchers.
+- Pooled, single-computer-with-disk, helper graphics card, split-file model, model file already on disk, live switching off and on, sharing with the network.
+- The Vulkan engine build, on an NVIDIA card. AMD and Intel cards use the same path but have not been tried on real AMD or Intel hardware.
+- The Linux Arm build under emulation (starts, pairs, reports hardware). Windows on Arm is built but untested.
+- Lessons built in: GitHub's "latest" llama.cpp release no longer carries binaries; Alpine needs a private glibc; the Intel macOS engine build is unsigned and must be signed locally; the macOS firewall and Local Network privacy rules; a Windows TCP setting that caps single connections (hence many parallel download streams); firewalls that drop discovery replies (hence the address scan fallback); the engine needs helpers named before its device list.
 
-## Known limits and next steps
+## Known limits
 
-- Not signed with a paid developer certificate or notarized. Windows shows a SmartScreen warning; on macOS use `Potluck.app` (right-click, Open the first time), the USB kit, or the terminal one-liner on the join page.
-- A helper's graphics card is used on Windows PCs with NVIDIA cards (card first, then memory). AMD and Intel cards, and NVIDIA on Linux, are not used yet; Apple Silicon is.
-- Tensor traffic between head and helpers is relayed through the main computer. A direct path between them is planned.
-- When a computer's hours end, it is switched off, or it drops out, the model is laid out again on what is left, or waits and returns by itself. A pedal moved under a running model applies when you press "Apply now".
+- Not signed with a paid developer certificate or notarized. Windows shows a SmartScreen warning; on macOS use `Potluck.app` (right-click, Open the first time), the USB kit, or the terminal one-liner on the join page. `build.sh` signs and notarizes when given a Developer ID and stored notary credentials.
+- Tensor traffic between head and helpers is relayed through the main computer (about 10% slower than a direct link in our measurement). Helpers therefore need no firewall changes.
+- A model file that is already on disk cannot be fetched by the helpers themselves: the head sends them their share over your network, which is slow the first time.
+- PirateFace is list-only: Potluck does not contain a torrent client. Copy the link into your own torrent app, then put the file in a models folder.
 - The chat page and API are for this computer only unless you switch on sharing with your network. Sharing has no password.
-- Models split across several files are not supported yet. PirateFace is list-only (copy the torrent link).
-- Disk use stays bounded: each helper keeps only its share of the current model, old engine versions are removed, and the Models tab lists every downloaded file with a delete button.
-- No start-at-login option, by design for now.
+- No start-at-login option, by design.

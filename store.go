@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -17,13 +18,23 @@ import (
 
 // ModelRef names one downloadable model file.
 type ModelRef struct {
-	Source string `json:"source"` // hf | url
-	Repo   string `json:"repo"`
+	Source string      `json:"source"` // hf | url | local
+	Repo   string      `json:"repo"`
+	File   string      `json:"file"`
+	URL    string      `json:"url"`
+	Size   int64       `json:"size"`
+	SHA256 string      `json:"sha256"`
+	Title  string      `json:"title"`
+	Parts  []ModelPart `json:"parts,omitempty"` // every file, when the model comes as several
+	Node   string      `json:"node,omitempty"`  // local: the computer whose disk holds the file
+}
+
+// ModelPart is one file of a model that is split across several.
+type ModelPart struct {
 	File   string `json:"file"`
 	URL    string `json:"url"`
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
-	Title  string `json:"title"`
 }
 
 // StoreFile is one quantisation of a model, with a verdict for this set of computers.
@@ -32,8 +43,8 @@ type StoreFile struct {
 	Quant   string `json:"quant"`
 	Size    int64  `json:"size"`
 	SHA256  string `json:"sha256"`
-	Parts   int    `json:"parts"`   // >1: split across several files (not supported yet)
-	Verdict string `json:"verdict"` // one | pool | no | split
+	Parts   int    `json:"parts"`   // >1: the model comes as several files
+	Verdict string `json:"verdict"` // one | pool | no
 	Note    string `json:"note"`
 }
 
@@ -167,8 +178,6 @@ func (h *Host) judge(files []StoreFile) {
 		f := &files[i]
 		need := f.Size + f.Size/25 + perDeviceOverhead // a little room for working memory
 		switch {
-		case f.Parts > 1:
-			f.Verdict, f.Note = "split", "Comes in several pieces. Not supported yet."
 		case need <= biggest:
 			f.Verdict, f.Note = "one", "Fits on one of your computers."
 		case need+int64(len(nodes))*perDeviceOverhead <= sum:
@@ -254,20 +263,53 @@ func pirateSearch(q string) ([]StoreModel, error) {
 
 // resolveModel fills in the download address, size and checksum.
 func resolveModel(ctx context.Context, m *ModelRef) error {
+	if m.Source == "local" {
+		if m.Node == "" || m.File == "" {
+			return errors.New("pick a model file first")
+		}
+		m.File = filepath.Base(m.File)
+		if m.Title == "" {
+			m.Title = strings.TrimSuffix(splitRe.ReplaceAllString(m.File, ".gguf"), ".gguf")
+		}
+		return nil
+	}
 	if m.URL == "" && m.Repo != "" {
 		if m.File == "" {
 			return errors.New("pick a model file first")
 		}
 		m.Source = "hf"
 		m.URL = "https://huggingface.co/" + m.Repo + "/resolve/main/" + (&url.URL{Path: m.File}).EscapedPath()
+		hfURL := func(path string) string {
+			return "https://huggingface.co/" + m.Repo + "/resolve/main/" + (&url.URL{Path: path}).EscapedPath()
+		}
 		if tree, err := hfTree(m.Repo); err == nil {
+			key := splitRe.ReplaceAllString(m.File, ".gguf")
+			split := key != m.File
+			m.Parts, m.Size = nil, 0
 			for _, e := range tree {
-				if e.Path == m.File {
-					m.Size = e.Size
-					if e.LFS != nil {
-						m.SHA256 = e.LFS.OID
-					}
+				sha := ""
+				if e.LFS != nil {
+					sha = e.LFS.OID
 				}
+				switch {
+				case split && splitRe.MatchString(e.Path) && splitRe.ReplaceAllString(e.Path, ".gguf") == key:
+					// One of the files of a model that comes in several pieces.
+					m.Parts = append(m.Parts, ModelPart{File: e.Path[strings.LastIndex(e.Path, "/")+1:], URL: hfURL(e.Path), Size: e.Size, SHA256: sha})
+					m.Size += e.Size
+				case !split && e.Path == m.File:
+					m.Size, m.SHA256 = e.Size, sha
+				}
+			}
+			if split {
+				if len(m.Parts) == 0 {
+					return errors.New("could not find that model's files on Hugging Face")
+				}
+				sort.Slice(m.Parts, func(i, j int) bool { return m.Parts[i].File < m.Parts[j].File })
+				m.URL, m.SHA256 = m.Parts[0].URL, ""
+				if m.Title == "" {
+					m.Title = strings.TrimSuffix(key[strings.LastIndex(key, "/")+1:], ".gguf")
+				}
+				m.File = m.Parts[0].File
 			}
 		}
 	}

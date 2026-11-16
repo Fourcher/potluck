@@ -76,7 +76,7 @@ button.link{background:none;border:0;padding:0;color:var(--accent);font:inherit;
 .model{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin-bottom:12px}
 .model h3{overflow-wrap:anywhere}
 .files{margin-top:10px;border-top:1px solid var(--line)}
-.file{display:grid;grid-template-columns:minmax(90px,150px) 80px 1fr auto;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font-size:14.5px}
+.file{display:grid;grid-template-columns:minmax(90px,190px) 80px 1fr auto;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font-size:14.5px}
 .file:last-child{border-bottom:0}
 .file .q{font-weight:650;overflow-wrap:anywhere}
 @media(max-width:640px){.file{grid-template-columns:1fr auto}.file .n{grid-column:1/-1}}

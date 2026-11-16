@@ -93,6 +93,30 @@ func remoteSize(ctx context.Context, u string) (int64, error) {
 
 // fetchHeader downloads just enough of a GGUF file to read its header.
 func fetchHeader(ctx context.Context, u string) (*ModelInfo, error) {
+	return fetchHeaderPart(ctx, u, 0)
+}
+
+// fetchModelHeaders reads a model's header, or all of them when it comes as several files.
+func fetchModelHeaders(ctx context.Context, m *ModelRef) (*ModelInfo, error) {
+	if len(m.Parts) < 2 {
+		return fetchHeader(ctx, m.URL)
+	}
+	infos := make([]*ModelInfo, len(m.Parts))
+	for i, p := range m.Parts {
+		hint := 0
+		if i > 0 {
+			hint = infos[0].Layers
+		}
+		info, err := fetchHeaderPart(ctx, p.URL, hint)
+		if err != nil {
+			return nil, fmt.Errorf("file %d of %d: %w", i+1, len(m.Parts), err)
+		}
+		infos[i] = info
+	}
+	return mergeParts(infos), nil
+}
+
+func fetchHeaderPart(ctx context.Context, u string, layersHint int) (*ModelInfo, error) {
 	size, err := remoteSize(ctx, u)
 	if err != nil {
 		return nil, err
@@ -110,7 +134,7 @@ func fetchHeader(ctx context.Context, u string) (*ModelInfo, error) {
 		if err != nil {
 			return nil, err
 		}
-		m, err := parseGGUF(buf, size)
+		m, err := parseGGUFPart(buf, size, layersHint)
 		if err == nil {
 			return m, nil
 		}
@@ -349,8 +373,9 @@ func (f *fnv64) Write(p []byte) {
 
 // SeedItem is one byte range of the model file that belongs in a worker's cache.
 type SeedItem struct {
-	Off  int64 `json:"off"`
-	Size int64 `json:"size"`
+	URL  string `json:"url,omitempty"` // the file it is in, when the model comes as several files
+	Off  int64  `json:"off"`
+	Size int64  `json:"size"`
 }
 
 func seedCache(ctx context.Context, u, cacheDir string, items []SeedItem, jobs int, prog Progress) error {
@@ -363,7 +388,13 @@ func seedCache(ctx context.Context, u, cacheDir string, items []SeedItem, jobs i
 	if b, err := os.ReadFile(indexFile); err == nil {
 		_ = json.Unmarshal(b, &index)
 	}
-	key := func(it SeedItem) string { return fmt.Sprintf("%s#%d+%d", u, it.Off, it.Size) }
+	src := func(it SeedItem) string {
+		if it.URL != "" {
+			return it.URL
+		}
+		return u
+	}
+	key := func(it SeedItem) string { return fmt.Sprintf("%s#%d+%d", src(it), it.Off, it.Size) }
 	var total, done atomic.Int64
 	var todo []SeedItem
 	for _, it := range items {
@@ -402,7 +433,7 @@ func seedCache(ctx context.Context, u, cacheDir string, items []SeedItem, jobs i
 						return
 					}
 					var n int64
-					name, n, err = seedOne(ctx, u, cacheDir, it, j, buf, &done)
+					name, n, err = seedOne(ctx, src(it), cacheDir, it, j, buf, &done)
 					if err == nil {
 						break
 					}

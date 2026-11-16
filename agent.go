@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -85,6 +86,7 @@ type Agent struct {
 	mu        sync.Mutex
 	info      NodeInfo
 	rtDir     string
+	gpuDev    string // the engine's name for this computer's graphics card, "" if none is used
 	rpc, head *proc
 	rpcPort   int
 	apiPort   int
@@ -168,10 +170,11 @@ func threadsFor(cores, pedal int) int {
 // Requests the main computer can make.
 type (
 	FetchModelReq struct {
-		URL    string `json:"url"`
-		File   string `json:"file"`
-		Size   int64  `json:"size"`
-		SHA256 string `json:"sha256"`
+		URL    string      `json:"url"`
+		File   string      `json:"file"`
+		Size   int64       `json:"size"`
+		SHA256 string      `json:"sha256"`
+		Parts  []ModelPart `json:"parts,omitempty"`
 	}
 	SeedReq struct {
 		URL   string     `json:"url"`
@@ -183,6 +186,9 @@ type (
 		NGL     int      `json:"ngl"`
 		Split   string   `json:"split"`
 		Ctx     int      `json:"ctx"`
+		// RPCDevices is how many devices the helpers offer in total (a helper with a
+		// graphics card offers two).
+		RPCDevices int `json:"rpcDevices"`
 	}
 	AgentStatus struct {
 		RPC     bool   `json:"rpc"`
@@ -192,6 +198,7 @@ type (
 		Done    int64  `json:"done"`
 		Total   int64  `json:"total"`
 		HeadLog string `json:"headLog,omitempty"`
+		FullLog string `json:"fullLog,omitempty"` // the start of the engine's log: its load report
 	}
 )
 
@@ -232,12 +239,13 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		dev := a.gpuDeviceName(dir)
 		a.mu.Lock()
-		a.rtDir = dir
+		a.rtDir, a.gpuDev = dir, dev
 		a.mu.Unlock()
 		a.pruneEngines(dir)
 		a.note("AI engine ready", 0, 0)
-		return map[string]string{"dir": dir}, nil
+		return map[string]string{"dir": dir, "gpuDevice": dev}, nil
 
 	case "fetch_model":
 		var in FetchModelReq
@@ -252,11 +260,22 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 				}
 			}
 		}
-		err := downloadFile(a.jobCtx(), in.URL, dest, in.Size, in.SHA256, 24, func(d, t int64, s string) {
-			a.note("Model file: "+s, d, t)
-		})
-		if err != nil {
-			return nil, err
+		// One file, or every file of a model that comes in several pieces (the engine finds
+		// the others by name once it is given the first).
+		parts := in.Parts
+		if len(parts) == 0 {
+			parts = []ModelPart{{File: in.File, URL: in.URL, Size: in.Size, SHA256: in.SHA256}}
+		}
+		ctx := a.jobCtx()
+		var before int64
+		for _, part := range parts {
+			err := downloadFile(ctx, part.URL, filepath.Join(a.dir, "models", filepath.Base(part.File)), part.Size, part.SHA256, 24, func(d, t int64, s string) {
+				a.note("Model file: "+s, before+d, in.Size)
+			})
+			if err != nil {
+				return nil, err
+			}
+			before += part.Size
 		}
 		a.note("Model file ready", in.Size, in.Size)
 		return map[string]string{"path": dest}, nil
@@ -290,6 +309,30 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 
 	case "storage":
 		return a.Storage(), nil
+
+	case "read_header":
+		// A model file that is already on this computer (copied here or downloaded with
+		// another program): read its blueprint so it can be planned like any other.
+		var in struct {
+			File string `json:"file"`
+		}
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, err
+		}
+		return a.localHeader(filepath.Base(in.File))
+
+	case "hash_model":
+		var in struct {
+			File string `json:"file"`
+		}
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, err
+		}
+		sum, err := sha256File(filepath.Join(a.dir, "models", filepath.Base(in.File)))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"sha256": sum}, nil
 
 	case "delete_model":
 		var in struct {
@@ -341,7 +384,7 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 
 func (a *Agent) startRPC() (any, error) {
 	a.mu.Lock()
-	rt, old := a.rtDir, a.rpc
+	rt, old, gpuDev := a.rtDir, a.rpc, a.gpuDev
 	a.mu.Unlock()
 	if rt == "" {
 		return nil, errors.New("the AI engine is not installed yet")
@@ -358,10 +401,14 @@ func (a *Agent) startRPC() (any, error) {
 	// Bound to this computer only. Other computers reach it through the encrypted tunnel,
 	// because the worker protocol itself has no password.
 	args := []string{"-H", "127.0.0.1", "-p", strconv.Itoa(port), "-c", "-t", strconv.Itoa(threads)}
-	if strings.Contains(filepath.Base(rt), "cuda") {
+	gpuBuild := strings.Contains(filepath.Base(rt), "cuda") || strings.Contains(filepath.Base(rt), "vulkan")
+	switch {
+	case gpuDev != "":
 		// Offer the graphics card first and this computer's memory second. (By default the
 		// engine would offer only the card.) The planner counts on exactly this order.
-		args = append(args, "-d", "CUDA0,CPU")
+		args = append(args, "-d", gpuDev+",CPU")
+	case gpuBuild:
+		args = append(args, "-d", "CPU") // a graphics build, but no card worth using
 	}
 	p, err := a.startProc("worker", rt, bin, args, true, info.Limits.Pedal < 100)
 	if err != nil {
@@ -385,7 +432,7 @@ func (a *Agent) startRPC() (any, error) {
 
 func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	a.mu.Lock()
-	rt, old := a.rtDir, a.head
+	rt, old, gpuDev := a.rtDir, a.head, a.gpuDev
 	oldL := a.listeners
 	a.listeners = nil
 	a.mu.Unlock()
@@ -442,8 +489,26 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	if in.Split != "" && in.NGL > 0 {
 		args = append(args, "-ts", in.Split)
 	}
+	// The helpers must be named before the device list: the engine only knows the names
+	// RPC0, RPC1, ... once it has read --rpc.
 	if len(rpcList) > 0 {
 		args = append(args, "--rpc", strings.Join(rpcList, ","))
+	}
+	if base := filepath.Base(rt); strings.Contains(base, "cuda") || strings.Contains(base, "vulkan") {
+		// Name every device to use, in the plan's order: the helpers' devices, then the one
+		// local card. Otherwise the engine would also pick up graphics built into the
+		// processor or a second card the plan does not know about.
+		var devs []string
+		for i := 0; i < in.RPCDevices; i++ {
+			devs = append(devs, "RPC"+strconv.Itoa(i))
+		}
+		if gpuDev != "" {
+			devs = append(devs, gpuDev)
+		}
+		if len(devs) == 0 {
+			devs = []string{"none"}
+		}
+		args = append(args, "-dev", strings.Join(devs, ","))
 	}
 	p, err := a.startProc("head", rt, findBin(rt, "llama-server"), args, false, info.Limits.Pedal < 100)
 	if err != nil {
@@ -474,6 +539,9 @@ func (a *Agent) Status() AgentStatus {
 	}
 	if head != nil {
 		s.HeadLog = tailFile(head.logPath, 6000)
+		if s.Ready {
+			s.FullLog = headFile(head.logPath, 200000)
+		}
 	}
 	return s
 }
@@ -515,6 +583,7 @@ func (a *Agent) localPort(target string) (int, error) {
 
 // StorageReport says what Potluck keeps on this computer's disk.
 type StorageReport struct {
+	Dir    string      `json:"dir"` // put model files here to use them
 	Models []ModelFile `json:"models"`
 	Cache  int64       `json:"cache"`  // this computer's share of models it helps with
 	Engine int64       `json:"engine"` // the AI engine programs
@@ -543,7 +612,8 @@ func dirSize(dir string) int64 {
 
 // Storage lists what is on disk here.
 func (a *Agent) Storage() StorageReport {
-	r := StorageReport{Cache: dirSize(filepath.Join(a.dir, "cache")), Engine: dirSize(filepath.Join(a.dir, "runtime")), Free: int64(diskFree(a.dir))}
+	r := StorageReport{Dir: filepath.Join(a.dir, "models"), Cache: dirSize(filepath.Join(a.dir, "cache")), Engine: dirSize(filepath.Join(a.dir, "runtime")), Free: int64(diskFree(a.dir))}
+	_ = os.MkdirAll(r.Dir, 0o755)
 	ents, _ := os.ReadDir(filepath.Join(a.dir, "models"))
 	for _, e := range ents {
 		name := e.Name()
@@ -570,4 +640,55 @@ func (a *Agent) pruneEngines(keep string) {
 			_ = os.RemoveAll(p)
 		}
 	}
+}
+
+var localSplit = regexp.MustCompile(`-(\d{5})-of-(\d{5})\.gguf$`)
+
+// localHeader reads the blueprint of a model file in this computer's models folder,
+// following the other files when the model comes in several pieces.
+func (a *Agent) localHeader(file string) (*ModelInfo, error) {
+	dir := filepath.Join(a.dir, "models")
+	names := []string{file}
+	if m := localSplit.FindStringSubmatch(file); m != nil {
+		n, _ := strconv.Atoi(m[2])
+		names = nil
+		for i := 1; i <= n; i++ {
+			names = append(names, localSplit.ReplaceAllString(file, fmt.Sprintf("-%05d-of-%s.gguf", i, m[2])))
+		}
+	}
+	var infos []*ModelInfo
+	for i, name := range names {
+		path := filepath.Join(dir, name)
+		st, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("%s is missing from the models folder", name)
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		hint := 0
+		if i > 0 {
+			hint = infos[0].Layers
+		}
+		var info *ModelInfo
+		for size := int64(8 << 20); ; size *= 4 {
+			if size > st.Size() {
+				size = st.Size()
+			}
+			buf := make([]byte, size)
+			if _, err = f.ReadAt(buf, 0); err != nil {
+				break
+			}
+			if info, err = parseGGUFPart(buf, st.Size(), hint); err == nil || !errors.Is(err, errShort) || size == st.Size() {
+				break
+			}
+		}
+		f.Close()
+		if err != nil {
+			return nil, fmt.Errorf("%s does not look like a model file: %w", name, err)
+		}
+		infos = append(infos, info)
+	}
+	return mergeParts(infos), nil
 }

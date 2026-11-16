@@ -270,13 +270,13 @@ func (app *App) serveUI() error {
 		if err := resolveModel(ctx, &m); err != nil {
 			return nil, err
 		}
-		info, err := fetchHeader(ctx, m.URL)
+		info, err := h.modelInfo(ctx, &m)
 		if err != nil {
 			return nil, errors.New("could not read that model: " + err.Error())
 		}
 		// Two ways to run it: pooled across the computers, and (when one computer is close
 		// to big enough) on that computer alone with its disk covering the difference.
-		return map[string]any{"model": m, "info": info, "plan": h.plan(info, ""), "solo": h.bestSolo(info)}, nil
+		return map[string]any{"model": m, "info": info, "plan": h.planFor(info, "", m.Node), "solo": h.bestSolo(info, m.Node)}, nil
 	})
 
 	api("/api/start", func(r *http.Request) (any, error) {
@@ -364,12 +364,17 @@ func (app *App) serveUI() error {
 			if err := body(r, &in); err != nil {
 				return nil, err
 			}
-			if in.Action != "delete_model" && in.Action != "clear_cache" {
-				return nil, errors.New("unknown action")
+			switch in.Action {
+			case "hash_model":
+				var out map[string]string
+				err := app.host.call(in.Node, in.Action, map[string]string{"file": in.File}, &out, 30*time.Minute)
+				return out, err
+			case "delete_model", "clear_cache":
+				var rep StorageReport
+				err := app.host.call(in.Node, in.Action, map[string]string{"file": in.File}, &rep, time.Minute)
+				return rep, err
 			}
-			var rep StorageReport
-			err := app.host.call(in.Node, in.Action, map[string]string{"file": in.File}, &rep, time.Minute)
-			return rep, err
+			return nil, errors.New("unknown action")
 		}
 		return map[string]StorageReport{app.id.FP: app.agent.Storage()}, nil
 	})

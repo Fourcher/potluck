@@ -23,6 +23,7 @@ var ggmlTypes = map[uint32][2]uint64{
 type Tensor struct {
 	Name  string `json:"name"`
 	Layer int    `json:"layer"` // -1 for tensors outside the numbered layers
+	Part  int    `json:"part"`  // which file of a multi-file model it is in (0 for the first or only one)
 	Off   int64  `json:"off"`   // absolute offset in the file
 	Size  int64  `json:"size"`
 	OK    bool   `json:"ok"` // size confirmed against the next tensor's offset
@@ -138,6 +139,12 @@ func (r *ggufReader) value(t uint32) (any, error) {
 // parseGGUF reads a GGUF header from the first bytes of a file. It returns errShort when buf
 // does not hold the whole header yet.
 func parseGGUF(buf []byte, fileSize int64) (*ModelInfo, error) {
+	return parseGGUFPart(buf, fileSize, 0)
+}
+
+// parseGGUFPart also reads the later files of a model that is split across several files.
+// Those carry tensors but not the model's description, so the layer count is passed in.
+func parseGGUFPart(buf []byte, fileSize int64, layersHint int) (*ModelInfo, error) {
 	if len(buf) < 24 {
 		return nil, errShort
 	}
@@ -226,6 +233,9 @@ func parseGGUF(buf []byte, fileSize int64) (*ModelInfo, error) {
 	}
 	if v, ok := kv[m.Arch+".context_length"].(uint64); ok {
 		m.CtxTrain = int(v)
+	}
+	if m.Layers <= 0 {
+		m.Layers = layersHint
 	}
 	if m.Layers <= 0 {
 		return nil, errors.New("model header has no layer count")
@@ -675,4 +685,25 @@ func humanBytes(b int64) string {
 		return fmt.Sprintf("%.0f MB", float64(b)/float64(1<<20))
 	}
 	return fmt.Sprintf("%d bytes", b)
+}
+
+// mergeParts combines the headers of a model that comes as several files into one picture.
+func mergeParts(parts []*ModelInfo) *ModelInfo {
+	m := *parts[0]
+	m.LayerBytes = append([]int64(nil), parts[0].LayerBytes...)
+	m.Tensors = append([]Tensor(nil), parts[0].Tensors...)
+	for i, p := range parts[1:] {
+		for l, b := range p.LayerBytes {
+			if l < len(m.LayerBytes) {
+				m.LayerBytes[l] += b
+			}
+		}
+		m.OtherBytes += p.OtherBytes
+		m.FileSize += p.FileSize
+		for _, t := range p.Tensors {
+			t.Part = i + 1
+			m.Tensors = append(m.Tensors, t)
+		}
+	}
+	return &m
 }

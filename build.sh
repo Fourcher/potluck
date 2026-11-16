@@ -10,7 +10,7 @@
 # through the macOS firewall, but still triggers the "unidentified developer" warning.
 set -e
 cd "$(dirname "$0")"
-VERSION="${1:-0.2.0}"
+VERSION="${1:-1.0.0}"
 mkdir -p dist
 for t in windows/amd64 windows/arm64 darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
   os=${t%/*}; arch=${t#*/}; out="dist/potluck-$os-$arch"; [ "$os" = windows ] && out="$out.exe"
@@ -51,6 +51,22 @@ if [ "$(uname -s)" = Darwin ] && command -v codesign >/dev/null 2>&1; then
   <key>NSLocalNetworkUsageDescription</key><string>Potluck connects to your other computers on this network to share one AI model between them.</string>
 </dict></plist>
 PLIST
-  codesign -s "$ID" -f --deep "$APP" 2>/dev/null
+  if [ "$ID" = - ]; then
+    codesign -s - -f --deep "$APP" 2>/dev/null
+  else
+    codesign -s "$ID" -f --deep --options runtime --timestamp "$APP"
+  fi
   echo "built $APP"
+
+  # Notarization, so a downloaded Potluck.app opens without a warning. Needs a Developer ID
+  # signature (above) and credentials stored once with:
+  #   xcrun notarytool store-credentials potluck --apple-id <you> --team-id <team> --password <app-specific password>
+  # then run:  POTLUCK_SIGN_ID="Developer ID Application: ..." POTLUCK_NOTARY_PROFILE=potluck ./build.sh
+  if [ "$ID" != - ] && [ -n "${POTLUCK_NOTARY_PROFILE:-}" ]; then
+    ditto -c -k --keepParent "$APP" dist/Potluck-notarize.zip
+    xcrun notarytool submit dist/Potluck-notarize.zip --keychain-profile "$POTLUCK_NOTARY_PROFILE" --wait
+    xcrun stapler staple "$APP"
+    rm -f dist/Potluck-notarize.zip
+    echo "notarized $APP"
+  fi
 fi

@@ -11,7 +11,7 @@ let store = { source: "hf", q: "", results: null, loading: false, error: "", fil
 let sheet = null;                   // plan preview
 let kit = { drives: null, msg: "" };
 let logText = "";
-let disk = { data: null, loading: false };   // what Potluck keeps on each computer's disk
+let disk = { data: null, loading: false, sums: {} };   // what Potluck keeps on each computer's disk
 
 async function api(path, body) {
   const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify(body) };
@@ -221,14 +221,21 @@ function diskView() {
   if (!disk.data) return "";
   const rows = S.main.nodes.filter(n => disk.data[n.info.id]).map(n => {
     const d = disk.data[n.info.id], id = n.info.id;
-    const models = (d.models || []).map(f => `<div class="file"><span class="q">${esc(f.file.replace(/\.gguf$/, ""))}</span><span>${gb(f.size)}</span>
-        <span class="n muted small">${f.complete ? "Whole model, on " + esc(n.info.name) : "Unfinished download"}</span>
-        <button class="btn sm quiet" data-a="delmodel" data-node="${esc(id)}" data-file="${esc(f.file)}" data-name="${esc(n.info.name)}">Delete</button></div>`).join("");
+    const models = (d.models || []).map(f => {
+      const later = /-(?!00001)\d{5}-of-\d{5}\.gguf$/.test(f.file);   // a later piece of a multi-file model
+      const sum = disk.sums[id + "/" + f.file];
+      return `<div class="file"><span class="q">${esc(f.file.replace(/\.gguf$/, ""))}</span><span>${gb(f.size)}</span>
+        <span class="n muted small">${f.complete ? (later ? "Part of a model that comes in several files" : "On " + esc(n.info.name)) : "Unfinished download"}${sum ? `<br>SHA-256: <span style="user-select:all;overflow-wrap:anywhere">${esc(sum)}</span>` : ""}</span>
+        <span class="row">${f.complete && !later ? `<button class="btn sm" data-a="planlocal" data-node="${esc(id)}" data-file="${esc(f.file)}">Set up</button>` : ""}
+        ${f.complete ? `<button class="btn sm quiet" data-a="checksum" data-node="${esc(id)}" data-file="${esc(f.file)}">${sum === "…" ? "Working…" : "Checksum"}</button>` : ""}
+        <button class="btn sm quiet" data-a="delmodel" data-node="${esc(id)}" data-file="${esc(f.file)}" data-name="${esc(n.info.name)}">Delete</button></span></div>`;
+    }).join("");
     const cache = d.cache > 1048576 ? `<div class="file"><span class="q">Its share of the current model</span><span>${gb(d.cache)}</span>
         <span class="n muted small">Replaced automatically when you run a different model</span>
         <button class="btn sm quiet" data-a="clearcache" data-node="${esc(id)}" data-name="${esc(n.info.name)}">Clear</button></div>` : "";
-    if (!models && !cache) return "";
-    return `<div class="model"><div class="row spread"><h3>${esc(n.info.name)}</h3><span class="muted small">${gb(d.free)} free · AI engine ${gb(d.engine)}</span></div><div class="files">${models}${cache}</div></div>`;
+    return `<div class="model"><div class="row spread"><h3>${esc(n.info.name)}</h3><span class="muted small">${gb(d.free)} free · AI engine ${gb(d.engine)}</span></div>
+      ${models || cache ? `<div class="files">${models}${cache}</div>` : ""}
+      <p class="muted small" style="margin-top:8px">Have a model file already, for example one fetched with a torrent app? Put the .gguf file in this folder on ${esc(n.info.name)} and it appears here: <span style="user-select:all;overflow-wrap:anywhere">${esc(d.dir || "")}</span></p></div>`;
   }).join("");
   return `<h2>On your computers' disks</h2>${rows || `<p class="muted">Nothing downloaded yet.</p>`}`;
 }
@@ -262,14 +269,17 @@ function viewSheet() {
   if (!sheet) return "";
   if (sheet.loading) return `<div class="sheet"><div class="card"><p>Reading the model's blueprint and working out a layout…</p></div></div>`;
   const p = sheet.plan, solo = sheet.solo, m = sheet.model, info = sheet.info;
+  const isLocal = m.source === "local";
+  const go = isLocal ? "Run it" : "Download and run";
   const ctx = `<label class="small">Conversation memory <select id="ctx"><option value="4096">Normal (4,096 tokens)</option><option value="8192">Long (8,192)</option><option value="16384">Very long (16,384)</option></select></label>`;
   let body;
   if (p.fits) {
     const verdict = p.needsPool ? `<div class="banner" style="border-color:var(--ok);background:var(--ok-soft)"><b>Too big for the memory of any one of your computers. Runs across ${p.machines} of them together.</b></div>`
       : `<div class="note">Fits in ${esc(p.shares[0].name)}'s memory, so it runs there${p.machines > 1 ? " with help from the others" : ""}.</div>`;
     body = `${verdict}${planBar(p)}
-      <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start">Download and run</button></div>
-      <p class="muted small">Each computer downloads its own share. The first start takes as long as the download; later starts take a few minutes.</p>`;
+      <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start">${go}</button></div>
+      <p class="muted small">${isLocal ? "The file is already on " + esc(p.shares[0].name) + ". Helpers receive their share from it over your network, which is slower the first time than a download."
+        : "Each computer downloads its own share. The first start takes as long as the download; later starts take a few minutes."}</p>`;
     if (p.needsPool && solo && solo.fits) {
       body += `<h2 style="font-size:16px">Or: ${esc(solo.shares[0].name)} alone, with help from its disk</h2>
         <p class="muted small">The model is about ${gb(solo.overflow)} bigger than ${esc(solo.shares[0].name)}'s free memory. It can keep most of it in memory and read the rest from disk as needed.
@@ -280,13 +290,13 @@ function viewSheet() {
     body = `<div class="note"><b>Does not fit in your computers' pooled memory.</b> ${esc(p.reason)}</div>
       <h2 style="font-size:16px">It can still run on ${esc(solo.shares[0].name)}, with help from its disk</h2>
       <p class="muted small">About ${gb(solo.overflow)} of it will not fit in memory and is read from disk as needed. Fine with an SSD, slow with a hard disk.</p>${planBar(solo)}
-      <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start" data-solo="${esc(solo.head)}">Download and run on ${esc(solo.shares[0].name)}</button></div>`;
+      <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start" data-solo="${esc(solo.head)}">${go} on ${esc(solo.shares[0].name)}</button></div>`;
   } else {
     body = `<div class="err"><b>This one does not fit yet.</b> ${esc(p.reason)} Add a computer, press a pedal further down, or pick a smaller size.</div>`;
   }
   return `<div class="sheet" data-a="closesheet"><div class="card" data-stop>
     <div class="row spread"><h1 style="font-size:21px">${esc(m.title || m.file)}</h1><button class="link" data-a="closesheet">Close</button></div>
-    <p class="muted small">${gb(m.size)} · ${info.layers} layers · ${esc(m.repo || "direct link")}</p>
+    <p class="muted small">${gb(m.size)} · ${info.layers} layers · ${esc(isLocal ? "already on one of your computers" : m.repo || "direct link")}${m.parts && m.parts.length > 1 ? ` · comes as ${m.parts.length} files` : ""}</p>
     ${body}
   </div></div>`;
 }
@@ -431,6 +441,13 @@ const actions = {
   },
   stop() { logText = ""; act(() => api("/api/stop", {})); },
   test() { act(() => api("/api/test", {})); },
+  planlocal(t) { openPlan({ source: "local", node: t.dataset.node, file: t.dataset.file }); },
+  checksum(t) {
+    const k = t.dataset.node + "/" + t.dataset.file;
+    disk.sums[k] = "…"; draw(true); toast("Reading the whole file. A big model takes a few minutes.");
+    api("/api/storage", { node: t.dataset.node, action: "hash_model", file: t.dataset.file }).then(r => { disk.sums[k] = r.sha256; draw(true); })
+      .catch(e => { delete disk.sums[k]; toast(e.message); draw(true); });
+  },
   delmodel(t) { if (confirm(`Delete ${t.dataset.file} from ${t.dataset.name}? You can download it again later.`)) api("/api/storage", { node: t.dataset.node, action: "delete_model", file: t.dataset.file }).then(loadDisk).catch(e => toast(e.message)); },
   clearcache(t) { if (confirm(`Clear ${t.dataset.name}'s share of the model? It is downloaded again the next time it is needed.`)) api("/api/storage", { node: t.dataset.node, action: "clear_cache" }).then(loadDisk).catch(e => toast(e.message)); },
   quit() { if (confirm("Quit Potluck on this computer? Any running model stops.")) api("/api/quit", {}).then(() => { $("#app").innerHTML = `<p class="muted center">Potluck has quit. You can close this tab.</p>`; S = null; }); },
