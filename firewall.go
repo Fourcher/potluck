@@ -34,11 +34,16 @@ func firewallState() string {
 		}
 		return "blocked"
 	case "windows":
-		out := run(8*time.Second, "netsh", "advfirewall", "firewall", "show", "rule", "name=Potluck")
-		if strings.Contains(out, "Potluck") {
+		// Windows blocks incoming connections to a program until a rule allows it. The rule
+		// this app adds is named Potluck and covers this exact program file.
+		out := run(8*time.Second, "netsh", "advfirewall", "firewall", "show", "rule", "name=Potluck", "verbose")
+		if strings.Contains(strings.ToLower(out), strings.ToLower(exe)) {
 			return "ok"
 		}
-		return "unknown"
+		if strings.Contains(run(8*time.Second, "netsh", "advfirewall", "show", "currentprofile", "state"), "ON") {
+			return "blocked"
+		}
+		return "ok"
 	}
 	return "unknown"
 }
@@ -62,7 +67,8 @@ func allowThroughFirewall() error {
 		}
 		return nil
 	case "windows":
-		rule := `netsh advfirewall firewall add rule name=Potluck dir=in action=allow enable=yes profile=private,domain program="` + exe + `"`
+		// Home and work networks only: on a network Windows calls Public, helpers stay out.
+		rule := `netsh advfirewall firewall delete rule name=Potluck & netsh advfirewall firewall add rule name=Potluck dir=in action=allow enable=yes profile=private,domain program="` + exe + `"`
 		ps := `Start-Process -FilePath cmd.exe -ArgumentList '/c ` + strings.ReplaceAll(rule, "'", "''") + `' -Verb RunAs -WindowStyle Hidden -Wait`
 		cmd := exec.Command("powershell", "-NoProfile", "-Command", ps)
 		hideWindow(cmd)

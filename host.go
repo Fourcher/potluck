@@ -88,6 +88,14 @@ type Host struct {
 	cluster ClusterState
 	cancel  context.CancelFunc
 	release map[string]Asset // engine release assets by name
+
+	chatSrv  *http.Server
+	lastCtx  int
+	lastSolo string
+	lastInfo *ModelInfo
+	paused   *ModelRef // a model waiting for enough computers to be available again
+	pauseWhy string
+	stale    bool // limits changed on a computer that is part of the running model
 }
 
 func newHost(a *Agent, id *Identity, cfg *ConfigStore) *Host {
@@ -138,7 +146,8 @@ func (h *Host) Run() error {
 	go h.discoveryLoop()
 	go h.inventoryLoop()
 	go h.serveJoinPage()
-	go h.serveChatProxy()
+	go h.watchLoop()
+	h.applyShare()
 	return nil
 }
 
@@ -454,9 +463,10 @@ func rankIP(ip string) int {
 
 // ---------- chat / API proxy ----------
 
-// serveChatProxy exposes the running model's chat page and OpenAI-compatible API on this
-// computer, wherever the head actually is.
-func (h *Host) serveChatProxy() {
+// applyShare (re)starts the chat page and OpenAI-compatible API of the running model. It is
+// reachable from this computer only, unless sharing with the local network is switched on.
+// The API has no password, so sharing is a deliberate switch.
+func (h *Host) applyShare() {
 	target, _ := url.Parse("http://model.invalid")
 	rp := httputil.NewSingleHostReverseProxy(target)
 	rp.Transport = &http.Transport{
@@ -476,8 +486,101 @@ func (h *Host) serveChatProxy() {
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		http.Error(w, "Potluck: "+err.Error()+". Start a model in the control panel first.", http.StatusBadGateway)
 	}
-	srv := &http.Server{Addr: "127.0.0.1:" + strconv.Itoa(portChat), Handler: rp}
-	_ = srv.ListenAndServe()
+	addr := "127.0.0.1:" + strconv.Itoa(portChat)
+	if h.cfg.Get().ShareChat {
+		addr = ":" + strconv.Itoa(portChat)
+	}
+	h.mu.Lock()
+	old := h.chatSrv
+	srv := &http.Server{Addr: addr, Handler: rp}
+	h.chatSrv = srv
+	h.mu.Unlock()
+	go func() {
+		if old != nil {
+			_ = old.Close()
+			time.Sleep(300 * time.Millisecond)
+		}
+		_ = srv.ListenAndServe()
+	}()
+}
+
+// ---------- keeping the running model in line with pedals and hours ----------
+
+// watchLoop checks, a few times a minute, that every computer holding part of the running
+// model is still allowed to. When one leaves (its hours ended, it was switched off, or it
+// disconnected) the model is laid out again over the computers that remain; if it no longer
+// fits it waits and comes back by itself when enough of them return.
+func (h *Host) watchLoop() {
+	for {
+		time.Sleep(20 * time.Second)
+		now := time.Now()
+		h.mu.Lock()
+		phase, model, ctxSize, info := h.cluster.Phase, h.cluster.Model, h.lastCtx, h.lastInfo
+		paused := h.paused
+		var gone []string
+		if phase == "running" {
+			for _, n := range h.nodes {
+				if n.Role != "" && (!n.Online || !n.Info.Limits.ActiveNow(now)) {
+					gone = append(gone, n.Info.Name)
+				}
+			}
+		}
+		h.mu.Unlock()
+		switch {
+		case len(gone) > 0 && model != nil:
+			why := strings.Join(gone, " and ") + " stopped lending"
+			h.Stop()
+			if info != nil && h.plan(info, h.soloChoice()).Fits {
+				_ = h.Start(*model, ctxSize, h.soloChoice())
+			} else {
+				h.mu.Lock()
+				h.paused, h.pauseWhy = model, why+". The model no longer fits on the computers that are left; it will start again by itself when they are back."
+				h.mu.Unlock()
+			}
+		case paused != nil && phase == "idle" && info != nil:
+			if h.plan(info, h.soloChoice()).Fits {
+				h.mu.Lock()
+				h.paused, h.pauseWhy = nil, ""
+				h.mu.Unlock()
+				_ = h.Start(*paused, ctxSize, h.soloChoice())
+			}
+		}
+	}
+}
+
+func (h *Host) soloChoice() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lastSolo
+}
+
+// Storage asks every connected computer what Potluck keeps on its disk.
+func (h *Host) Storage() map[string]StorageReport {
+	h.mu.Lock()
+	var ids []string
+	for id, n := range h.nodes {
+		if n.Online {
+			ids = append(ids, id)
+		}
+	}
+	h.mu.Unlock()
+	out := map[string]StorageReport{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			var r StorageReport
+			if h.call(id, "storage", nil, &r, 20*time.Second) == nil {
+				mu.Lock()
+				out[id] = r
+				mu.Unlock()
+			}
+		}(id)
+	}
+	wg.Wait()
+	return out
 }
 
 // ---------- engine release lookup ----------
@@ -519,26 +622,34 @@ func (h *Host) engineAssets(tag string) (map[string]Asset, error) {
 	return m, nil
 }
 
-// runtimeSpec picks the engine build for a computer. Helpers use the plain CPU build (or
-// Metal on Apple Silicon); the head also uses its NVIDIA card when it has one.
+// usesCUDA says whether a computer gets the NVIDIA build of the engine: Windows PCs with a
+// working NVIDIA card. As the head it then uses the card directly; as a helper it offers the
+// card and its memory as two pools.
+func usesCUDA(info NodeInfo) bool {
+	if info.OS != "windows" || info.Arch != "amd64" {
+		return false
+	}
+	for _, g := range info.GPUs {
+		if g.Vendor == "nvidia" && g.Usable {
+			return true
+		}
+	}
+	return false
+}
+
+// runtimeSpec picks the engine build for a computer.
 func (h *Host) runtimeSpec(info NodeInfo, isHead bool) (RuntimeSpec, error) {
 	tag := h.cfg.Get().EngineTag
 	assets, err := h.engineAssets(tag)
 	if err != nil {
 		return RuntimeSpec{}, err
 	}
-	nvidia := false
-	for _, g := range info.GPUs {
-		if g.Vendor == "nvidia" && g.Usable {
-			nvidia = true
-		}
-	}
 	var variant string
 	var names []string
 	arch := map[string]string{"amd64": "x64", "arm64": "arm64"}[info.Arch]
 	switch info.OS {
 	case "windows":
-		if isHead && nvidia && arch == "x64" {
+		if usesCUDA(info) {
 			variant = "win-cuda-12.4-x64"
 			names = []string{"llama-" + tag + "-bin-win-cuda-12.4-x64.zip", "cudart-llama-bin-win-cuda-12.4-x64.zip"}
 		} else {
@@ -615,10 +726,37 @@ func (h *Host) planNodes() []PlanNode {
 			n.Offer = 0
 			continue
 		}
-		out = append(out, PlanNode{ID: id, Name: n.Info.Name, CPUBytes: cpu, GPUBytes: gpu, Unified: uni, Cores: n.Info.Cores})
+		out = append(out, PlanNode{ID: id, Name: n.Info.Name, CPUBytes: cpu, GPUBytes: gpu, Unified: uni, Cores: n.Info.Cores,
+			TwoDev: usesCUDA(n.Info), HasGPU: n.Info.usableGPU() != nil, RAMTotal: int64(n.Info.RAMTotal)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// plan lays a model out: pooled across the computers, or on one computer alone (solo) with
+// its disk standing in for the memory it lacks.
+func (h *Host) plan(info *ModelInfo, solo string) *Plan {
+	nodes := h.planNodes()
+	if solo == "" {
+		return planLayout(info, nodes, h.cfg.Get().HeadChoice)
+	}
+	for _, n := range nodes {
+		if n.ID == solo {
+			return planSolo(info, n)
+		}
+	}
+	return &Plan{Reason: "That computer is not available right now."}
+}
+
+// bestSolo finds the computer that could run a model alone with the least help from its disk.
+func (h *Host) bestSolo(info *ModelInfo) *Plan {
+	var best *Plan
+	for _, n := range h.planNodes() {
+		if p := planSolo(info, n); p.Fits && (best == nil || p.Overflow < best.Overflow) {
+			best = p
+		}
+	}
+	return best
 }
 
 // ---------- starting and stopping a model ----------
@@ -643,7 +781,7 @@ func (h *Host) step(text string) func(err error) {
 
 // Start plans and launches a model across the computers. It returns at once; progress is in
 // the cluster state.
-func (h *Host) Start(model ModelRef, ctxSize int) error {
+func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 	h.mu.Lock()
 	if h.cluster.Phase == "starting" || h.cluster.Phase == "stopping" {
 		h.mu.Unlock()
@@ -658,10 +796,11 @@ func (h *Host) Start(model ModelRef, ctxSize int) error {
 	h.mu.Lock()
 	h.cancel = cancel
 	h.cluster = ClusterState{Phase: "starting", Model: &model, Since: time.Now()}
+	h.lastCtx, h.lastSolo, h.stale = ctxSize, solo, false
 	h.mu.Unlock()
 	h.cfg.Update(func(c *Config) { c.LastModel = &model })
 	go func() {
-		err := h.start(ctx, model, ctxSize)
+		err := h.start(ctx, model, ctxSize, solo)
 		h.mu.Lock()
 		if err != nil {
 			h.cluster.Phase, h.cluster.Error = "error", err.Error()
@@ -681,7 +820,7 @@ func (h *Host) Start(model ModelRef, ctxSize int) error {
 	return nil
 }
 
-func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int) error {
+func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo string) error {
 	done := h.step("Reading the model's blueprint")
 	if err := resolveModel(ctx, &model); err != nil {
 		done(err)
@@ -697,9 +836,12 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int) error {
 		return fmt.Errorf("could not read the model: %w", err)
 	}
 
+	h.mu.Lock()
+	h.lastInfo = info
+	h.mu.Unlock()
+
 	done = h.step("Working out which computer holds which part")
-	nodes := h.planNodes()
-	plan := planLayout(info, nodes, h.cfg.Get().HeadChoice)
+	plan := h.plan(info, solo)
 	h.mu.Lock()
 	h.cluster.Plan, h.cluster.Head = plan, plan.Head
 	h.mu.Unlock()
@@ -713,11 +855,10 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int) error {
 	type part struct {
 		id     string
 		isHead bool
-		dev    int // device index in the split, for helpers
 	}
-	parts := []part{{id: plan.Head, isHead: true, dev: -1}}
-	for i, w := range plan.WorkerOrder {
-		parts = append(parts, part{id: w, dev: i})
+	parts := []part{{id: plan.Head, isHead: true}}
+	for _, w := range plan.WorkerOrder {
+		parts = append(parts, part{id: w})
 	}
 	h.mu.Lock()
 	for id, n := range h.nodes {
@@ -729,6 +870,23 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int) error {
 		}
 	}
 	h.mu.Unlock()
+
+	// Computers that are not helpers this time do not need a share from an earlier model.
+	helper := map[string]bool{}
+	for _, w := range plan.WorkerOrder {
+		helper[w] = true
+	}
+	h.mu.Lock()
+	var idle []string
+	for id, n := range h.nodes {
+		if n.Online && !helper[id] {
+			idle = append(idle, id)
+		}
+	}
+	h.mu.Unlock()
+	for _, id := range idle {
+		go func(id string) { _ = h.call(id, "prune_cache", nil, nil, 30*time.Second) }(id)
+	}
 
 	done = h.step("Installing the AI engine on each computer")
 	if err := parallelDo(parts, func(p part) error {
@@ -767,7 +925,10 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int) error {
 				}
 				layer = info.Layers
 			}
-			if t.OK && t.Size > rpcHashThreshold && deviceOfLayer(layer, info.Layers, plan.NGL, split) == p.dev {
+			if !t.OK || t.Size <= rpcHashThreshold {
+				continue
+			}
+			if dev := deviceOfLayer(layer, info.Layers, plan.NGL, split); dev >= 0 && dev < len(plan.DevOwner) && plan.DevOwner[dev] == p.id {
 				items = append(items, SeedItem{Off: t.Off, Size: t.Size})
 			}
 		}

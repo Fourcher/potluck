@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -140,6 +141,9 @@ func (app *App) serveUI() error {
 			}
 			app.host.mu.Lock()
 			if n := app.host.nodes[in.ID]; n != nil {
+				if n.Role != "" && n.Info.Limits.Pedal != info.Limits.Pedal {
+					app.host.stale = true // the pedal moved under a running model
+				}
 				info.ID = in.ID
 				n.Info = info
 			}
@@ -270,8 +274,9 @@ func (app *App) serveUI() error {
 		if err != nil {
 			return nil, errors.New("could not read that model: " + err.Error())
 		}
-		plan := planLayout(info, h.planNodes(), h.cfg.Get().HeadChoice)
-		return map[string]any{"model": m, "info": info, "plan": plan}, nil
+		// Two ways to run it: pooled across the computers, and (when one computer is close
+		// to big enough) on that computer alone with its disk covering the difference.
+		return map[string]any{"model": m, "info": info, "plan": h.plan(info, ""), "solo": h.bestSolo(info)}, nil
 	})
 
 	api("/api/start", func(r *http.Request) (any, error) {
@@ -281,12 +286,16 @@ func (app *App) serveUI() error {
 		}
 		var in struct {
 			ModelRef
-			Ctx int `json:"ctx"`
+			Ctx  int    `json:"ctx"`
+			Solo string `json:"solo"` // run on this one computer alone
 		}
 		if err := body(r, &in); err != nil {
 			return nil, err
 		}
-		return nil, h.Start(in.ModelRef, in.Ctx)
+		h.mu.Lock()
+		h.paused, h.pauseWhy = nil, ""
+		h.mu.Unlock()
+		return nil, h.Start(in.ModelRef, in.Ctx, in.Solo)
 	})
 
 	api("/api/stop", func(r *http.Request) (any, error) {
@@ -294,6 +303,9 @@ func (app *App) serveUI() error {
 		if err != nil {
 			return nil, err
 		}
+		h.mu.Lock()
+		h.paused, h.pauseWhy = nil, ""
+		h.mu.Unlock()
 		go h.Stop()
 		return nil, nil
 	})
@@ -323,6 +335,55 @@ func (app *App) serveUI() error {
 			return nil, err
 		}
 		return map[string]any{"dir": dir, "missing": missing}, nil
+	})
+
+	api("/api/share", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		var in struct{ On bool }
+		if err := body(r, &in); err != nil {
+			return nil, err
+		}
+		app.cfg.Update(func(c *Config) { c.ShareChat = in.On })
+		h.applyShare()
+		return nil, nil
+	})
+
+	api("/api/storage", func(r *http.Request) (any, error) {
+		if app.host != nil {
+			if r.Method == http.MethodGet {
+				return app.host.Storage(), nil
+			}
+			var in struct {
+				Node   string `json:"node"`
+				Action string `json:"action"` // delete_model | clear_cache
+				File   string `json:"file"`
+			}
+			if err := body(r, &in); err != nil {
+				return nil, err
+			}
+			if in.Action != "delete_model" && in.Action != "clear_cache" {
+				return nil, errors.New("unknown action")
+			}
+			var rep StorageReport
+			err := app.host.call(in.Node, in.Action, map[string]string{"file": in.File}, &rep, time.Minute)
+			return rep, err
+		}
+		return map[string]StorageReport{app.id.FP: app.agent.Storage()}, nil
+	})
+
+	api("/api/quit", func(r *http.Request) (any, error) {
+		go func() {
+			if app.host != nil {
+				app.host.Stop()
+			}
+			app.agent.Stop()
+			time.Sleep(300 * time.Millisecond)
+			os.Exit(0)
+		}()
+		return nil, nil
 	})
 
 	api("/api/firewall", func(r *http.Request) (any, error) {
@@ -384,6 +445,7 @@ func (app *App) state() map[string]any {
 			pend = append(pend, *p)
 		}
 		cl := h.cluster
+		pauseWhy, stale := h.pauseWhy, h.stale && h.cluster.Phase == "running"
 		h.mu.Unlock()
 		sort.Slice(nodes, func(i, j int) bool {
 			if nodes[i].IsMain != nodes[j].IsMain {
@@ -399,18 +461,20 @@ func (app *App) state() map[string]any {
 			}
 		}
 		ips := localIPs()
-		join := ""
+		join, shared := "", ""
 		if len(ips) > 0 {
 			join = "http://" + net.JoinHostPort(ips[0], strconv.Itoa(portJoin))
+			shared = "http://" + net.JoinHostPort(ips[0], strconv.Itoa(portChat))
 		}
 		out["main"] = map[string]any{
 			"nodes": nodes, "pending": pend, "cluster": cl, "joinURL": join, "addrs": ips,
 			"headChoice": c.HeadChoice, "chatURL": "http://127.0.0.1:" + strconv.Itoa(portChat),
 			"totalOffer": total, "biggestOffer": biggest, "lastModel": c.LastModel, "firewall": app.firewall(),
+			"shareChat": c.ShareChat, "sharedURL": shared, "dataDir": app.dir, "pauseWhy": pauseWhy, "stale": stale,
 		}
 	}
 	if app.helper != nil {
-		out["helper"] = map[string]any{"link": app.helper.State(), "info": app.agent.Info(), "status": app.agent.Status()}
+		out["helper"] = map[string]any{"link": app.helper.State(), "info": app.agent.Info(), "status": app.agent.Status(), "dataDir": app.dir}
 	}
 	if app.host == nil && app.helper == nil {
 		out["info"] = app.agent.Info()

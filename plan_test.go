@@ -29,20 +29,25 @@ func checkPlan(t *testing.T, m *ModelInfo, p *Plan) {
 	if counts[-1] != head.CPULayers {
 		t.Fatalf("head CPU: planned %d layers, llama.cpp rule gives %d (ngl %d, split %s)", head.CPULayers, counts[-1], p.NGL, p.TensorSplit)
 	}
-	dev := 0
-	total := head.CPULayers
-	for _, s := range p.Shares[1:] {
-		if counts[dev] != s.CPULayers {
-			t.Fatalf("worker %s: planned %d layers, rule gives %d (ngl %d, split %s)", s.Name, s.CPULayers, counts[dev], p.NGL, p.TensorSplit)
-		}
-		total += s.CPULayers
-		dev++
+	if len(split) != len(p.DevLayers) && p.NGL > 0 {
+		t.Fatalf("split %s has %d entries for %d devices", p.TensorSplit, len(split), len(p.DevLayers))
 	}
-	if head.GPULayers > 0 {
-		if counts[dev] != head.GPULayers {
-			t.Fatalf("head GPU: planned %d layers, rule gives %d (ngl %d, split %s)", head.GPULayers, counts[dev], p.NGL, p.TensorSplit)
+	total := head.CPULayers
+	perOwner := map[string]int{}
+	for dev, want := range p.DevLayers {
+		if counts[dev] != want {
+			t.Fatalf("device %d (%s): planned %d layers, rule gives %d (ngl %d, split %s)", dev, p.DevOwner[dev], want, counts[dev], p.NGL, p.TensorSplit)
 		}
-		total += head.GPULayers
+		total += want
+		perOwner[p.DevOwner[dev]] += want
+	}
+	for _, s := range p.Shares[1:] {
+		if perOwner[s.ID] != s.CPULayers+s.GPULayers {
+			t.Fatalf("helper %s: share says %d layers, its devices hold %d", s.Name, s.CPULayers+s.GPULayers, perOwner[s.ID])
+		}
+	}
+	if perOwner[head.ID] != head.GPULayers {
+		t.Fatalf("head GPU: share says %d layers, its device holds %d", head.GPULayers, perOwner[head.ID])
 	}
 	if total != m.Layers {
 		t.Fatalf("plan covers %d of %d layers", total, m.Layers)
@@ -100,9 +105,11 @@ func TestPlanRandom(t *testing.T) {
 		var nodes []PlanNode
 		for n := 0; n < 1+r.Intn(5); n++ {
 			pn := PlanNode{ID: string(rune('a' + n)), Name: string(rune('A' + n)), CPUBytes: int64(r.Intn(40)) << 30}
-			switch r.Intn(4) {
+			switch r.Intn(5) {
 			case 0:
-				pn.GPUBytes = int64(1+r.Intn(24)) << 30
+				pn.GPUBytes, pn.HasGPU = int64(1+r.Intn(24))<<30, true
+			case 4:
+				pn.GPUBytes, pn.HasGPU, pn.TwoDev = int64(r.Intn(24))<<30, true, true // a helper with a graphics card, sometimes a full one
 			case 1:
 				pn.Unified, pn.GPUBytes, pn.CPUBytes = true, int64(4+r.Intn(60))<<30, 0
 			}
@@ -141,5 +148,39 @@ func TestCompactToken(t *testing.T) {
 	}
 	if m := tokenInName.FindStringSubmatch("potluck-join-" + tok + " (1).exe"); m == nil || m[1] != tok {
 		t.Fatal("token not found in a renamed download")
+	}
+}
+
+// A helper with a graphics card offers the card first, then its memory.
+func TestPlanHelperGPU(t *testing.T) {
+	const gb = int64(1) << 30
+	m := fakeModel(48, 380<<20, 400<<20) // about 18 GB
+	nodes := []PlanNode{
+		{ID: "laptop", Name: "Laptop", CPUBytes: 10 * gb},
+		{ID: "pc", Name: "PC", CPUBytes: 6 * gb, GPUBytes: 3 * gb, HasGPU: true, TwoDev: true},
+		{ID: "old", Name: "Old", CPUBytes: 5 * gb},
+	}
+	p := planLayout(m, nodes, "laptop")
+	checkPlan(t, m, p)
+	var pc *PlanShare
+	for i := range p.Shares {
+		if p.Shares[i].ID == "pc" {
+			pc = &p.Shares[i]
+		}
+	}
+	if !p.Fits || pc == nil || pc.GPULayers == 0 || pc.CPULayers == 0 {
+		t.Fatalf("expected the PC to use its graphics card and its memory: %+v", p.Shares)
+	}
+}
+
+func TestPlanSolo(t *testing.T) {
+	const gb = int64(1) << 30
+	m := fakeModel(48, 745_000_000, 860_000_000)
+	p := planSolo(m, PlanNode{ID: "pc", Name: "PC", CPUBytes: 19 * gb, GPUBytes: 2859 << 20, HasGPU: true, RAMTotal: 30 * gb})
+	if !p.Fits || !p.Solo || p.Overflow <= 0 || p.Shares[0].GPULayers != 2 || p.Shares[0].CPULayers != 46 || p.NGL != 3 {
+		t.Fatalf("unexpected solo plan: %+v", p)
+	}
+	if q := planSolo(m, PlanNode{ID: "small", Name: "Small", CPUBytes: 9 * gb, RAMTotal: 16 * gb}); q.Fits {
+		t.Fatal("a 36 GB model on a 16 GB computer should be refused")
 	}
 }

@@ -281,7 +281,10 @@ type PlanNode struct {
 	CPUBytes int64  `json:"cpuBytes"` // RAM offered for layers
 	GPUBytes int64  `json:"gpuBytes"` // video memory offered (head only, or unified memory)
 	Unified  bool   `json:"unified"`  // GPU shares RAM: all local layers go to the GPU
+	TwoDev   bool   `json:"twoDev"`   // as a helper it offers two pools: its graphics card, then its RAM
+	HasGPU   bool   `json:"hasGPU"`   // the engine on this computer lists a GPU device, even when its memory is full
 	Cores    int    `json:"cores"`
+	RAMTotal int64  `json:"ramTotal"`
 }
 
 // PlanShare is what one computer ends up holding.
@@ -305,6 +308,10 @@ type Plan struct {
 	NGL         int         `json:"ngl"`
 	TensorSplit string      `json:"tensorSplit"`
 	WorkerOrder []string    `json:"workerOrder"`
+	DevOwner    []string    `json:"devOwner"`  // which computer each device in the split belongs to
+	DevLayers   []int       `json:"devLayers"` // layers on each of those devices
+	Solo        bool        `json:"solo"`      // one computer alone, letting its disk stand in for missing memory
+	Overflow    int64       `json:"overflow"`  // bytes of the model that do not fit in that computer's memory
 	ModelBytes  int64       `json:"modelBytes"`
 	OfferedSum  int64       `json:"offeredSum"`
 	BiggestOne  int64       `json:"biggestOne"` // most any single computer offers
@@ -348,6 +355,9 @@ func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 	capWorker := func(n PlanNode) int64 {
 		if n.Unified {
 			return n.GPUBytes
+		}
+		if n.TwoDev {
+			return n.CPUBytes + n.GPUBytes
 		}
 		return n.CPUBytes
 	}
@@ -414,13 +424,26 @@ func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 	if !head.Unified {
 		headCPU = take(layersIn(head.CPUBytes, edge))
 	}
-	// 3. Workers, biggest first, until every layer has a home.
+	// 3. Workers, biggest first, until every layer has a home. A helper with a usable graphics
+	// card offers two pools: the card (first) and its RAM.
+	wcapGPU := func(w PlanNode) int {
+		if w.TwoDev {
+			return layersIn(w.GPUBytes, workerEdge)
+		}
+		return 0
+	}
+	wcap := func(w PlanNode) int {
+		if w.Unified {
+			return layersIn(w.GPUBytes, workerEdge)
+		}
+		return wcapGPU(w) + layersIn(w.CPUBytes, workerEdge)
+	}
 	wl := make([]int, len(workers))
 	for i, w := range workers {
 		if left == 0 {
 			break
 		}
-		wl[i] = take(layersIn(capWorker(w), workerEdge))
+		wl[i] = take(wcap(w))
 	}
 	if left > 0 {
 		p.ShortBy = int64(left)*layer + perDeviceOverhead
@@ -443,13 +466,13 @@ func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 		// Proportional to what each offers, never above its capacity.
 		var offerSum int64
 		for i, w := range workers {
-			if wl[i] > 0 || layersIn(capWorker(w), workerEdge) > 0 {
+			if wl[i] > 0 || wcap(w) > 0 {
 				offerSum += capWorker(w)
 			}
 		}
 		rest := total
 		for i, w := range workers {
-			capL := layersIn(capWorker(w), workerEdge)
+			capL := wcap(w)
 			share := int(float64(total) * float64(capWorker(w)) / float64(offerSum))
 			if share > capL {
 				share = capL
@@ -460,7 +483,7 @@ func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 		for rest > 0 {
 			moved := false
 			for i, w := range workers {
-				if rest > 0 && wl[i] < layersIn(capWorker(w), workerEdge) {
+				if rest > 0 && wl[i] < wcap(w) {
 					wl[i]++
 					rest--
 					moved = true
@@ -472,8 +495,11 @@ func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 		}
 	}
 
-	// Build the device list in llama.cpp's order: workers, then the head's GPU.
-	type dev struct{ layers int }
+	// Build the device list in llama.cpp's order: each helper's devices, then the head's GPU.
+	type dev struct {
+		layers int
+		owner  string
+	}
 	var devs []dev
 	first := headCPU
 	p.Shares = append(p.Shares, PlanShare{ID: head.ID, Name: head.Name, Role: "head", CPULayers: headCPU, GPULayers: headGPU,
@@ -483,13 +509,25 @@ func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 			continue
 		}
 		p.WorkerOrder = append(p.WorkerOrder, w.ID)
-		devs = append(devs, dev{wl[i]})
-		p.Shares = append(p.Shares, PlanShare{ID: w.ID, Name: w.Name, Role: "worker", CPULayers: wl[i], Bytes: int64(wl[i]) * layer, Offered: capWorker(w), First: first})
+		g := 0
+		if w.TwoDev {
+			if g = wcapGPU(w); g > wl[i] {
+				g = wl[i]
+			}
+			devs = append(devs, dev{g, w.ID}) // listed even when empty: the helper's engine always offers it
+		}
+		devs = append(devs, dev{wl[i] - g, w.ID})
+		p.Shares = append(p.Shares, PlanShare{ID: w.ID, Name: w.Name, Role: "worker", CPULayers: wl[i] - g, GPULayers: g,
+			Bytes: int64(wl[i]) * layer, Offered: capWorker(w), First: first})
 		first += wl[i]
 	}
-	if head.GPUBytes > 0 {
-		devs = append(devs, dev{headGPU}) // listed even when empty: llama.cpp always appends the local GPU
+	if head.GPUBytes > 0 || head.HasGPU {
+		devs = append(devs, dev{headGPU, head.ID}) // listed even when empty: llama.cpp always appends the local GPU
 		p.Shares[0].First = first
+	}
+	for _, d := range devs {
+		p.DevOwner = append(p.DevOwner, d.owner)
+		p.DevLayers = append(p.DevLayers, d.layers)
 	}
 	// The output layer counts as one more "layer" and rides on the last device that holds anything.
 	offloaded := 0
@@ -533,6 +571,60 @@ func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 		}
 	}
 	p.Fits = true
+	return p
+}
+
+// planSolo lays a model out on one computer alone, even when it is bigger than that
+// computer's memory. The engine maps the model file instead of loading it, so the operating
+// system keeps as much of it in memory as fits and reads the rest from disk when needed.
+// Measured on a 30 GB PC with a SATA SSD and a 34 GB mixture-of-experts model: about as fast
+// as pooling three computers over Wi-Fi. It degrades quickly as the overflow grows, on dense
+// models, and on spinning disks.
+func planSolo(m *ModelInfo, n PlanNode) *Plan {
+	p := &Plan{ModelBytes: m.TotalBytes(), Layers: m.Layers, Head: n.ID, Solo: true}
+	for _, b := range m.LayerBytes {
+		if b > p.LayerBytes {
+			p.LayerBytes = b
+		}
+	}
+	layer := p.LayerBytes
+	edge := m.OtherBytes * 6 / 10
+	gpu := 0
+	if n.GPUBytes > perDeviceOverhead+edge+layer && layer > 0 {
+		gpu = int((n.GPUBytes - perDeviceOverhead - edge) / layer)
+	}
+	if gpu > m.Layers {
+		gpu = m.Layers
+	}
+	cpu := m.Layers - gpu
+	if n.Unified {
+		gpu, cpu = m.Layers, 0 // everything is one pool on these machines
+	}
+	inMemory := n.CPUBytes
+	if n.Unified {
+		inMemory = n.GPUBytes
+	}
+	need := int64(cpu)*layer + m.OtherBytes + perDeviceOverhead
+	if n.Unified {
+		need = p.ModelBytes + perDeviceOverhead
+	}
+	if need > inMemory {
+		p.Overflow = need - inMemory
+	}
+	p.OfferedSum, p.BiggestOne = inMemory+n.GPUBytes, inMemory+n.GPUBytes
+	// Past roughly twice its memory a computer spends nearly all its time reading the disk.
+	if n.RAMTotal > 0 && p.ModelBytes > 2*n.RAMTotal {
+		p.Reason = fmt.Sprintf("%s has %s of memory and this model is %s. Reading that much from disk for every word would be unusably slow.", n.Name, humanBytes(n.RAMTotal), humanBytes(p.ModelBytes))
+		return p
+	}
+	p.Shares = []PlanShare{{ID: n.ID, Name: n.Name, Role: "head", CPULayers: cpu, GPULayers: gpu, Bytes: p.ModelBytes, Offered: inMemory + n.GPUBytes}}
+	if n.GPUBytes > 0 || n.HasGPU {
+		p.DevOwner, p.DevLayers = []string{n.ID}, []int{gpu}
+	}
+	if gpu > 0 {
+		p.NGL = gpu + 1
+	}
+	p.Machines, p.Fits = 1, true
 	return p
 }
 

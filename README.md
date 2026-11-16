@@ -16,6 +16,8 @@ Working title, version 0.1. First real run (16 November 2026): a 36.6 GB, 122-bi
 3. **Pick a model** in the Models tab. Every size is marked: runs on one computer, runs pooled across several, or too big for now (and by how much).
 4. **Press "Download and run".** Each computer downloads its own share of the model. When it is loaded, "Open chat".
 
+Too big for one computer's memory does not always mean you need several. When a model is only somewhat bigger than one computer's memory, the plan also offers **that computer alone, with its disk covering the difference**. See "Pooling or disk?" below.
+
 Each computer has a **pedal**: a slider from parked to flat out that sets how much of its memory and how many of its processor cores it lends, an on/off switch, and optional hours ("only between 22:00 and 07:00"). The main computer coordinates by default and only lends its own muscle if you switch that on.
 
 ## What is inside
@@ -31,12 +33,23 @@ One self-contained program per platform (about 9 MB, no installer). Written in G
 
 Ports on the main computer: 7716 control panel (this computer only), 7717 helpers (encrypted) and discovery, 7715 join page (local network), 7720 chat and API (this computer only).
 
+## Pooling or disk?
+
+llama.cpp maps the model file rather than loading it, so a computer can run a model bigger than its memory: the operating system keeps what fits and reads the rest from disk when it is needed. Measured on 16 November 2026 with a 36.6 GB mixture-of-experts model (122B parameters, about 10B active per token):
+
+| Setup | Generation | Prompt |
+|---|---|---|
+| Pooled: 30 GB PC + two 16 GB laptops, all on Wi-Fi | 1.2 to 2.1 tokens/s | 0.4 to 0.5 tokens/s |
+| The 30 GB PC alone, model on a SATA SSD | 1.5 to 2.3 tokens/s | 1.0 to 2.6 tokens/s |
+
+So for a model a few GB over one computer's memory, that computer alone is as fast or faster, because nothing crosses the network. Pooling is for the cases the disk cannot carry: models well beyond any one computer's memory (every word would wait on gigabytes of disk reads), dense models that touch every weight for every word, and computers with hard disks. Wired network between the computers shifts the balance back toward pooling. The control panel offers both whenever both are possible; "Measure speed" settles it on your hardware.
+
 ## Build
 
     ./build.sh            # needs Go 1.23+; writes dist/potluck-<os>-<arch>
     go test ./...
 
-Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs in `dist/` next to it: the USB kit and the join page hand them out.
+Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs in `dist/` next to it: the USB kit and the join page hand them out. On a Mac the script also signs the Mac programs and builds `dist/Potluck.app` (set `POTLUCK_SIGN_ID` to a Developer ID to sign for distribution).
 
 ## Tested so far
 
@@ -46,9 +59,11 @@ Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs 
 
 ## Known limits and next steps
 
-- Not signed or notarized. Windows shows a SmartScreen warning; on macOS the smooth paths are the USB kit and the terminal one-liner on the join page. Proper signing and a `.app` bundle with a Local Network permission prompt are the next step for Macs.
-- Helpers use their processor (or Apple Silicon GPU). A helper's NVIDIA or AMD card is not used yet; only the head's NVIDIA card is.
+- Not signed with a paid developer certificate or notarized. Windows shows a SmartScreen warning; on macOS use `Potluck.app` (right-click, Open the first time), the USB kit, or the terminal one-liner on the join page.
+- A helper's graphics card is used on Windows PCs with NVIDIA cards (card first, then memory). AMD and Intel cards, and NVIDIA on Linux, are not used yet; Apple Silicon is.
 - Tensor traffic between head and helpers is relayed through the main computer. A direct path between them is planned.
-- Changing a pedal while a model runs takes effect at the next start. Hours are applied when a model starts.
-- Models split across several files are not supported yet. PirateFace downloads are hand-off only (copy the magnet link).
+- When a computer's hours end, it is switched off, or it drops out, the model is laid out again on what is left, or waits and returns by itself. A pedal moved under a running model applies when you press "Apply now".
+- The chat page and API are for this computer only unless you switch on sharing with your network. Sharing has no password.
+- Models split across several files are not supported yet. PirateFace is list-only (copy the torrent link).
+- Disk use stays bounded: each helper keeps only its share of the current model, old engine versions are removed, and the Models tab lists every downloaded file with a delete button.
 - No start-at-login option, by design for now.

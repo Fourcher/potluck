@@ -449,7 +449,31 @@ func seedCache(ctx context.Context, u, cacheDir string, items []SeedItem, jobs i
 	if firstErr == nil && ctx.Err() != nil {
 		return ctx.Err()
 	}
-	return firstErr
+	if firstErr != nil {
+		return firstErr
+	}
+	// The cache now holds exactly this computer's share of this model. Anything else in it is
+	// left over from an earlier model or layout: remove it so the folder never grows past one share.
+	mu.Lock()
+	defer mu.Unlock()
+	keepName := map[string]bool{"seeded.json": true}
+	keepKey := map[string]string{}
+	for _, it := range items {
+		if name, ok := index[key(it)]; ok {
+			keepName[name] = true
+			keepKey[key(it)] = name
+		}
+	}
+	if ents, err := os.ReadDir(cacheDir); err == nil {
+		for _, e := range ents {
+			if !e.IsDir() && !keepName[e.Name()] {
+				_ = os.Remove(filepath.Join(cacheDir, e.Name()))
+			}
+		}
+	}
+	b, _ := json.Marshal(keepKey)
+	_ = os.WriteFile(indexFile, b, 0o644)
+	return nil
 }
 
 func seedOne(ctx context.Context, u, cacheDir string, it SeedItem, j int, buf []byte, done *atomic.Int64) (string, int64, error) {

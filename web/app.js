@@ -11,6 +11,7 @@ let store = { source: "hf", q: "", results: null, loading: false, error: "", fil
 let sheet = null;                   // plan preview
 let kit = { drives: null, msg: "" };
 let logText = "";
+let disk = { data: null, loading: false };   // what Potluck keeps on each computer's disk
 
 async function api(path, body) {
   const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify(body) };
@@ -206,7 +207,30 @@ function viewModels() {
     ${pf ? `<div class="note">PirateFace lists community torrents of Hugging Face models, for when Hugging Face is unreachable. Potluck only reads the list. Download with your own torrent app, then compare the file's SHA-256 with the one Hugging Face publishes before you trust it. Downloading torrents inside Potluck is planned.</div>` : ""}
     ${store.error ? `<div class="err">${esc(store.error)}</div>` : ""}
     ${store.loading ? `<p class="muted">Searching…</p>` : (store.results || []).map(modelCard).join("") || `<p class="muted">Nothing found.</p>`}
+    ${pf ? "" : diskView()}
     ${pf ? "" : `<h2>Have a direct link?</h2><div class="tools"><input type="text" id="url" placeholder="https://…/model.gguf" style="flex:1;min-width:260px" aria-label="Direct link to a model file"><button class="btn quiet" data-a="planurl">Check it</button></div>`}`;
+}
+
+function loadDisk() {
+  disk.loading = true;
+  api("/api/storage").then(r => { disk.data = r; disk.loading = false; draw(); }).catch(() => { disk.loading = false; });
+}
+
+function diskView() {
+  if (!disk.data && !disk.loading) loadDisk();
+  if (!disk.data) return "";
+  const rows = S.main.nodes.filter(n => disk.data[n.info.id]).map(n => {
+    const d = disk.data[n.info.id], id = n.info.id;
+    const models = (d.models || []).map(f => `<div class="file"><span class="q">${esc(f.file.replace(/\.gguf$/, ""))}</span><span>${gb(f.size)}</span>
+        <span class="n muted small">${f.complete ? "Whole model, on " + esc(n.info.name) : "Unfinished download"}</span>
+        <button class="btn sm quiet" data-a="delmodel" data-node="${esc(id)}" data-file="${esc(f.file)}" data-name="${esc(n.info.name)}">Delete</button></div>`).join("");
+    const cache = d.cache > 1048576 ? `<div class="file"><span class="q">Its share of the current model</span><span>${gb(d.cache)}</span>
+        <span class="n muted small">Replaced automatically when you run a different model</span>
+        <button class="btn sm quiet" data-a="clearcache" data-node="${esc(id)}" data-name="${esc(n.info.name)}">Clear</button></div>` : "";
+    if (!models && !cache) return "";
+    return `<div class="model"><div class="row spread"><h3>${esc(n.info.name)}</h3><span class="muted small">${gb(d.free)} free · AI engine ${gb(d.engine)}</span></div><div class="files">${models}${cache}</div></div>`;
+  }).join("");
+  return `<h2>On your computers' disks</h2>${rows || `<p class="muted">Nothing downloaded yet.</p>`}`;
 }
 
 async function searchStore() {
@@ -220,32 +244,50 @@ function planBar(plan) {
   if (!plan || !plan.shares || !plan.shares.length) return "";
   const head = plan.shares[0], segs = [], legend = [];
   const total = plan.layers || 1, layerGB = plan.layerBytes || 0;
-  const seg = (n, color, striped) => n > 0 ? `<div style="flex:${n};background:${color};${striped ? "background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.35) 0 6px,transparent 6px 12px)" : ""}"></div>` : "";
+  const stripes = "background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.35) 0 6px,transparent 6px 12px)";
+  const seg = (n, color, striped) => n > 0 ? `<div style="flex:${n};background:${color};${striped ? stripes : ""}"></div>` : "";
+  const bits = s => [s.cpuLayers ? `${s.cpuLayers} layers in memory` : "", s.gpuLayers ? `${s.gpuLayers} on its graphics card` : ""].filter(Boolean).join(" + ");
   segs.push(seg(head.cpuLayers, COLORS[0]));
   plan.shares.slice(1).forEach((s, k) => {
-    segs.push(seg(s.cpuLayers, COLORS[(k + 1) % COLORS.length]));
-    legend.push(`<div><i style="background:${COLORS[(k + 1) % COLORS.length]}"></i><b>${esc(s.name)}</b>: ${s.cpuLayers} of ${total} layers, about ${gb(s.cpuLayers * layerGB)}</div>`);
+    const c = COLORS[(k + 1) % COLORS.length];
+    segs.push(seg(s.gpuLayers, c, true), seg(s.cpuLayers, c));
+    legend.push(`<div><i style="background:${c}"></i><b>${esc(s.name)}</b>: ${bits(s)}, about ${gb((s.cpuLayers + s.gpuLayers) * layerGB)}</div>`);
   });
   segs.push(seg(head.gpuLayers, COLORS[0], true));
-  const headBits = [head.cpuLayers ? `${head.cpuLayers} layers in memory` : "", head.gpuLayers ? `${head.gpuLayers} on its graphics card` : ""].filter(Boolean).join(" + ") || "coordinates only";
-  legend.unshift(`<div><i style="background:${COLORS[0]}"></i><b>${esc(head.name)}</b> (runs the model): ${headBits}, about ${gb((head.cpuLayers + head.gpuLayers) * layerGB)}</div>`);
-  return `<div class="plan" role="img" aria-label="How the model's layers are spread over the computers">${segs.join("")}</div><div class="legend">${legend.join("")}</div>`;
+  legend.unshift(`<div><i style="background:${COLORS[0]}"></i><b>${esc(head.name)}</b> (runs the model): ${bits(head) || "coordinates only"}, about ${gb((head.cpuLayers + head.gpuLayers) * layerGB)}${plan.solo && plan.overflow > 0 ? `, of which about ${gb(plan.overflow)} is read from its disk as needed` : ""}</div>`);
+  return `<div class="plan" role="img" aria-label="How the model's layers are spread over the computers">${segs.join("")}</div><div class="legend">${legend.join("")}</div><p class="muted small">Striped parts sit on a graphics card, out of ${total} layers in all.</p>`;
 }
 
 function viewSheet() {
   if (!sheet) return "";
   if (sheet.loading) return `<div class="sheet"><div class="card"><p>Reading the model's blueprint and working out a layout…</p></div></div>`;
-  const p = sheet.plan, m = sheet.model, info = sheet.info;
-  const verdict = !p.fits ? `<div class="err"><b>This one does not fit yet.</b> ${esc(p.reason)} Add a computer, press a pedal further down, or pick a smaller size.</div>`
-    : p.needsPool ? `<div class="banner" style="border-color:var(--ok);background:var(--ok-soft)"><b>Too big for any one of your computers. Runs across ${p.machines} of them together.</b></div>`
-    : `<div class="note">Fits on ${esc(p.shares[0].name)} by itself, so it will run there${p.machines > 1 ? " with help from the others" : ""}.</div>`;
+  const p = sheet.plan, solo = sheet.solo, m = sheet.model, info = sheet.info;
+  const ctx = `<label class="small">Conversation memory <select id="ctx"><option value="4096">Normal (4,096 tokens)</option><option value="8192">Long (8,192)</option><option value="16384">Very long (16,384)</option></select></label>`;
+  let body;
+  if (p.fits) {
+    const verdict = p.needsPool ? `<div class="banner" style="border-color:var(--ok);background:var(--ok-soft)"><b>Too big for the memory of any one of your computers. Runs across ${p.machines} of them together.</b></div>`
+      : `<div class="note">Fits in ${esc(p.shares[0].name)}'s memory, so it runs there${p.machines > 1 ? " with help from the others" : ""}.</div>`;
+    body = `${verdict}${planBar(p)}
+      <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start">Download and run</button></div>
+      <p class="muted small">Each computer downloads its own share. The first start takes as long as the download; later starts take a few minutes.</p>`;
+    if (p.needsPool && solo && solo.fits) {
+      body += `<h2 style="font-size:16px">Or: ${esc(solo.shares[0].name)} alone, with help from its disk</h2>
+        <p class="muted small">The model is about ${gb(solo.overflow)} bigger than ${esc(solo.shares[0].name)}'s free memory. It can keep most of it in memory and read the rest from disk as needed.
+        No network in the way: with an SSD and this kind of model that can match or beat pooling; with a hard disk it is slow. Try both and compare with "Measure speed".</p>
+        <button class="btn ghost" data-a="start" data-solo="${esc(solo.head)}">Run on ${esc(solo.shares[0].name)} alone</button>`;
+    }
+  } else if (solo && solo.fits) {
+    body = `<div class="note"><b>Does not fit in your computers' pooled memory.</b> ${esc(p.reason)}</div>
+      <h2 style="font-size:16px">It can still run on ${esc(solo.shares[0].name)}, with help from its disk</h2>
+      <p class="muted small">About ${gb(solo.overflow)} of it will not fit in memory and is read from disk as needed. Fine with an SSD, slow with a hard disk.</p>${planBar(solo)}
+      <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start" data-solo="${esc(solo.head)}">Download and run on ${esc(solo.shares[0].name)}</button></div>`;
+  } else {
+    body = `<div class="err"><b>This one does not fit yet.</b> ${esc(p.reason)} Add a computer, press a pedal further down, or pick a smaller size.</div>`;
+  }
   return `<div class="sheet" data-a="closesheet"><div class="card" data-stop>
     <div class="row spread"><h1 style="font-size:21px">${esc(m.title || m.file)}</h1><button class="link" data-a="closesheet">Close</button></div>
     <p class="muted small">${gb(m.size)} · ${info.layers} layers · ${esc(m.repo || "direct link")}</p>
-    ${verdict}${p.fits ? planBar(p) : ""}
-    ${p.fits ? `<div class="row" style="margin-top:16px"><label class="small">Conversation memory <select id="ctx"><option value="4096">Normal (4,096 tokens)</option><option value="8192">Long (8,192)</option><option value="16384">Very long (16,384)</option></select></label>
-      <button class="btn" data-a="start">Download and run</button></div>
-      <p class="muted small">Each computer downloads its own share. The first start takes as long as the download; later starts take a few minutes.</p>` : ""}
+    ${body}
   </div></div>`;
 }
 
@@ -261,6 +303,8 @@ async function openPlan(model) {
 function viewRun() {
   const m = S.main, c = m.cluster;
   if (c.phase === "idle") {
+    if (m.pauseWhy) return `<h1>Waiting for your computers</h1><div class="note">${esc(m.pauseWhy)}</div>
+      <p style="margin-top:14px"><button class="btn ghost" data-a="stop">Do not restart it</button></p>`;
     return `<h1>Nothing is running</h1><p class="muted">Pick a model and Potluck spreads it over your computers.</p>
       <p style="margin-top:14px"><button class="btn" data-a="tab" data-tab="models">Choose a model</button>
       ${m.lastModel ? ` <button class="btn ghost" data-a="again">Run ${esc(m.lastModel.title || m.lastModel.file)} again</button>` : ""}</p>`;
@@ -281,17 +325,20 @@ function viewRun() {
   }
   const p = c.plan || {};
   return `<div class="row spread"><div><h1>${title} is running</h1>
-      <p class="muted">${p.needsPool ? `Too big for any one of your computers. Pooled across ${p.machines}.` : `Running on ${p.machines || 1} ${p.machines > 1 ? "computers" : "computer"}.`}</p></div>
+      <p class="muted">${p.solo ? `Running on ${esc(p.shares[0].name)} alone${p.overflow > 0 ? `, reading about ${gb(p.overflow)} of it from disk as needed` : ""}.` : p.needsPool ? `Too big for the memory of any one of your computers. Pooled across ${p.machines}.` : `Running on ${p.machines || 1} ${p.machines > 1 ? "computers" : "computer"}.`}</p></div>
       <div class="row"><a class="btn" href="${esc(m.chatURL)}" target="_blank" rel="noopener">Open chat</a><button class="btn ghost" data-a="stop">Stop</button></div></div>
+    ${m.stale ? `<div class="banner"><div class="row spread"><div>A pedal changed on a computer that is part of this model. It takes effect when the model is laid out again.</div><button class="btn" data-a="again">Apply now</button></div></div>` : ""}
     ${planBar(p)}
     <div class="grid" style="margin-top:18px">
       <div class="card speed"><h3>Speed</h3>
         ${c.tps ? `<p><b>${c.tps.toFixed(1)}</b> tokens per second</p><p class="muted small">Measured on a short question. A token is about three quarters of a word; people read roughly 5 per second.</p>` : `<p class="muted">Not measured yet.</p>`}
         <p><button class="btn quiet sm" data-a="test" ${c.testing ? "disabled" : ""}>${c.testing ? "Measuring…" : "Measure speed"}</button></p>
         ${c.reply ? `<p class="small muted" style="margin-top:8px">"${esc(c.reply.slice(0, 360))}"</p>` : ""}</div>
-      <div class="card"><h3>Use it from other apps</h3>
+      <div class="card"><h3>Use it from other apps and devices</h3>
         <p class="muted small">Anything that speaks the OpenAI API can use your pooled model. On this computer the address is:</p>
-        <p class="addr" style="font-size:17px">${esc(m.chatURL)}/v1</p></div>
+        <p class="addr" style="font-size:17px">${esc(m.chatURL)}/v1</p>
+        <label class="sw" style="margin-top:10px"><input type="checkbox" data-share ${m.shareChat ? "checked" : ""}> Let phones and other devices on my network use it too</label>
+        ${m.shareChat ? `<p class="muted small" style="margin-top:6px">Open this on any device on your network. There is no password, so only switch this on at home.</p><p class="addr" style="font-size:17px">${esc(m.sharedURL)}</p>` : ""}</div>
     </div>
     <div class="grid" style="margin-top:16px">${nodes}</div>`;
 }
@@ -323,6 +370,8 @@ function draw(force) {
   } else {
     html = viewChoose();
   }
+  const where = (S.main && S.main.dataDir) || (S.helper && S.helper.dataDir) || "";
+  html += `<footer class="muted small">Potluck ${esc(S.version)}${where ? ` · everything it stores is in ${esc(where)}` : ""} · <button class="link" data-a="quit">Quit Potluck</button></footer>`;
   if (!force && busy()) return;
   const app = $("#app"), y = window.scrollY;
   app.innerHTML = html;
@@ -337,7 +386,7 @@ async function refresh() {
 // ---------- actions ----------
 
 const actions = {
-  tab(t) { tab = t.dataset.tab; location.hash = tab; logText = ""; draw(true); },
+  tab(t) { tab = t.dataset.tab; location.hash = tab; logText = ""; if (tab === "models") disk.data = null; draw(true); },
   role(t) { act(() => api("/api/role", { role: t.dataset.role })); },
   pending(t) { act(() => api("/api/pending", { id: t.dataset.id, approve: !!t.dataset.ok })); },
   rename(t) {
@@ -370,15 +419,21 @@ const actions = {
   },
   plan(t) { openPlan({ source: "hf", repo: t.dataset.repo, file: t.dataset.file }); },
   planurl() { const u = $("#url").value.trim(); if (u) openPlan({ source: "url", url: u }); },
-  closesheet(t, e) { if (e.target.closest("[data-stop]") && !e.target.closest("button")) return; sheet = null; draw(true); },
-  start() {
-    const m = sheet.model, ctx = +$("#ctx").value;
+  closesheet(t, e) { if (e.target.closest("[data-stop]") && !e.target.closest("[data-a=closesheet]:not(.sheet)")) return; sheet = null; draw(true); },
+  start(t) {
+    const m = sheet.model, ctx = +($("#ctx") ? $("#ctx").value : 4096), solo = t.dataset.solo || "";
     sheet = null; tab = "run"; location.hash = tab;
-    act(() => api("/api/start", { ...m, ctx }));
+    act(() => api("/api/start", { ...m, ctx, solo }));
   },
-  again() { const m = (S.main.cluster.model) || S.main.lastModel; if (m) { logText = ""; act(() => api("/api/start", { ...m, ctx: 4096 })); } },
+  again() {
+    const c = S.main.cluster, m = c.model || S.main.lastModel;
+    if (m) { logText = ""; act(() => api("/api/start", { ...m, ctx: 4096, solo: c.plan && c.plan.solo ? c.plan.head : "" })); }
+  },
   stop() { logText = ""; act(() => api("/api/stop", {})); },
   test() { act(() => api("/api/test", {})); },
+  delmodel(t) { if (confirm(`Delete ${t.dataset.file} from ${t.dataset.name}? You can download it again later.`)) api("/api/storage", { node: t.dataset.node, action: "delete_model", file: t.dataset.file }).then(loadDisk).catch(e => toast(e.message)); },
+  clearcache(t) { if (confirm(`Clear ${t.dataset.name}'s share of the model? It is downloaded again the next time it is needed.`)) api("/api/storage", { node: t.dataset.node, action: "clear_cache" }).then(loadDisk).catch(e => toast(e.message)); },
+  quit() { if (confirm("Quit Potluck on this computer? Any running model stops.")) api("/api/quit", {}).then(() => { $("#app").innerHTML = `<p class="muted center">Potluck has quit. You can close this tab.</p>`; S = null; }); },
   magnet(t) { navigator.clipboard.writeText(t.dataset.magnet).then(() => toast("Torrent link copied. Paste it into your torrent app."), () => toast("Could not copy. Your browser blocked it.")); },
   tohf(t) { store.source = "hf"; store.q = t.dataset.repo.split("/").pop(); store.results = null; draw(true); },
 };
@@ -393,6 +448,7 @@ document.addEventListener("input", e => {
   if (e.target.matches("[data-c=pedal]")) { const b = $("[data-pedal]", e.target.closest(".limits")); b.textContent = `${e.target.value}% · ${pedalWord(+e.target.value)}`; }
 });
 document.addEventListener("change", e => {
+  if (e.target.matches("[data-share]")) { const on = e.target.checked; holdUntil = 0; return act(() => api("/api/share", { on })); }
   if (e.target.matches("[data-head]")) { const id = e.target.value; holdUntil = 0; return act(() => api("/api/head", { id })); }
   const box = e.target.closest(".limits");
   if (!box) return;

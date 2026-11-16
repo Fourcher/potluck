@@ -30,6 +30,7 @@ type Config struct {
 	Trusted    map[string]string `json:"trusted,omitempty"` // fingerprint -> name
 	JoinSecret string            `json:"joinSecret,omitempty"`
 	EngineTag  string            `json:"engineTag,omitempty"`
+	ShareChat  bool              `json:"shareChat,omitempty"`  // chat page and API reachable from the local network
 	HeadChoice string            `json:"headChoice,omitempty"` // "" = automatic
 	LastModel  *ModelRef         `json:"lastModel,omitempty"`
 }
@@ -234,6 +235,7 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		a.mu.Lock()
 		a.rtDir = dir
 		a.mu.Unlock()
+		a.pruneEngines(dir)
 		a.note("AI engine ready", 0, 0)
 		return map[string]string{"dir": dir}, nil
 
@@ -286,6 +288,50 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 	case "status":
 		return a.Status(), nil
 
+	case "storage":
+		return a.Storage(), nil
+
+	case "delete_model":
+		var in struct {
+			File string `json:"file"`
+		}
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, err
+		}
+		a.mu.Lock()
+		busy := a.head.Running()
+		a.mu.Unlock()
+		if busy {
+			return nil, errors.New("stop the running model first")
+		}
+		base := filepath.Join(a.dir, "models", filepath.Base(in.File))
+		for _, suffix := range []string{"", ".ok", ".part", ".progress"} {
+			_ = os.Remove(base + suffix)
+		}
+		return a.Storage(), nil
+
+	case "prune_cache":
+		// This computer is not a helper for the model that is starting: drop any share left
+		// from an earlier one.
+		a.mu.Lock()
+		busy := a.rpc.Running()
+		a.mu.Unlock()
+		if !busy {
+			_ = os.RemoveAll(filepath.Join(a.dir, "cache", "rpc"))
+		}
+		return nil, nil
+
+	case "clear_cache":
+		a.mu.Lock()
+		busy := a.rpc.Running() || a.head.Running()
+		a.mu.Unlock()
+		if busy {
+			return nil, errors.New("stop the running model first")
+		}
+		_ = os.RemoveAll(filepath.Join(a.dir, "cache"))
+		_ = os.RemoveAll(filepath.Join(a.dir, "tmp"))
+		return a.Storage(), nil
+
 	case "stop":
 		a.Stop()
 		return nil, nil
@@ -312,6 +358,11 @@ func (a *Agent) startRPC() (any, error) {
 	// Bound to this computer only. Other computers reach it through the encrypted tunnel,
 	// because the worker protocol itself has no password.
 	args := []string{"-H", "127.0.0.1", "-p", strconv.Itoa(port), "-c", "-t", strconv.Itoa(threads)}
+	if strings.Contains(filepath.Base(rt), "cuda") {
+		// Offer the graphics card first and this computer's memory second. (By default the
+		// engine would offer only the card.) The planner counts on exactly this order.
+		args = append(args, "-d", "CUDA0,CPU")
+	}
 	p, err := a.startProc("worker", rt, bin, args, true, info.Limits.Pedal < 100)
 	if err != nil {
 		return nil, err
@@ -460,4 +511,63 @@ func (a *Agent) localPort(target string) (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("nothing is running for %q here", target)
+}
+
+// StorageReport says what Potluck keeps on this computer's disk.
+type StorageReport struct {
+	Models []ModelFile `json:"models"`
+	Cache  int64       `json:"cache"`  // this computer's share of models it helps with
+	Engine int64       `json:"engine"` // the AI engine programs
+	Free   int64       `json:"free"`
+}
+
+// ModelFile is one downloaded model.
+type ModelFile struct {
+	File     string `json:"file"`
+	Size     int64  `json:"size"`
+	Complete bool   `json:"complete"`
+}
+
+func dirSize(dir string) int64 {
+	var n int64
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			if info, e := d.Info(); e == nil && info.Mode().IsRegular() {
+				n += info.Size()
+			}
+		}
+		return nil
+	})
+	return n
+}
+
+// Storage lists what is on disk here.
+func (a *Agent) Storage() StorageReport {
+	r := StorageReport{Cache: dirSize(filepath.Join(a.dir, "cache")), Engine: dirSize(filepath.Join(a.dir, "runtime")), Free: int64(diskFree(a.dir))}
+	ents, _ := os.ReadDir(filepath.Join(a.dir, "models"))
+	for _, e := range ents {
+		name := e.Name()
+		info, err := e.Info()
+		if err != nil || e.IsDir() {
+			continue
+		}
+		switch {
+		case strings.HasSuffix(name, ".gguf"):
+			r.Models = append(r.Models, ModelFile{File: name, Size: info.Size(), Complete: true})
+		case strings.HasSuffix(name, ".gguf.part"):
+			r.Models = append(r.Models, ModelFile{File: strings.TrimSuffix(name, ".part"), Size: info.Size()})
+		}
+	}
+	return r
+}
+
+// pruneEngines removes engine builds other than the one in use, so old versions do not pile up.
+func (a *Agent) pruneEngines(keep string) {
+	root := filepath.Join(a.dir, "runtime")
+	ents, _ := os.ReadDir(root)
+	for _, e := range ents {
+		if p := filepath.Join(root, e.Name()); e.IsDir() && p != keep && e.Name() != "glibc" {
+			_ = os.RemoveAll(p)
+		}
+	}
 }

@@ -42,7 +42,7 @@ func binName(goos, goarch string) string {
 func findBinary(goos, goarch string) string {
 	exe, _ := os.Executable()
 	dir := filepath.Dir(exe)
-	for _, d := range []string{dir, filepath.Join(dir, "dist"), filepath.Join(dir, "kit")} {
+	for _, d := range []string{dir, filepath.Join(dir, "dist"), filepath.Join(dir, "kit"), filepath.Join(dir, "..", "Resources", "kit")} {
 		p := filepath.Join(d, binName(goos, goarch))
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
 			return p

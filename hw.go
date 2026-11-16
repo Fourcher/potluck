@@ -247,7 +247,8 @@ func nvidiaGPUs() []GPU {
 		if e1 != nil || e2 != nil {
 			continue
 		}
-		gpus = append(gpus, GPU{Name: "NVIDIA " + strings.TrimPrefix(strings.TrimSpace(f[0]), "NVIDIA "), Vendor: "nvidia", VRAMTotal: total << 20, VRAMFree: free << 20, Usable: true})
+		gpus = append(gpus, GPU{Name: "NVIDIA " + strings.TrimPrefix(strings.TrimSpace(f[0]), "NVIDIA "), Vendor: "nvidia", VRAMTotal: total << 20, VRAMFree: free << 20,
+			Usable: runtime.GOOS == "windows"}) // on Linux the plain CPU engine is installed for now
 	}
 	return gpus
 }
