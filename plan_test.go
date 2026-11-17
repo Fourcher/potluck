@@ -184,3 +184,200 @@ func TestPlanSolo(t *testing.T) {
 		t.Fatal("a 36 GB model on a 16 GB computer should be refused")
 	}
 }
+
+// moeModel is shaped like the 122B mixture-of-experts model measured on the real cluster:
+// 48 layers of 747.8 MB, 673 MB of each being experts.
+func moeModel() *ModelInfo {
+	m := fakeModel(48, 747787264, 858<<20)
+	m.OutputBytes = 409 << 20
+	m.ExpertBytes = make([]int64, 48)
+	for i := range m.ExpertBytes {
+		m.ExpertBytes[i] = 642 << 20
+	}
+	return m
+}
+
+func realNodes() []PlanNode {
+	return []PlanNode{
+		{ID: "mono", Name: "Monolith", CPUBytes: 26405202944, GPUBytes: 3310 << 20, HasGPU: true, RAMTotal: 32 << 30},
+		{ID: "mac", Name: "MacBook Pro", CPUBytes: 11424612941, LinkMs: 36},
+		{ID: "llmos", Name: "LLMOS", CPUBytes: 9660216832, LinkMs: 16},
+	}
+}
+
+// The measured fastest layout: the card holds the trunk of the head's layers, and one
+// helper, the better connected one, takes what does not fit.
+func TestTrunkPlanRealCluster(t *testing.T) {
+	m := moeModel()
+	p := planLayout(m, realNodes(), "")
+	if !p.Fits || !p.CardTrunk {
+		t.Fatalf("expected a card-trunk plan, got fits=%v trunk=%v (%s)", p.Fits, p.CardTrunk, p.Reason)
+	}
+	checkPlan(t, m, p)
+	if p.Head != "mono" {
+		t.Fatalf("head is %s", p.Head)
+	}
+	if len(p.WorkerOrder) != 1 {
+		t.Fatalf("expected a single helper, got %v", p.WorkerOrder)
+	}
+	head := p.Shares[0]
+	if head.GPULayers != len(p.ExpertCPU) || head.GPULayers < 30 {
+		t.Fatalf("card layers %d, expert-in-memory layers %d", head.GPULayers, len(p.ExpertCPU))
+	}
+	if p.ExpertCPU[0] != m.Layers-head.GPULayers || p.ExpertCPU[len(p.ExpertCPU)-1] != m.Layers-1 {
+		t.Fatalf("expert layers %v do not match the card's layers", p.ExpertCPU)
+	}
+	// Memory check: experts of the card's layers plus the whole front layers fit the offer.
+	ram := int64(head.CPULayers)*747787264 + int64(head.GPULayers)*(642<<20)
+	if ram > 26405202944 {
+		t.Fatalf("head memory %d over its offer", ram)
+	}
+	card := int64(head.GPULayers)*(747787264-(642<<20)) + m.OutputBytes
+	if card > 3310<<20 {
+		t.Fatalf("card memory %d over its offer", card)
+	}
+	t.Logf("head: %d whole layers in memory + %d on the card; helper %s: %d; ngl %d split %s", head.CPULayers, head.GPULayers, p.Shares[1].Name, p.Shares[1].CPULayers, p.NGL, p.TensorSplit)
+}
+
+// With no link measurements the plan still uses a single helper when one is enough.
+func TestTrunkPlanFewestHelpers(t *testing.T) {
+	m := moeModel()
+	nodes := realNodes()
+	for i := range nodes {
+		nodes[i].LinkMs = 0
+	}
+	p := planLayout(m, nodes, "")
+	checkPlan(t, m, p)
+	if !p.Fits || len(p.WorkerOrder) != 1 {
+		t.Fatalf("expected one helper, got %v", p.WorkerOrder)
+	}
+}
+
+// A dense model, or a card big enough for whole layers, keeps the whole-layer layout.
+func TestTrunkOnlyWhenItHelps(t *testing.T) {
+	dense := fakeModel(48, 747787264, 858<<20)
+	if p := planLayout(dense, realNodes(), ""); p.CardTrunk {
+		t.Fatal("dense model must not use the card-trunk layout")
+	} else {
+		checkPlan(t, dense, p)
+	}
+	m := moeModel()
+	big := []PlanNode{{ID: "a", Name: "Big", CPUBytes: 64 << 30, GPUBytes: 48 << 30, HasGPU: true}}
+	if p := planLayout(m, big, ""); p.CardTrunk || !p.Fits {
+		t.Fatal("a card that holds the whole model must take whole layers")
+	}
+	uni := []PlanNode{{ID: "a", Name: "Mac", GPUBytes: 20 << 30, Unified: true, HasGPU: true}, {ID: "b", Name: "PC", CPUBytes: 30 << 30}}
+	if p := planLayout(m, uni, "a"); p.CardTrunk {
+		t.Fatal("unified memory must not use the card-trunk layout")
+	} else {
+		checkPlan(t, m, p)
+	}
+}
+
+// Random mixture-of-experts clusters: whatever layout comes out must follow llama.cpp's rule
+// and stay inside every offer.
+func TestTrunkPlanRandom(t *testing.T) {
+	r := rand.New(rand.NewSource(7))
+	for i := 0; i < 3000; i++ {
+		layers := 8 + r.Intn(80)
+		lb := int64(100+r.Intn(900)) << 20
+		m := fakeModel(layers, lb, int64(100+r.Intn(900))<<20)
+		m.OutputBytes = m.OtherBytes / 2
+		m.ExpertBytes = make([]int64, layers)
+		for l := range m.ExpertBytes {
+			m.ExpertBytes[l] = lb * int64(50+r.Intn(45)) / 100
+		}
+		var nodes []PlanNode
+		for n := 0; n < 1+r.Intn(4); n++ {
+			pn := PlanNode{ID: string(rune('a' + n)), Name: string(rune('A' + n)), CPUBytes: int64(2+r.Intn(40)) << 30, LinkMs: float64(r.Intn(60))}
+			if r.Intn(2) == 0 {
+				pn.GPUBytes, pn.HasGPU = int64(1+r.Intn(12))<<30, true
+				pn.TwoDev = r.Intn(2) == 0
+			}
+			nodes = append(nodes, pn)
+		}
+		p := planLayout(m, nodes, "")
+		checkPlan(t, m, p)
+		if p.Fits && p.CardTrunk {
+			head := p.Shares[0]
+			var hn PlanNode
+			for _, n := range nodes {
+				if n.ID == p.Head {
+					hn = n
+				}
+			}
+			var ram, card int64
+			for l := 0; l < head.CPULayers; l++ {
+				ram += m.LayerBytes[l]
+			}
+			onCPU := map[int]bool{}
+			for _, l := range p.ExpertCPU {
+				onCPU[l] = true
+			}
+			for l := layers - head.GPULayers; l < layers; l++ {
+				card += m.trunkBytes(l)
+				if onCPU[l] {
+					ram += m.expertBytes(l)
+				} else {
+					card += m.expertBytes(l)
+				}
+			}
+			if ram > hn.CPUBytes || card+m.OutputBytes > hn.GPUBytes {
+				t.Fatalf("case %d: head over its offer (ram %d of %d, card %d of %d)", i, ram, hn.CPUBytes, card+m.OutputBytes, hn.GPUBytes)
+			}
+		}
+	}
+}
+
+func TestSoloTrunk(t *testing.T) {
+	m := moeModel()
+	p := planSolo(m, realNodes()[0])
+	if !p.Fits || !p.CardTrunk || len(p.ExpertCPU) != p.Shares[0].GPULayers {
+		t.Fatalf("solo trunk plan wrong: fits=%v trunk=%v card=%d experts=%d", p.Fits, p.CardTrunk, p.Shares[0].GPULayers, len(p.ExpertCPU))
+	}
+	if p.Overflow <= 0 {
+		t.Fatal("this model is bigger than the head's memory: expected some overflow to disk")
+	}
+	t.Logf("solo: %d layers' trunk on the card, %d whole in memory, overflow %s", p.Shares[0].GPULayers, p.Shares[0].CPULayers, humanBytes(p.Overflow))
+}
+
+func TestExpertTensorNames(t *testing.T) {
+	for name, want := range map[string]bool{
+		"blk.3.ffn_up_exps.weight": true, "blk.12.ffn_gate_exps.weight": true, "blk.0.ffn_down_chexps.weight": true,
+		"blk.3.ffn_up.weight": false, "blk.3.attn_q.weight": false, "blk.3.ffn_gate_inp.weight": false, "output.weight": false,
+	} {
+		if isExpertTensor(name) != want {
+			t.Fatalf("%s: got %v", name, !want)
+		}
+	}
+}
+
+// When one helper is enough at no cost to the head, that is the plan, even if another
+// helper has the better connection: one helper measured faster than two.
+func TestTrunkPlanPrefersOneHelper(t *testing.T) {
+	m := moeModel()
+	nodes := realNodes()
+	nodes[1].CPUBytes = 15 << 30 // the MacBook with more memory free, as seen on the real cluster
+	p := planLayout(m, nodes, "")
+	checkPlan(t, m, p)
+	if !p.Fits || len(p.WorkerOrder) != 1 || p.Shares[0].CPULayers != 0 {
+		t.Fatalf("expected one helper and no whole layers on the head's processor, got %v with %d", p.WorkerOrder, p.Shares[0].CPULayers)
+	}
+}
+
+// Two helpers are needed either way: the better-connected one is filled first.
+func TestTrunkPlanTieGoesToBestLink(t *testing.T) {
+	m := moeModel()
+	nodes := realNodes()
+	nodes[0].CPUBytes = 20 << 30 // a head with less memory: neither helper is enough alone
+	p := planLayout(m, nodes, "")
+	checkPlan(t, m, p)
+	if !p.Fits || len(p.WorkerOrder) != 2 {
+		t.Fatalf("expected two helpers, got %v", p.WorkerOrder)
+	}
+	for _, s := range p.Shares[1:] {
+		if s.ID == "llmos" && s.CPULayers != 12 {
+			t.Fatalf("the better-connected helper should be filled to its 12 layers, got %d", s.CPULayers)
+		}
+	}
+}

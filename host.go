@@ -42,7 +42,11 @@ type Node struct {
 	Active   bool      `json:"active"` // allowed to work right now (switch + schedule)
 	NoGPU    bool      `json:"noGPU"`  // its engine found no graphics card it can use after all
 	LastSeen time.Time `json:"lastSeen"`
-	peer     *Peer
+	// LinkMs is the average round trip to this computer over the last couple of minutes,
+	// jitter included. 0 until measured.
+	LinkMs float64 `json:"linkMs"`
+	rtts   []float64
+	peer   *Peer
 }
 
 // Pending is a computer that asked to join and waits for a click.
@@ -113,6 +117,7 @@ func newHost(a *Agent, id *Identity, cfg *ConfigStore) *Host {
 	self := &Node{Info: a.Info(), Online: true, IsMain: true}
 	h.nodes[id.FP] = self
 	a.dialTunnel = h.openTunnel
+	a.introduce = func(to string, port int) ([]string, error) { return h.introduce(id.FP, to, port, localIPv4s()) }
 	a.notify = func(method string, data any) {
 		if p, ok := data.(ProgressNote); ok {
 			h.setProgress(id.FP, p)
@@ -270,6 +275,24 @@ func (h *Host) serveControl(c *tls.Conn, fp string, hello Hello) {
 			}
 		}
 	}
+	peer.OnReq = func(method string, data json.RawMessage) (any, error) {
+		if method == "introduce" {
+			var in struct {
+				To    string   `json:"to"`
+				Port  int      `json:"port"`
+				Addrs []string `json:"addrs"`
+			}
+			if err := json.Unmarshal(data, &in); err != nil {
+				return nil, err
+			}
+			addrs, err := h.introduce(fp, in.To, in.Port, in.Addrs)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"addr": addrs[0], "addrs": addrs[1:]}, nil
+		}
+		return nil, errors.New("unknown request")
+	}
 	h.mu.Lock()
 	n := h.nodes[fp]
 	if n == nil {
@@ -334,6 +357,26 @@ func (h *Host) call(id, method string, in, out any, timeout time.Duration) error
 }
 
 func (h *Host) refreshNode(id string) {
+	if id != h.id.FP {
+		// Time a request that costs the helper nothing: that is the connection alone.
+		t := time.Now()
+		if h.call(id, "ping", nil, nil, 5*time.Second) == nil {
+			ms := float64(time.Since(t).Microseconds()) / 1000
+			h.mu.Lock()
+			if n := h.nodes[id]; n != nil {
+				n.rtts = append(n.rtts, ms)
+				if len(n.rtts) > 20 {
+					n.rtts = n.rtts[len(n.rtts)-20:]
+				}
+				var sum float64
+				for _, v := range n.rtts {
+					sum += v
+				}
+				n.LinkMs = sum / float64(len(n.rtts))
+			}
+			h.mu.Unlock()
+		}
+	}
 	var info NodeInfo
 	if err := h.call(id, "inventory", nil, &info, 15*time.Second); err != nil {
 		// This doubles as the heartbeat. A helper that has said nothing for a while is cut
@@ -399,6 +442,60 @@ func (h *Host) openTunnel(to, target string) (net.Conn, error) {
 	case <-time.After(15 * time.Second):
 		return nil, errors.New("the other computer did not connect back")
 	}
+}
+
+// introduce brings two paired computers together for a direct link. "from" will connect
+// from the given UDP port; the answer lists the addresses "to" can be reached at. Each side
+// learns the other's addresses and fingerprint only through its own trusted link to this
+// computer. Both the address each one is seen at from here and the addresses it reports
+// itself are passed on: two computers may reach this one over different networks.
+func (h *Host) introduce(from, to string, port int, fromOwn []string) ([]string, error) {
+	if from == to || port <= 0 || port > 65535 {
+		return nil, errors.New("bad introduction")
+	}
+	h.mu.Lock()
+	var fromPeer, toPeer *Peer
+	if n := h.nodes[from]; n != nil {
+		fromPeer = n.peer
+	}
+	if n := h.nodes[to]; n != nil {
+		toPeer = n.peer
+	}
+	h.mu.Unlock()
+	me := h.id.FP
+	var fromIP, toIP string
+	switch {
+	case from == me && toPeer != nil:
+		fromIP, toIP = addrHost(toPeer.c.LocalAddr()), addrHost(toPeer.c.RemoteAddr())
+	case to == me && fromPeer != nil:
+		fromIP, toIP = addrHost(fromPeer.c.RemoteAddr()), addrHost(fromPeer.c.LocalAddr())
+	case fromPeer != nil && toPeer != nil:
+		fromIP, toIP = addrHost(fromPeer.c.RemoteAddr()), addrHost(toPeer.c.RemoteAddr())
+	default:
+		return nil, errors.New("that computer is not connected")
+	}
+	withPort := func(first string, more []string, p int) []string {
+		out := []string{net.JoinHostPort(first, strconv.Itoa(p))}
+		for _, ip := range more {
+			if len(out) < 12 && net.ParseIP(ip) != nil && ip != first {
+				out = append(out, net.JoinHostPort(ip, strconv.Itoa(p)))
+			}
+		}
+		return out
+	}
+	fromAddrs := withPort(fromIP, fromOwn, port)
+	var res struct {
+		Port  int      `json:"port"`
+		Addrs []string `json:"addrs"`
+	}
+	in := map[string]any{"fp": from, "addr": fromAddrs[0], "addrs": fromAddrs[1:]}
+	if err := h.call(to, "expect", in, &res, 10*time.Second); err != nil {
+		return nil, err
+	}
+	if res.Port <= 0 {
+		return nil, errors.New("no port")
+	}
+	return withPort(toIP, res.Addrs, res.Port), nil
 }
 
 // ---------- discovery ----------
@@ -741,7 +838,7 @@ func (h *Host) planNodes() []PlanNode {
 			continue
 		}
 		pn := PlanNode{ID: id, Name: n.Info.Name, CPUBytes: cpu, GPUBytes: gpu, Unified: uni, Cores: n.Info.Cores,
-			TwoDev: twoDev(n.Info), HasGPU: n.Info.usableGPU() != nil, RAMTotal: int64(n.Info.RAMTotal)}
+			TwoDev: twoDev(n.Info), HasGPU: n.Info.usableGPU() != nil, RAMTotal: int64(n.Info.RAMTotal), LinkMs: n.LinkMs}
 		if n.NoGPU && !uni {
 			pn.GPUBytes, pn.TwoDev, pn.HasGPU = 0, false, false
 		}
@@ -1049,7 +1146,12 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			helperLayers += plan.DevLayers[i]
 		}
 	}
-	req := StartHeadReq{File: model.File, Workers: plan.WorkerOrder, NGL: plan.NGL, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs}
+	req := StartHeadReq{File: model.File, Workers: plan.WorkerOrder, NGL: plan.NGL, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs,
+		ExpertCPU: plan.ExpertCPU,
+		// Every hardware thread only where it measured faster: pooled, with the card holding
+		// the trunk of all the head's layers (3.8 against 3.3 words/s). With whole layers on
+		// the processor or the disk in play it measured slower (1.1 to 1.8 against 2.3 to 2.8).
+		AllThreads: plan.CardTrunk && !plan.Solo && len(plan.Shares) > 0 && plan.Shares[0].CPULayers == 0}
 	if err := h.call(plan.Head, "start_head", req, nil, time.Minute); err != nil {
 		done(err)
 		return err
@@ -1088,14 +1190,30 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		}
 	}
 	done(nil)
+	var st AgentStatus
+	_ = h.call(plan.Head, "status", nil, &st, 20*time.Second)
 	for _, p := range parts {
 		msg := "Holding its part of the model"
-		if p.isHead {
+		switch {
+		case p.isHead:
 			msg = "Running the model"
+		case st.Links[p.id] == "direct":
+			msg += " (linked straight to " + h.nodeName(plan.Head) + ")"
+		case st.Links[p.id] == "relay" && plan.Head != h.id.FP:
+			msg += " (reached through this computer: a direct link could not be made)"
 		}
 		h.setProgress(p.id, ProgressNote{Msg: msg})
 	}
 	return nil
+}
+
+func (h *Host) nodeName(id string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if n := h.nodes[id]; n != nil {
+		return n.Info.Name
+	}
+	return "the head"
 }
 
 var rpcBuffer = regexp.MustCompile(`RPC\d+\[[^\]]*\] model buffer size =\s+([\d.]+) MiB`)

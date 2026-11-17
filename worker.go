@@ -380,6 +380,16 @@ func (w *Helper) session(addr, wantFP, secret string) error {
 		}
 		return t, nil
 	}
+	w.a.introduce = func(to string, port int) ([]string, error) {
+		var res struct {
+			Addr  string   `json:"addr"`
+			Addrs []string `json:"addrs"`
+		}
+		if err := peer.Call("introduce", map[string]any{"to": to, "port": port, "addrs": localIPv4s()}, &res, 15*time.Second); err != nil {
+			return nil, err
+		}
+		return append([]string{res.Addr}, res.Addrs...), nil
+	}
 	w.a.notify = peer.Notify
 	peer.OnReq = func(method string, data json.RawMessage) (any, error) {
 		if method == "open_tunnel" {

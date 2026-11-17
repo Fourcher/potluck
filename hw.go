@@ -73,21 +73,24 @@ func (l Limits) ActiveNow(now time.Time) bool {
 
 // NodeInfo is what a computer reports about itself.
 type NodeInfo struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	OS       string `json:"os"`
-	OSName   string `json:"osName"`
-	Arch     string `json:"arch"`
-	CPU      string `json:"cpu"`
-	Cores    int    `json:"cores"`
-	Threads  int    `json:"threads"`
-	RAMTotal uint64 `json:"ramTotal"`
-	RAMAvail uint64 `json:"ramAvail"`
-	GPUs     []GPU  `json:"gpus"`
-	DiskFree uint64 `json:"diskFree"`
-	Musl     bool   `json:"musl"`
-	Version  string `json:"version"`
-	Limits   Limits `json:"limits"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	OS      string `json:"os"`
+	OSName  string `json:"osName"`
+	Arch    string `json:"arch"`
+	CPU     string `json:"cpu"`
+	Cores   int    `json:"cores"`
+	Threads int    `json:"threads"`
+	// PerfThreads is the number of hardware threads on the fast cores of a processor that
+	// mixes fast and slow cores; 0 when all cores are alike or it is not known.
+	PerfThreads int    `json:"perfThreads,omitempty"`
+	RAMTotal    uint64 `json:"ramTotal"`
+	RAMAvail    uint64 `json:"ramAvail"`
+	GPUs        []GPU  `json:"gpus"`
+	DiskFree    uint64 `json:"diskFree"`
+	Musl        bool   `json:"musl"`
+	Version     string `json:"version"`
+	Limits      Limits `json:"limits"`
 	// HeldBytes is model memory this app's own processes hold right now, so that planning a
 	// restart does not count it as "in use by something else".
 	HeldBytes uint64 `json:"heldBytes"`
@@ -110,6 +113,28 @@ func run(timeout time.Duration, name string, args ...string) string {
 }
 
 func readFile(path string) string { b, _ := os.ReadFile(path); return string(b) }
+
+// countCPUList counts the processors in a kernel list such as "0-7" or "0-3,8,10-11".
+func countCPUList(s string) int {
+	n := 0
+	for _, part := range strings.Split(strings.TrimSpace(s), ",") {
+		lo, hi, isRange := strings.Cut(part, "-")
+		a, err := strconv.Atoi(strings.TrimSpace(lo))
+		if err != nil {
+			continue
+		}
+		b := a
+		if isRange {
+			if b, err = strconv.Atoi(strings.TrimSpace(hi)); err != nil {
+				continue
+			}
+		}
+		if b >= a {
+			n += b - a + 1
+		}
+	}
+	return n
+}
 
 // staticInfo collects the facts that do not change while running. It can take a second or two.
 func staticInfo(dataDir string) NodeInfo {
@@ -142,6 +167,10 @@ func staticInfo(dataDir string) NodeInfo {
 		}
 		if len(cores) > 0 {
 			n.Cores = len(cores)
+		}
+		// Intel processors with two kinds of cores list the fast ones here.
+		if fast := countCPUList(readFile("/sys/devices/cpu_core/cpus")); fast > 0 && fast < n.Threads && readFile("/sys/devices/cpu_atom/cpus") != "" {
+			n.PerfThreads = fast
 		}
 		if n.CPU == "" {
 			n.CPU = runtime.GOARCH + " processor"

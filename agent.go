@@ -96,13 +96,45 @@ type Agent struct {
 	done      int64
 	total     int64
 
+	direct *Direct           // this computer's end of direct links to other computers
+	links  map[string]string // how each helper of the model running here is reached: direct | relay
+
 	// set by whoever owns the agent
 	dialTunnel func(to, target string) (net.Conn, error)
 	notify     func(method string, data any)
+	// introduce asks the main computer to bring this computer and another one together for
+	// a direct link; it returns the addresses the other one may be reached at.
+	introduce func(to string, port int) ([]string, error)
+}
+
+// dialPeer reaches a program on another computer: directly when the two can talk to each
+// other, through the main computer otherwise.
+func (a *Agent) dialPeer(to, target string) (net.Conn, error) {
+	if a.introduce != nil && to != a.id.FP && os.Getenv("POTLUCK_NO_DIRECT") != "1" {
+		if c, err := a.direct.Connect(to, target, a.introduce); err == nil {
+			a.setLink(to, "direct")
+			return c, nil
+		}
+	}
+	c, err := a.dialTunnel(to, target)
+	if err == nil {
+		a.setLink(to, "relay")
+	}
+	return c, err
+}
+
+func (a *Agent) setLink(to, kind string) {
+	a.mu.Lock()
+	if a.links == nil {
+		a.links = map[string]string{}
+	}
+	a.links[to] = kind
+	a.mu.Unlock()
 }
 
 func newAgent(dir string, id *Identity, cfg *ConfigStore) *Agent {
 	a := &Agent{dir: dir, id: id, cfg: cfg}
+	a.direct = newDirect(id, a.localPort)
 	a.info = staticInfo(dir)
 	a.info.ID = id.FP
 	return a
@@ -158,9 +190,18 @@ func freePort() (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-// threadsFor turns the pedal into a number of CPU threads.
-func threadsFor(cores, pedal int) int {
-	t := int(math.Round(float64(cores) * float64(pedal) / 100))
+// threadsFor turns the pedal into a number of CPU threads. The base is one thread per
+// processor core; on processors that mix fast and slow cores it is the fast cores' threads
+// (measured on a 4 fast + 8 slow core laptop: 8 threads beat 12 by 14% writing and 24%
+// reading). all asks for every hardware thread instead.
+func threadsFor(info NodeInfo, all bool) int {
+	base := info.Cores
+	if info.PerfThreads > 0 {
+		base = info.PerfThreads
+	} else if all && info.Threads > base {
+		base = info.Threads
+	}
+	t := int(math.Round(float64(base) * float64(info.Limits.Pedal) / 100))
 	if t < 1 {
 		t = 1
 	}
@@ -189,6 +230,12 @@ type (
 		// RPCDevices is how many devices the helpers offer in total (a helper with a
 		// graphics card offers two).
 		RPCDevices int `json:"rpcDevices"`
+		// ExpertCPU lists layers whose expert weights stay in memory while the rest of the
+		// layer sits on the graphics card.
+		ExpertCPU []int `json:"expertCPU,omitempty"`
+		// AllThreads: use every hardware thread instead of one per core. The main computer
+		// asks for it only in the layout where that measured faster.
+		AllThreads bool `json:"allThreads,omitempty"`
 	}
 	AgentStatus struct {
 		RPC     bool   `json:"rpc"`
@@ -199,6 +246,8 @@ type (
 		Total   int64  `json:"total"`
 		HeadLog string `json:"headLog,omitempty"`
 		FullLog string `json:"fullLog,omitempty"` // the start of the engine's log: its load report
+		// Links says how the model running here reaches each helper: "direct" or "relay".
+		Links map[string]string `json:"links,omitempty"`
 	}
 )
 
@@ -207,6 +256,25 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 	switch method {
 	case "inventory":
 		return a.Info(), nil
+
+	case "ping":
+		return nil, nil
+
+	case "expect":
+		// The main computer introduces a computer that will link to this one directly.
+		var in struct {
+			FP    string   `json:"fp"`
+			Addr  string   `json:"addr"`
+			Addrs []string `json:"addrs"`
+		}
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, err
+		}
+		port, err := a.direct.Expect(in.FP, append([]string{in.Addr}, in.Addrs...))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"port": port, "addrs": localIPv4s()}, nil
 
 	case "set_limits":
 		var in struct {
@@ -396,7 +464,7 @@ func (a *Agent) startRPC() (any, error) {
 		return nil, err
 	}
 	info := a.Info()
-	threads := threadsFor(info.Cores, info.Limits.Pedal)
+	threads := threadsFor(info, false)
 	_ = os.MkdirAll(filepath.Join(a.dir, "cache", "rpc"), 0o755)
 	// Bound to this computer only. Other computers reach it through the encrypted tunnel,
 	// because the worker protocol itself has no password.
@@ -465,7 +533,7 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 					return
 				}
 				go func() {
-					t, err := a.dialTunnel(w, "rpc")
+					t, err := a.dialPeer(w, "rpc")
 					if err != nil {
 						c.Close()
 						return
@@ -480,7 +548,7 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 		return nil, err
 	}
 	info := a.Info()
-	threads := threadsFor(info.Cores, info.Limits.Pedal)
+	threads := threadsFor(info, in.AllThreads)
 	if in.Ctx <= 0 {
 		in.Ctx = 4096
 	}
@@ -489,10 +557,24 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	if in.Split != "" && in.NGL > 0 {
 		args = append(args, "-ts", in.Split)
 	}
+	if len(in.ExpertCPU) > 0 {
+		// Keep these layers' expert weights in memory; the rest of each layer goes to the card.
+		nums := make([]string, len(in.ExpertCPU))
+		for i, l := range in.ExpertCPU {
+			nums[i] = strconv.Itoa(l)
+		}
+		args = append(args, "-ot", `blk\.(`+strings.Join(nums, "|")+`)\.ffn_(up|down|gate)_(ch|)exps=CPU`)
+	}
 	// The helpers must be named before the device list: the engine only knows the names
 	// RPC0, RPC1, ... once it has read --rpc.
 	if len(rpcList) > 0 {
 		args = append(args, "--rpc", strings.Join(rpcList, ","))
+		// The engine normally saves its working state after every prompt so a conversation
+		// can be rewound. With helpers that state has to come back over the network: measured
+		// at 20 seconds per prompt on a direct Wi-Fi link and minutes on a poor one. Off, a
+		// follow-up that cannot continue from where the last answer ended is read again
+		// from the start, which is far cheaper here.
+		args = append(args, "-ctxcp", "0", "-cram", "0")
 	}
 	if base := filepath.Base(rt); strings.Contains(base, "cuda") || strings.Contains(base, "vulkan") {
 		// Name every device to use, in the plan's order: the helpers' devices, then the one
@@ -528,6 +610,12 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 func (a *Agent) Status() AgentStatus {
 	a.mu.Lock()
 	s := AgentStatus{RPC: a.rpc.Running(), Head: a.head.Running(), Msg: a.status, Done: a.done, Total: a.total}
+	if len(a.links) > 0 {
+		s.Links = map[string]string{}
+		for k, v := range a.links {
+			s.Links[k] = v
+		}
+	}
 	api, head := a.apiPort, a.head
 	a.mu.Unlock()
 	if s.Head {
@@ -554,7 +642,7 @@ func (a *Agent) Stop() {
 		a.jobCancel = nil
 	}
 	rpc, head, ls := a.rpc, a.head, a.listeners
-	a.rpc, a.head, a.listeners = nil, nil, nil
+	a.rpc, a.head, a.listeners, a.links = nil, nil, nil, nil
 	a.status, a.done, a.total = "", 0, 0
 	a.mu.Unlock()
 	head.Stop()

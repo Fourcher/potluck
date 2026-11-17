@@ -116,12 +116,13 @@ function viewHelper() {
 function nodeCard(n) {
   const i = n.info, L = i.limits || {};
   const badge = n.role === "head" ? `<span class="badge ok">Runs the model</span>` : n.role === "worker" ? `<span class="badge ok">Holds part of the model</span>` : "";
-  const lend = !n.online ? `<span class="muted">Not connected</span>` : !n.active ? `<span class="muted">${L.enabled ? "Resting (outside its hours)" : "Not lending"}</span>` : `Lends <b>${gb(n.offer)}</b> of memory, ${Math.max(1, Math.round((i.cores || 1) * (L.pedal || 0) / 100))} of ${i.cores || "?"} cores`;
+  const lend = !n.online ? `<span class="muted">Not connected</span>` : !n.active ? `<span class="muted">${L.enabled ? "Resting (outside its hours)" : "Not lending"}</span>` : `Lends <b>${gb(n.offer)}</b> of memory, ${Math.max(1, Math.round((i.perfThreads || i.cores || 1) * (L.pedal || 0) / 100))} of ${i.perfThreads || i.cores || "?"} ${i.perfThreads ? "fast-core threads" : "cores"}`;
+  const slow = !n.isMain && n.online && n.linkMs > 30 ? `<div class="note small">Slow connection to this computer: about ${Math.round(n.linkMs)} ms per round trip. A network cable, or a spot nearer the router, would speed it up.</div>` : "";
   return `<div class="card ${n.online ? "" : "off"}" data-node="${esc(i.id)}">
     <div class="row spread"><div class="row"><span class="dot ${n.online ? "on" : ""}" title="${n.online ? "Connected" : "Not connected"}"></span><h3>${esc(i.name)}</h3></div>
       <div class="row">${n.isMain ? `<span class="badge main">Main computer</span>` : ""}${badge}</div></div>
     ${specs(i)}
-    <div class="lend">${lend}</div>
+    <div class="lend">${lend}</div>${slow}
     ${limitsUI(i.id, L, n.isMain)}
     ${progress(n.status, n.done, n.total)}
     <div class="row small" style="margin-top:6px"><button class="link" data-a="rename" data-id="${esc(i.id)}" data-name="${esc(i.name)}">Rename</button>
@@ -253,7 +254,7 @@ function planBar(plan) {
   const total = plan.layers || 1, layerGB = plan.layerBytes || 0;
   const stripes = "background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.35) 0 6px,transparent 6px 12px)";
   const seg = (n, color, striped) => n > 0 ? `<div style="flex:${n};background:${color};${striped ? stripes : ""}"></div>` : "";
-  const bits = s => [s.cpuLayers ? `${s.cpuLayers} layers in memory` : "", s.gpuLayers ? `${s.gpuLayers} on its graphics card` : ""].filter(Boolean).join(" + ");
+  const bits = s => [s.cpuLayers ? `${s.cpuLayers} layers in memory` : "", s.gpuLayers ? (plan.cardTrunk && s === head ? `${s.gpuLayers} split between its graphics card and memory` : `${s.gpuLayers} on its graphics card`) : ""].filter(Boolean).join(" + ");
   segs.push(seg(head.cpuLayers, COLORS[0]));
   plan.shares.slice(1).forEach((s, k) => {
     const c = COLORS[(k + 1) % COLORS.length];
@@ -262,7 +263,7 @@ function planBar(plan) {
   });
   segs.push(seg(head.gpuLayers, COLORS[0], true));
   legend.unshift(`<div><i style="background:${COLORS[0]}"></i><b>${esc(head.name)}</b> (runs the model): ${bits(head) || "coordinates only"}, about ${gb((head.cpuLayers + head.gpuLayers) * layerGB)}${plan.solo && plan.overflow > 0 ? `, of which about ${gb(plan.overflow)} is read from its disk as needed` : ""}</div>`);
-  return `<div class="plan" role="img" aria-label="How the model's layers are spread over the computers">${segs.join("")}</div><div class="legend">${legend.join("")}</div><p class="muted small">Striped parts sit on a graphics card, out of ${total} layers in all.</p>`;
+  return `<div class="plan" role="img" aria-label="How the model's layers are spread over the computers">${segs.join("")}</div><div class="legend">${legend.join("")}</div><p class="muted small">Striped parts sit on a graphics card, out of ${total} layers in all.${plan.cardTrunk ? " For this kind of model the card holds the part of each layer that is used for every word, and memory holds the rest." : ""}</p>`;
 }
 
 function viewSheet() {

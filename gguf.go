@@ -31,14 +31,49 @@ type Tensor struct {
 
 // ModelInfo is what the header of a GGUF file tells us.
 type ModelInfo struct {
-	Name       string   `json:"name"`
-	Arch       string   `json:"arch"`
-	Layers     int      `json:"layers"`
-	CtxTrain   int      `json:"ctxTrain"`
-	FileSize   int64    `json:"fileSize"`
-	LayerBytes []int64  `json:"layerBytes"`
-	OtherBytes int64    `json:"otherBytes"` // embeddings, output head
-	Tensors    []Tensor `json:"-"`
+	Name       string  `json:"name"`
+	Arch       string  `json:"arch"`
+	Layers     int     `json:"layers"`
+	CtxTrain   int     `json:"ctxTrain"`
+	FileSize   int64   `json:"fileSize"`
+	LayerBytes []int64 `json:"layerBytes"`
+	OtherBytes int64   `json:"otherBytes"` // embeddings, output head
+	// Mixture-of-experts models: how much of each layer is expert weights. Only a few experts
+	// are read for each word, while the rest of the layer (the "trunk") is read every time.
+	ExpertBytes []int64  `json:"expertBytes,omitempty"`
+	OutputBytes int64    `json:"outputBytes,omitempty"` // the output head alone
+	Tensors     []Tensor `json:"-"`
+}
+
+// isExpertTensor recognises the expert weights of a mixture-of-experts layer by name
+// (blk.N.ffn_up_exps.weight and its siblings).
+func isExpertTensor(name string) bool {
+	return strings.Contains(name, ".ffn_") && strings.Contains(name, "exps.")
+}
+
+// HasExperts says whether this is a mixture-of-experts model.
+func (m *ModelInfo) HasExperts() bool {
+	for _, b := range m.ExpertBytes {
+		if b > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// trunkBytes is the part of a layer that is not expert weights.
+func (m *ModelInfo) trunkBytes(l int) int64 {
+	if l < len(m.ExpertBytes) {
+		return m.LayerBytes[l] - m.ExpertBytes[l]
+	}
+	return m.LayerBytes[l]
+}
+
+func (m *ModelInfo) expertBytes(l int) int64 {
+	if l < len(m.ExpertBytes) {
+		return m.ExpertBytes[l]
+	}
+	return 0
 }
 
 type ggufReader struct {
@@ -241,6 +276,7 @@ func parseGGUFPart(buf []byte, fileSize int64, layersHint int) (*ModelInfo, erro
 		return nil, errors.New("model header has no layer count")
 	}
 	m.LayerBytes = make([]int64, m.Layers)
+	m.ExpertBytes = make([]int64, m.Layers)
 	for i, t := range raws {
 		ten := Tensor{Name: t.name, Layer: -1, Off: int64(base + t.rel)}
 		var gap uint64
@@ -265,8 +301,14 @@ func parseGGUFPart(buf []byte, fileSize int64, layersHint int) (*ModelInfo, erro
 		}
 		if ten.Layer >= 0 {
 			m.LayerBytes[ten.Layer] += ten.Size
+			if isExpertTensor(t.name) {
+				m.ExpertBytes[ten.Layer] += ten.Size
+			}
 		} else {
 			m.OtherBytes += ten.Size
+			if t.name == "output.weight" {
+				m.OutputBytes += ten.Size
+			}
 		}
 		m.Tensors = append(m.Tensors, ten)
 	}
@@ -286,15 +328,16 @@ func (m *ModelInfo) TotalBytes() int64 {
 
 // PlanNode is one computer's offer to the planner.
 type PlanNode struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	CPUBytes int64  `json:"cpuBytes"` // RAM offered for layers
-	GPUBytes int64  `json:"gpuBytes"` // video memory offered (head only, or unified memory)
-	Unified  bool   `json:"unified"`  // GPU shares RAM: all local layers go to the GPU
-	TwoDev   bool   `json:"twoDev"`   // as a helper it offers two pools: its graphics card, then its RAM
-	HasGPU   bool   `json:"hasGPU"`   // the engine on this computer lists a GPU device, even when its memory is full
-	Cores    int    `json:"cores"`
-	RAMTotal int64  `json:"ramTotal"`
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	CPUBytes int64   `json:"cpuBytes"` // RAM offered for layers
+	GPUBytes int64   `json:"gpuBytes"` // video memory offered (head only, or unified memory)
+	Unified  bool    `json:"unified"`  // GPU shares RAM: all local layers go to the GPU
+	TwoDev   bool    `json:"twoDev"`   // as a helper it offers two pools: its graphics card, then its RAM
+	HasGPU   bool    `json:"hasGPU"`   // the engine on this computer lists a GPU device, even when its memory is full
+	Cores    int     `json:"cores"`
+	RAMTotal int64   `json:"ramTotal"`
+	LinkMs   float64 `json:"linkMs"` // typical round trip to this computer, 0 when not measured
 }
 
 // PlanShare is what one computer ends up holding.
@@ -320,20 +363,30 @@ type Plan struct {
 	WorkerOrder []string    `json:"workerOrder"`
 	DevOwner    []string    `json:"devOwner"`  // which computer each device in the split belongs to
 	DevLayers   []int       `json:"devLayers"` // layers on each of those devices
-	Solo        bool        `json:"solo"`      // one computer alone, letting its disk stand in for missing memory
-	Overflow    int64       `json:"overflow"`  // bytes of the model that do not fit in that computer's memory
-	ModelBytes  int64       `json:"modelBytes"`
-	OfferedSum  int64       `json:"offeredSum"`
-	BiggestOne  int64       `json:"biggestOne"` // most any single computer offers
-	NeedsPool   bool        `json:"needsPool"`  // too big for any one computer here
-	ShortBy     int64       `json:"shortBy"`    // bytes missing when it does not fit
-	Machines    int         `json:"machines"`   // computers that hold part of the model
-	Layers      int         `json:"layers"`
-	LayerBytes  int64       `json:"layerBytes"` // largest layer
+	// CardTrunk: the head's graphics card holds the part of its layers that is read for every
+	// word, and the expert weights of those layers stay in the head's memory. ExpertCPU lists
+	// those layers.
+	CardTrunk  bool  `json:"cardTrunk,omitempty"`
+	ExpertCPU  []int `json:"expertCPU,omitempty"`
+	Solo       bool  `json:"solo"`     // one computer alone, letting its disk stand in for missing memory
+	Overflow   int64 `json:"overflow"` // bytes of the model that do not fit in that computer's memory
+	ModelBytes int64 `json:"modelBytes"`
+	OfferedSum int64 `json:"offeredSum"`
+	BiggestOne int64 `json:"biggestOne"` // most any single computer offers
+	NeedsPool  bool  `json:"needsPool"`  // too big for any one computer here
+	ShortBy    int64 `json:"shortBy"`    // bytes missing when it does not fit
+	Machines   int   `json:"machines"`   // computers that hold part of the model
+	Layers     int   `json:"layers"`
+	LayerBytes int64 `json:"layerBytes"` // largest layer
 }
 
 // overhead kept free on every device for the context cache and working buffers.
 const perDeviceOverhead = 600 << 20
+
+// trunkOverhead is the same allowance for a graphics card that holds only the trunk of its
+// layers. Measured on a 4 GB card with 36 layers' trunks: 762 MiB beyond the weights, of
+// which the offer has already set 500 MB aside.
+const trunkOverhead = 500 << 20
 
 // planLayout spreads the layers over the computers.
 //
@@ -341,6 +394,10 @@ const perDeviceOverhead = 600 << 20
 // remaining N (the output layer counts as one) are shared between "devices" in proportion
 // to --tensor-split; the devices are the workers in --rpc order followed by the head's GPU.
 // So the order of layers through the machines is: head CPU, worker 1, worker 2, ..., head GPU.
+//
+// Measured on a real cluster (November 2026): every extra helper in that chain costs two
+// network hand-offs per word, and all the computers needed about the same time per layer. So
+// the plan keeps as much as it can on the head and brings in as few helpers as possible.
 func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 	p := &Plan{ModelBytes: m.TotalBytes(), Layers: m.Layers}
 	var layer int64
@@ -410,6 +467,195 @@ func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 		}
 		return int(bytes / layer)
 	}
+	// Tensors outside the layers: the token embeddings always stay in the head's RAM and the
+	// output layer rides on the last device. Each is roughly half of OtherBytes.
+	edge := m.OtherBytes * 6 / 10
+
+	// How many layers a helper can take. A helper with a usable graphics card offers two
+	// pools: the card (first) and its RAM.
+	wcapGPU := func(w PlanNode, workerEdge int64) int {
+		if w.TwoDev {
+			return layersIn(w.GPUBytes, workerEdge)
+		}
+		return 0
+	}
+	wcap := func(w PlanNode, workerEdge int64) int {
+		if w.Unified {
+			return layersIn(w.GPUBytes, workerEdge)
+		}
+		return wcapGPU(w, workerEdge) + layersIn(w.CPUBytes, workerEdge)
+	}
+	// assign hands "left" layers to helpers, taking them in the given order and stopping as
+	// soon as every layer has a home. It reports the layers per helper and how many are left.
+	assign := func(order []int, left int, workerEdge int64) ([]int, int) {
+		wl := make([]int, len(workers))
+		for _, i := range order {
+			if left == 0 {
+				break
+			}
+			n := wcap(workers[i], workerEdge)
+			if n > left {
+				n = left
+			}
+			wl[i] = n
+			left -= n
+		}
+		return wl, left
+	}
+	used := func(wl []int) int {
+		n := 0
+		for _, l := range wl {
+			if l > 0 {
+				n++
+			}
+		}
+		return n
+	}
+	// Which helpers to use. Measured on the real cluster: one helper was faster than two
+	// whenever one was enough (3.6 to 4.1 words/s against 3.3), because every helper in the
+	// chain adds two network hand-offs per word. So: the fewest helpers; when two choices
+	// need equally many, the better-connected helpers.
+	bySize := make([]int, len(workers))
+	for i := range bySize {
+		bySize[i] = i
+	}
+	byLink := append([]int(nil), bySize...)
+	sort.SliceStable(byLink, func(a, b int) bool {
+		la, lb := workers[byLink[a]].LinkMs, workers[byLink[b]].LinkMs
+		if la <= 0 || lb <= 0 {
+			return false // not timed yet: keep the size order
+		}
+		return la < lb
+	})
+	pick := func(left int, workerEdge int64) ([]int, int) {
+		wlL, leftL := assign(byLink, left, workerEdge)
+		wlS, leftS := assign(bySize, left, workerEdge)
+		if leftL == 0 && (leftS > 0 || used(wlL) <= used(wlS)) {
+			return wlL, leftL
+		}
+		return wlS, leftS
+	}
+
+	// finish turns layer counts into the engine's settings: device list, -ngl, --tensor-split.
+	finish := func(headCPU, headGPU int, headBytes int64, wl []int) {
+		type dev struct {
+			layers int
+			owner  string
+		}
+		var devs []dev
+		first := headCPU
+		p.Shares = append(p.Shares, PlanShare{ID: head.ID, Name: head.Name, Role: "head", CPULayers: headCPU, GPULayers: headGPU,
+			Bytes: headBytes, Offered: cap(head)})
+		workerEdge := edge
+		if headGPU > 0 {
+			workerEdge = 0
+		}
+		for i, w := range workers {
+			if wl[i] == 0 {
+				continue
+			}
+			p.WorkerOrder = append(p.WorkerOrder, w.ID)
+			g := 0
+			if w.TwoDev {
+				if g = wcapGPU(w, workerEdge); g > wl[i] {
+					g = wl[i]
+				}
+				devs = append(devs, dev{g, w.ID}) // listed even when empty: the helper's engine always offers it
+			}
+			devs = append(devs, dev{wl[i] - g, w.ID})
+			p.Shares = append(p.Shares, PlanShare{ID: w.ID, Name: w.Name, Role: "worker", CPULayers: wl[i] - g, GPULayers: g,
+				Bytes: int64(wl[i]) * layer, Offered: capWorker(w), First: first})
+			first += wl[i]
+		}
+		if head.GPUBytes > 0 || head.HasGPU {
+			devs = append(devs, dev{headGPU, head.ID}) // listed even when empty: llama.cpp always appends the local GPU
+			p.Shares[0].First = first
+		}
+		for _, d := range devs {
+			p.DevOwner = append(p.DevOwner, d.owner)
+			p.DevLayers = append(p.DevLayers, d.layers)
+		}
+		// The output layer counts as one more "layer" and rides on the last device that holds anything.
+		offloaded := 0
+		for _, d := range devs {
+			offloaded += d.layers
+		}
+		if offloaded > 0 {
+			firstDev, lastDev := -1, -1
+			for i, d := range devs {
+				if d.layers > 0 {
+					if firstDev < 0 {
+						firstDev = i
+					}
+					lastDev = i
+				}
+			}
+			p.NGL = offloaded + 1
+			// Split values are layer counts, nudged by half a layer at the two ends so that every
+			// boundary falls halfway between two layers and rounding can never move a layer.
+			parts := make([]string, len(devs))
+			for i, d := range devs {
+				v := float64(d.layers)
+				if i == lastDev {
+					v++ // the output layer
+				}
+				if firstDev != lastDev {
+					if i == firstDev {
+						v -= 0.5
+					}
+					if i == lastDev {
+						v += 0.5
+					}
+				}
+				parts[i] = strconv.FormatFloat(v, 'f', -1, 64)
+			}
+			p.TensorSplit = strings.Join(parts, ",")
+		}
+		for _, s := range p.Shares {
+			if s.CPULayers+s.GPULayers > 0 {
+				p.Machines++
+			}
+		}
+		p.Fits = true
+	}
+
+	// A. Mixture-of-experts model and a graphics card on the head that cannot hold whole
+	// layers for the entire model: let the card hold the trunk of the head's layers (read for
+	// every word) and keep their experts (a few read per word) in the head's memory.
+	// Measured: 3.8 words/s against 1.2 to 2.1 for whole layers spread by memory.
+	if m.HasExperts() && !head.Unified && head.GPUBytes > 0 && layersIn(head.GPUBytes, edge) < m.Layers {
+		if t := planTrunk(m, head); t.card > 0 {
+			// Whole layers in the head's spare memory go first in the chain. They are the
+			// slowest place for a layer, so use them only when that spares a helper, and then
+			// as few as possible.
+			best, front, left := -1, 0, 1
+			var wl []int
+			for f := 0; f <= t.front; f++ {
+				w2, l2 := pick(m.Layers-t.card-f, 0)
+				if l2 == 0 && (best < 0 || used(w2) < best) {
+					best, front, wl, left = used(w2), f, w2, 0
+				}
+			}
+			if left == 0 {
+				p.CardTrunk = true
+				firstCard := m.Layers - t.card
+				var bytes int64
+				for l := 0; l < front; l++ {
+					bytes += m.LayerBytes[l]
+				}
+				for l := firstCard; l < m.Layers; l++ {
+					bytes += m.LayerBytes[l]
+					if l < m.Layers-t.whole {
+						p.ExpertCPU = append(p.ExpertCPU, l)
+					}
+				}
+				finish(front, t.card, bytes, wl)
+				return p
+			}
+		}
+	}
+
+	// B. Whole layers: the head's card, then the head's memory, then helpers.
 	left := m.Layers
 	take := func(n int) int {
 		if n > left {
@@ -418,10 +664,6 @@ func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 		left -= n
 		return n
 	}
-	// Tensors outside the layers: the token embeddings always stay in the head's RAM and the
-	// output layer rides on the last device. Each is roughly half of OtherBytes.
-	edge := m.OtherBytes * 6 / 10
-	// 1. The head's own GPU first (fastest, no network). It also carries the output layer.
 	headGPU, headCPU := 0, 0
 	if head.GPUBytes > 0 {
 		headGPU = take(layersIn(head.GPUBytes, edge))
@@ -430,158 +672,61 @@ func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 	if headGPU > 0 {
 		workerEdge = 0
 	}
-	// 2. The head's RAM (no network either). Unified-memory heads only have the GPU pool.
 	if !head.Unified {
 		headCPU = take(layersIn(head.CPUBytes, edge))
 	}
-	// 3. Workers, biggest first, until every layer has a home. A helper with a usable graphics
-	// card offers two pools: the card (first) and its RAM.
-	wcapGPU := func(w PlanNode) int {
-		if w.TwoDev {
-			return layersIn(w.GPUBytes, workerEdge)
-		}
-		return 0
-	}
-	wcap := func(w PlanNode) int {
-		if w.Unified {
-			return layersIn(w.GPUBytes, workerEdge)
-		}
-		return wcapGPU(w) + layersIn(w.CPUBytes, workerEdge)
-	}
-	wl := make([]int, len(workers))
-	for i, w := range workers {
-		if left == 0 {
-			break
-		}
-		wl[i] = take(wcap(w))
-	}
+	wl, left := pick(left, workerEdge)
 	if left > 0 {
 		p.ShortBy = int64(left)*layer + perDeviceOverhead
 		p.Reason = fmt.Sprintf("This model needs about %s more memory than your computers offer right now.", humanBytes(p.ShortBy))
 		return p
 	}
-	// If workers are in use, even them out a little: moving layers off the busiest worker onto
-	// the head is not possible (the head is full), but workers can share their load evenly.
-	used := 0
-	for _, n := range wl {
-		if n > 0 {
-			used++
-		}
-	}
-	if used > 1 {
-		total := 0
-		for _, n := range wl {
-			total += n
-		}
-		// Proportional to what each offers, never above its capacity.
-		var offerSum int64
-		for i, w := range workers {
-			if wl[i] > 0 || wcap(w) > 0 {
-				offerSum += capWorker(w)
-			}
-		}
-		rest := total
-		for i, w := range workers {
-			capL := wcap(w)
-			share := int(float64(total) * float64(capWorker(w)) / float64(offerSum))
-			if share > capL {
-				share = capL
-			}
-			wl[i] = share
-			rest -= share
-		}
-		for rest > 0 {
-			moved := false
-			for i, w := range workers {
-				if rest > 0 && wl[i] < wcap(w) {
-					wl[i]++
-					rest--
-					moved = true
-				}
-			}
-			if !moved {
-				break
-			}
-		}
-	}
-
-	// Build the device list in llama.cpp's order: each helper's devices, then the head's GPU.
-	type dev struct {
-		layers int
-		owner  string
-	}
-	var devs []dev
-	first := headCPU
-	p.Shares = append(p.Shares, PlanShare{ID: head.ID, Name: head.Name, Role: "head", CPULayers: headCPU, GPULayers: headGPU,
-		Bytes: int64(headCPU+headGPU) * layer, Offered: cap(head)})
-	for i, w := range workers {
-		if wl[i] == 0 {
-			continue
-		}
-		p.WorkerOrder = append(p.WorkerOrder, w.ID)
-		g := 0
-		if w.TwoDev {
-			if g = wcapGPU(w); g > wl[i] {
-				g = wl[i]
-			}
-			devs = append(devs, dev{g, w.ID}) // listed even when empty: the helper's engine always offers it
-		}
-		devs = append(devs, dev{wl[i] - g, w.ID})
-		p.Shares = append(p.Shares, PlanShare{ID: w.ID, Name: w.Name, Role: "worker", CPULayers: wl[i] - g, GPULayers: g,
-			Bytes: int64(wl[i]) * layer, Offered: capWorker(w), First: first})
-		first += wl[i]
-	}
-	if head.GPUBytes > 0 || head.HasGPU {
-		devs = append(devs, dev{headGPU, head.ID}) // listed even when empty: llama.cpp always appends the local GPU
-		p.Shares[0].First = first
-	}
-	for _, d := range devs {
-		p.DevOwner = append(p.DevOwner, d.owner)
-		p.DevLayers = append(p.DevLayers, d.layers)
-	}
-	// The output layer counts as one more "layer" and rides on the last device that holds anything.
-	offloaded := 0
-	for _, d := range devs {
-		offloaded += d.layers
-	}
-	if offloaded > 0 {
-		firstDev, lastDev := -1, -1
-		for i, d := range devs {
-			if d.layers > 0 {
-				if firstDev < 0 {
-					firstDev = i
-				}
-				lastDev = i
-			}
-		}
-		p.NGL = offloaded + 1
-		// Split values are layer counts, nudged by half a layer at the two ends so that every
-		// boundary falls halfway between two layers and rounding can never move a layer.
-		parts := make([]string, len(devs))
-		for i, d := range devs {
-			v := float64(d.layers)
-			if i == lastDev {
-				v++ // the output layer
-			}
-			if firstDev != lastDev {
-				if i == firstDev {
-					v -= 0.5
-				}
-				if i == lastDev {
-					v += 0.5
-				}
-			}
-			parts[i] = strconv.FormatFloat(v, 'f', -1, 64)
-		}
-		p.TensorSplit = strings.Join(parts, ",")
-	}
-	for _, s := range p.Shares {
-		if s.CPULayers+s.GPULayers > 0 {
-			p.Machines++
-		}
-	}
-	p.Fits = true
+	finish(headCPU, headGPU, int64(headCPU+headGPU)*layer, wl)
 	return p
+}
+
+// trunkFit is how a head with a graphics card can hold layers of a mixture-of-experts model.
+type trunkFit struct {
+	card  int // last layers whose trunk is on the card
+	whole int // of those, the last layers that are on the card entirely, experts included
+	front int // whole layers that still fit in memory beside the experts
+}
+
+// planTrunk sizes the head's part of a mixture-of-experts model: as many layers as possible
+// with their trunk on the card and their experts in memory.
+func planTrunk(m *ModelInfo, head PlanNode) trunkFit { return planTrunkOpt(m, head, true) }
+
+// planTrunkOpt is planTrunk; with ramBound false the experts may exceed the head's memory
+// (one computer alone, its disk covering the difference).
+func planTrunkOpt(m *ModelInfo, head PlanNode, ramBound bool) trunkFit {
+	var t trunkFit
+	card := head.GPUBytes - trunkOverhead - m.OutputBytes
+	ram := head.CPUBytes - perDeviceOverhead - (m.OtherBytes - m.OutputBytes)
+	for l := m.Layers - 1; l >= 0; l-- {
+		if m.trunkBytes(l) > card || (ramBound && m.expertBytes(l) > ram) {
+			break
+		}
+		card -= m.trunkBytes(l)
+		ram -= m.expertBytes(l)
+		t.card++
+	}
+	// Card memory left over: move the experts of the last layers onto it too.
+	for l := m.Layers - 1; l >= m.Layers-t.card; l-- {
+		if m.expertBytes(l) > card {
+			break
+		}
+		card -= m.expertBytes(l)
+		ram += m.expertBytes(l)
+		t.whole++
+	}
+	for l := 0; l < m.Layers-t.card; l++ {
+		if m.LayerBytes[l] > ram {
+			break
+		}
+		ram -= m.LayerBytes[l]
+		t.front++
+	}
+	return t
 }
 
 // planSolo lays a model out on one computer alone, even when it is bigger than that
@@ -617,6 +762,25 @@ func planSolo(m *ModelInfo, n PlanNode) *Plan {
 	need := int64(cpu)*layer + m.OtherBytes + perDeviceOverhead
 	if n.Unified {
 		need = p.ModelBytes + perDeviceOverhead
+	}
+	// Mixture-of-experts model on a card too small for whole layers: the card holds the trunk
+	// of as many layers as it can, their experts stay in memory (or on disk). Measured on a
+	// 4 GB card: 2.1 to 2.55 words/s against 1.5 to 2.3 with whole layers.
+	if m.HasExperts() && !n.Unified && n.GPUBytes > 0 && gpu < m.Layers {
+		if t := planTrunkOpt(m, n, false); t.card > gpu {
+			gpu, cpu = t.card, m.Layers-t.card
+			p.CardTrunk = true
+			need = m.OtherBytes - m.OutputBytes + perDeviceOverhead
+			for l := 0; l < m.Layers; l++ {
+				switch {
+				case l < cpu:
+					need += m.LayerBytes[l]
+				case l < m.Layers-t.whole:
+					need += m.expertBytes(l)
+					p.ExpertCPU = append(p.ExpertCPU, l)
+				}
+			}
+		}
 	}
 	if need > inMemory {
 		p.Overflow = need - inMemory
@@ -691,6 +855,7 @@ func humanBytes(b int64) string {
 func mergeParts(parts []*ModelInfo) *ModelInfo {
 	m := *parts[0]
 	m.LayerBytes = append([]int64(nil), parts[0].LayerBytes...)
+	m.ExpertBytes = append([]int64(nil), parts[0].ExpertBytes...)
 	m.Tensors = append([]Tensor(nil), parts[0].Tensors...)
 	for i, p := range parts[1:] {
 		for l, b := range p.LayerBytes {
@@ -698,7 +863,13 @@ func mergeParts(parts []*ModelInfo) *ModelInfo {
 				m.LayerBytes[l] += b
 			}
 		}
+		for l, b := range p.ExpertBytes {
+			if l < len(m.ExpertBytes) {
+				m.ExpertBytes[l] += b
+			}
+		}
 		m.OtherBytes += p.OtherBytes
+		m.OutputBytes += p.OutputBytes
 		m.FileSize += p.FileSize
 		for _, t := range p.Tensors {
 			t.Part = i + 1
