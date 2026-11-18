@@ -111,3 +111,7 @@ Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs 
 - Dictation depends on the browser: some recognise speech on the computer, others send audio to the browser maker's service. The page says which. It needs a microphone and only works on the main computer itself or over a secure address.
 - Chats live in one browser on one computer. Use export and import in Settings to move them.
 - No start-at-login option, by design.
+
+## License
+
+MIT. See [LICENSE](LICENSE). Potluck downloads [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT) as its engine; models you download carry their own licenses.
