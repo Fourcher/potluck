@@ -1,0 +1,198 @@
+package main
+
+// The chat page. It is served on the same address as the model's API (port 7720), so
+// whatever can reach the API can use the chat: this computer always, the local network
+// when sharing is switched on.
+//
+// The page keeps chats in the visitor's own browser; this computer stores none of them.
+// Besides the page itself there are three small endpoints under /potluck/: what is running,
+// which models are on disk, and switching models. Switching is only for this computer.
+
+import (
+	"encoding/json"
+	"errors"
+	"io/fs"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// chatOwner says whether a request comes from this computer itself (not from the local
+// network through the sharing switch, and not from a web page somewhere else that points
+// its requests here).
+func chatOwner(r *http.Request) bool {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || !net.ParseIP(ip).IsLoopback() {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		host = r.Host
+	}
+	return host == "localhost" || (net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())
+}
+
+type chatNode struct {
+	Name   string  `json:"name"`
+	Role   string  `json:"role"`
+	Status string  `json:"status"`
+	Online bool    `json:"online"`
+	Held   int64   `json:"held"`
+	LinkMs float64 `json:"linkMs"`
+	Done   int64   `json:"done"`
+	Total  int64   `json:"total"`
+}
+
+type chatModel struct {
+	Title    string `json:"title"`
+	File     string `json:"file"`
+	Size     int64  `json:"size"`
+	Node     string `json:"node"`
+	NodeName string `json:"nodeName"`
+	Running  bool   `json:"running"`
+}
+
+// chatHandler wraps the model's API with the chat page and its endpoints.
+func (h *Host) chatHandler(api http.Handler) http.Handler {
+	sub, _ := fs.Sub(webFS, "web/chat")
+	static := http.FileServer(http.FS(sub))
+	// For working on the page: POTLUCK_DEV_WEB=<folder holding chat/> serves it from disk.
+	if dir := os.Getenv("POTLUCK_DEV_WEB"); dir != "" {
+		static = http.FileServer(http.Dir(filepath.Join(dir, "chat")))
+	}
+	pages := map[string]bool{"/": true, "/index.html": true, "/chat.js": true, "/chat.css": true, "/md.js": true, "/store.js": true}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && pages[r.URL.Path]:
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Referrer-Policy", "no-referrer")
+			static.ServeHTTP(w, r)
+		case r.URL.Path == "/potluck/state" && r.Method == http.MethodGet:
+			writeJSON(w, h.chatState(chatOwner(r)))
+		case r.URL.Path == "/potluck/models" && r.Method == http.MethodGet:
+			writeJSON(w, map[string]any{"models": h.chatModels(), "canSwitch": chatOwner(r)})
+		case r.URL.Path == "/potluck/switch" && r.Method == http.MethodPost:
+			if !chatOwner(r) || r.Header.Get("X-Potluck") != "1" {
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "only the computer running Potluck can switch models"})
+				return
+			}
+			var in struct {
+				File string `json:"file"`
+				Node string `json:"node"`
+				Ctx  int    `json:"ctx"`
+			}
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&in); err != nil {
+				fail(w, err)
+				return
+			}
+			if err := h.chatSwitch(in.File, in.Node, in.Ctx); err != nil {
+				fail(w, err)
+				return
+			}
+			writeJSON(w, map[string]bool{"ok": true})
+		case strings.HasPrefix(r.URL.Path, "/potluck/"):
+			http.NotFound(w, r)
+		default:
+			api.ServeHTTP(w, r)
+		}
+	})
+}
+
+func (h *Host) chatState(owner bool) map[string]any {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c := h.cluster
+	out := map[string]any{"version": version, "phase": c.Phase, "error": c.Error, "steps": c.Steps, "owner": owner, "ctx": h.lastCtx, "pauseWhy": h.pauseWhy}
+	if c.Model != nil {
+		out["model"] = map[string]any{"title": c.Model.Title, "file": c.Model.File, "size": c.Model.Size}
+	}
+	if owner {
+		out["panel"] = "http://127.0.0.1:" + strconv.Itoa(portUI)
+	}
+	var nodes []chatNode
+	for _, n := range h.nodes {
+		if n.Role == "" && n.Total == 0 {
+			continue
+		}
+		nodes = append(nodes, chatNode{Name: n.Info.Name, Role: n.Role, Status: n.Status, Online: n.Online, Held: n.Held, LinkMs: n.LinkMs, Done: n.Done, Total: n.Total})
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		if (nodes[i].Role == "head") != (nodes[j].Role == "head") {
+			return nodes[i].Role == "head"
+		}
+		return nodes[i].Name < nodes[j].Name
+	})
+	out["nodes"] = nodes
+	return out
+}
+
+// chatModels lists the complete model files on every connected computer.
+func (h *Host) chatModels() []chatModel {
+	h.mu.Lock()
+	var running string
+	if h.cluster.Model != nil && (h.cluster.Phase == "running" || h.cluster.Phase == "starting") {
+		running = h.cluster.Model.File
+	}
+	names := map[string]string{}
+	for id, n := range h.nodes {
+		names[id] = n.Info.Name
+	}
+	h.mu.Unlock()
+	known := h.cfg.Get().Known
+	var out []chatModel
+	seen := map[string]bool{}
+	for id, rep := range h.Storage() {
+		for _, f := range rep.Models {
+			// A model that comes as several files is one entry, under its first file.
+			if !f.Complete || seen[f.File] || (splitRe.MatchString(f.File) && !strings.Contains(f.File, "-00001-of-")) {
+				continue
+			}
+			seen[f.File] = true
+			m := chatModel{Title: strings.TrimSuffix(f.File, ".gguf"), File: f.File, Size: f.Size, Node: id, NodeName: names[id], Running: f.File == running}
+			if k, ok := known[f.File]; ok {
+				if k.Title != "" {
+					m.Title = k.Title
+				}
+				if k.Size > 0 {
+					m.Size = k.Size
+				}
+			}
+			out = append(out, m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Running != out[j].Running {
+			return out[i].Running
+		}
+		return strings.ToLower(out[i].Title) < strings.ToLower(out[j].Title)
+	})
+	return out
+}
+
+// chatSwitch starts a model that is already on one of the computers.
+func (h *Host) chatSwitch(file, node string, ctx int) error {
+	if file == "" || strings.ContainsAny(file, `/\`) {
+		return errors.New("which model?")
+	}
+	switch ctx {
+	case 4096, 8192, 16384, 32768:
+	default:
+		ctx = 4096
+	}
+	// A model Potluck downloaded itself is started the way it was first started, so that
+	// helpers fetch their own share instead of receiving it over the local network.
+	ref, ok := h.cfg.Get().Known[file]
+	if !ok {
+		if node == "" {
+			return errors.New("that model is not on any connected computer")
+		}
+		ref = ModelRef{Source: "local", File: file, Node: node}
+	}
+	return h.Start(ref, ctx, "")
+}

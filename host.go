@@ -582,7 +582,9 @@ func (h *Host) applyShare() {
 	}
 	rp.FlushInterval = 50 * time.Millisecond
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		http.Error(w, "Potluck: "+err.Error()+". Start a model in the control panel first.", http.StatusBadGateway)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "Potluck: " + err.Error() + ". Start a model first."}})
 	}
 	addr := "127.0.0.1:" + strconv.Itoa(portChat)
 	if h.cfg.Get().ShareChat {
@@ -590,7 +592,7 @@ func (h *Host) applyShare() {
 	}
 	h.mu.Lock()
 	old := h.chatSrv
-	srv := &http.Server{Addr: addr, Handler: rp}
+	srv := &http.Server{Addr: addr, Handler: h.chatHandler(rp)}
 	h.chatSrv = srv
 	h.mu.Unlock()
 	go func() {
@@ -978,7 +980,15 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 	h.mu.Lock()
 	h.cluster.Model = &model // now with its title, size and checksum filled in
 	h.mu.Unlock()
-	h.cfg.Update(func(c *Config) { c.LastModel = &model })
+	h.cfg.Update(func(c *Config) {
+		c.LastModel = &model
+		if !local && model.File != "" {
+			if c.Known == nil {
+				c.Known = map[string]ModelRef{}
+			}
+			c.Known[model.File] = model
+		}
+	})
 	info, err := h.modelInfo(ctx, &model)
 	done(err)
 	if err != nil {

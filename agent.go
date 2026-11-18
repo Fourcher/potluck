@@ -34,6 +34,9 @@ type Config struct {
 	ShareChat  bool              `json:"shareChat,omitempty"`  // chat page and API reachable from the local network
 	HeadChoice string            `json:"headChoice,omitempty"` // "" = automatic
 	LastModel  *ModelRef         `json:"lastModel,omitempty"`
+	// Known remembers where each model that Potluck downloaded came from, by file name, so
+	// it can be started again the same way from the chat page.
+	Known map[string]ModelRef `json:"known,omitempty"`
 }
 
 // ConfigStore saves Config to disk on every change.
