@@ -64,7 +64,7 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 	if dir := os.Getenv("POTLUCK_DEV_WEB"); dir != "" {
 		static = http.FileServer(http.Dir(filepath.Join(dir, "chat")))
 	}
-	pages := map[string]bool{"/": true, "/index.html": true, "/chat.js": true, "/chat.css": true, "/md.js": true, "/store.js": true}
+	pages := map[string]bool{"/": true, "/index.html": true, "/chat.js": true, "/chat.css": true, "/md.js": true, "/store.js": true, "/extract.js": true}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && pages[r.URL.Path]:

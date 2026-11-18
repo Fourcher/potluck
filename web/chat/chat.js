@@ -202,7 +202,7 @@ function drawThread() {
   c.messages.forEach((m, i) => {
     if (m.role === "user") {
       const files = (m.files || []).map(f => `<span class="chip ${f.skipped ? "bad" : ""}" title="${esc(f.skipped || "")}">${ic("file")}<span class="n">${esc(f.name)}</span><small>${f.skipped ? "not included" : bytes(f.size)}</small></span>`).join("");
-      h += `<div class="msg user ${i === lastUser ? "last" : ""}" data-i="${i}">${files ? `<div class="files">${files}</div>` : ""}${m.content ? `<div class="bubble">${esc(m.content)}</div>` : ""}<div class="acts"><button class="icon" data-a="edit-msg" title="Edit and resend" aria-label="Edit and resend">${ic("edit")}</button><button class="icon" data-a="copy-msg" title="Copy" aria-label="Copy">${ic("copy")}</button></div></div>`;
+      h += `<div class="msg user ${i === lastUser ? "last" : ""}" data-i="${i}">${files ? `<div class="files">${files}</div>` : ""}${m.content ? `<div class="bubble">${esc(m.content)}</div>` : ""}<div class="acts">${m.branches && m.branches.length > 1 ? `<span class="versions"><button class="icon" data-a="branch" data-d="-1" title="Earlier version" aria-label="Earlier version" ${m.bi === 0 ? "disabled" : ""}>‹</button><span>${m.bi + 1} / ${m.branches.length}</span><button class="icon" data-a="branch" data-d="1" title="Later version" aria-label="Later version" ${m.bi === m.branches.length - 1 ? "disabled" : ""}>›</button></span>` : ""}<button class="icon" data-a="edit-msg" title="Edit and resend" aria-label="Edit and resend">${ic("edit")}</button><button class="icon" data-a="copy-msg" title="Copy" aria-label="Copy">${ic("copy")}</button></div></div>`;
     } else if (m.role === "assistant") {
       const next = c.messages[i + 1], endOfTurn = !next || next.role === "user";
       const live = S.gen && S.gen.msg === m;
@@ -236,7 +236,7 @@ function drawLive() { // redraw only the message being written
 function drawChips() {
   let h = "";
   if (S.folder) h += `<span class="chip folder" title="${S.folder.kind === "handle" ? "The model can work in this folder, within the permission level you chose." : "A read-only copy of this folder."}">${ic("folder")}<span class="n">${esc(S.folder.name)}</span><small>${S.folder.needsAccess ? "click to reconnect" : S.folder.kind === "snapshot" ? S.folder.files.size + " files, read-only" : "working folder"}</small><button type="button" data-a="detach" title="Remove folder" aria-label="Remove folder">×</button></span>`;
-  h += S.pending.map((f, i) => `<span class="chip ${f.skipped ? "bad" : ""}" title="${esc(f.skipped || f.name)}">${ic("file")}<span class="n">${esc(f.name)}</span><small>${f.skipped ? "cannot be read" : "about " + num(estTokens(f.text.length)) + " tokens"}</small><button type="button" data-a="unattach" data-i="${i}" title="Remove" aria-label="Remove">×</button></span>`).join("");
+  h += S.pending.map((f, i) => `<span class="chip ${f.skipped ? "bad" : ""}" title="${esc(f.skipped || (f.pasted ? "Click to put this text back in the message box" : f.name))}"${f.pasted ? ` data-pasted="${i}" style="cursor:pointer"` : ""}>${ic("file")}<span class="n">${esc(f.name)}</span><small>${f.skipped ? "cannot be read" : "about " + num(estTokens(f.text.length)) + " tokens"}</small><button type="button" data-a="unattach" data-i="${i}" title="Remove" aria-label="Remove">×</button></span>`).join("");
   $("#chips").innerHTML = h;
   drawFine();
 }
@@ -276,7 +276,16 @@ const TEXT_LIMIT = 400000;
 async function readAttachment(file) {
   const a = { name: file.webkitRelativePath || file.name, size: file.size, text: "" };
   if (/^image\//.test(file.type)) { a.skipped = "This model cannot look at pictures."; return a; }
-  if (/\.(pdf|docx?|xlsx?|pptx?|zip|gz|7z|rar|mp3|mp4|mov|wav|exe|dmg|gguf|bin)$/i.test(file.name)) { a.skipped = "Only plain-text files (notes, code, CSV, Markdown and the like) can be read for now."; return a; }
+  const kind = Extract.kindOf(file.name);
+  if (kind) {
+    if (file.size > 25 << 20) { a.skipped = "Bigger than 25 MB: too much to read here."; return a; }
+    try { a.text = await Extract.text(kind, new Uint8Array(await file.arrayBuffer())); }
+    catch (e) { a.skipped = e.message || "Its text could not be read."; return a; }
+    if (!a.text.trim()) { a.skipped = kind === "pdf" ? "No readable text in this PDF. It may be a scan, or use a font this page cannot decode." : "This file has no text in it."; return a; }
+    if (a.text.length > TEXT_LIMIT) a.text = a.text.slice(0, TEXT_LIMIT) + "\n[cut off here]";
+    return a;
+  }
+  if (/\.(doc|xls|ppt|zip|gz|7z|rar|mp3|mp4|mov|wav|exe|dmg|gguf|bin|key|pages|numbers)$/i.test(file.name)) { a.skipped = "This kind of file cannot be read. Plain text, PDF, Word, Excel and PowerPoint files (the newer .docx, .xlsx, .pptx) can."; return a; }
   if (file.size > 2 << 20) { a.skipped = "Bigger than 2 MB: too much for the model to read at once."; return a; }
   const text = await file.text();
   if (/\u0000/.test(text.slice(0, 8000))) { a.skipped = "This is not a text file."; return a; }
@@ -609,9 +618,33 @@ async function send(text) {
   await saveChat(c);
   await generate();
 }
+// Versions. Trying again, or editing a message, starts a new version of that turn; the
+// earlier ones are kept on the user message and can be brought back with ‹ ›. Only the
+// version on screen is sent to the model.
+function branchFrom(i, content) {
+  const c = S.cur, m = c.messages[i];
+  if (!m.branches) { m.branches = [{ content: m.content, files: m.files }]; m.bi = 0; }
+  m.branches[m.bi].tail = c.messages.slice(i + 1);
+  m.branches.push({ content, files: m.files });
+  m.bi = m.branches.length - 1;
+  m.content = content;
+  c.messages.length = i + 1;
+}
+async function switchBranch(i, step) {
+  const c = S.cur, m = c.messages[i];
+  if (S.gen || !m || !m.branches) return;
+  const to = m.bi + step; if (to < 0 || to >= m.branches.length) return;
+  m.branches[m.bi].tail = c.messages.slice(i + 1);
+  m.bi = to;
+  const b = m.branches[to];
+  m.content = b.content; m.files = b.files;
+  c.messages = c.messages.slice(0, i + 1).concat(b.tail || []);
+  b.tail = null;
+  await saveChat(c); drawThread(); drawTools();
+}
 async function retry() {
   if (S.gen) return; const c = S.cur, i = c.messages.map(m => m.role).lastIndexOf("user"); if (i < 0) return;
-  c.messages.length = i + 1; drawThread(); await generate();
+  branchFrom(i, c.messages[i].content); drawThread(); await generate();
 }
 function editMessage(i) {
   if (S.gen) return; const el = $(`.msg[data-i="${i}"]`), m = S.cur.messages[i]; if (!el || !m) return;
@@ -923,11 +956,23 @@ function wire() {
     }
     if (e.key === "ArrowUp" && !input.value && !S.gen) { const i = S.cur.messages.map(m => m.role).lastIndexOf("user"); if (i >= 0) { e.preventDefault(); editMessage(i); } }
   };
-  input.onpaste = e => { const files = [...(e.clipboardData.files || [])]; if (files.length) { e.preventDefault(); addFiles(files); } };
+  input.onpaste = e => {
+    const files = [...(e.clipboardData.files || [])];
+    if (files.length) { e.preventDefault(); addFiles(files); return; }
+    // Long pasted text becomes an attachment, so the message box stays readable.
+    const t = e.clipboardData.getData("text/plain");
+    if (t && (t.length > 4000 || t.split("\n").length > 60)) {
+      e.preventDefault();
+      const n = S.pending.filter(f => /^Pasted text/.test(f.name)).length;
+      S.pending.push({ name: "Pasted text" + (n ? " " + (n + 1) : ""), size: new Blob([t]).size, text: t.length > TEXT_LIMIT ? t.slice(0, TEXT_LIMIT) + "\n[cut off here]" : t, pasted: true });
+      drawChips(); drawTools(); toast("Long text attached. Click its name to put it back in the box.");
+    }
+  };
   $("#slash").onclick = e => { const b = e.target.closest("[data-cmd]"); if (b) { input.value = ""; autosize(); hideSlash(); drawTools(); runSlash("/" + b.dataset.cmd); input.focus(); } };
   $("#chips").onclick = e => {
     const b = e.target.closest("[data-a]");
     if (b && b.dataset.a === "unattach") { S.pending.splice(+b.dataset.i, 1); drawChips(); drawTools(); }
+    else if (!b && e.target.closest("[data-pasted]")) { const i = +e.target.closest("[data-pasted]").dataset.pasted, f = S.pending[i]; S.pending.splice(i, 1); const inp = $("#input"); inp.value = (inp.value ? inp.value + "\n" : "") + f.text; autosize(); drawChips(); drawTools(); }
     else if (b && b.dataset.a === "detach") setFolder(null);
     else if (e.target.closest(".chip.folder") && S.folder && S.folder.needsAccess) reconnectFolder();
   };
@@ -965,7 +1010,8 @@ function wire() {
     else if (a === "speak") speakText(m.content);
     else if (a === "edit-msg") editMessage(i);
     else if (a === "edit-cancel") drawThread();
-    else if (a === "edit-save") { const j = +b.dataset.i, t = $("textarea", b.closest(".edit-box")).value.trim(); if (!t) return; S.cur.messages[j].content = t; S.cur.messages.length = j + 1; drawThread(); saveChat().then(generate); }
+    else if (a === "edit-save") { const j = +b.dataset.i, t = $("textarea", b.closest(".edit-box")).value.trim(); if (!t) return; if (t === S.cur.messages[j].content && S.cur.messages.length > j + 1) { drawThread(); return; } branchFrom(j, t); drawThread(); saveChat().then(generate); }
+    else if (a === "branch") switchBranch(i, +b.dataset.d);
   };
   $("#banner").onclick = e => { if (e.target.dataset.a === "models") modelMenu($("#model")); };
   $("#modal").onclick = e => {

@@ -4,7 +4,7 @@ Run one large AI model across the spare computers you already own.
 
 A laptop with 16 GB, an old gaming PC, a Linux box in the closet: none of them can hold a big model alone, but together they can. Potluck pools their memory, splits the model between them, and gives you one chat page and one OpenAI-compatible API on your main computer.
 
-Version 1.2. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second.
+Version 1.3. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second.
 
 ## How you use it
 
@@ -27,12 +27,13 @@ Open `http://127.0.0.1:7720` on the main computer (or "Open chat" in the control
 
 - **Conversations** in a sidebar: search, star, rename, export as Markdown, delete. They are kept in your browser on that computer, not on the Potluck computers.
 - **Speak or type.** The microphone button takes dictation; say "send message" to send. Replies can be read aloud.
-- **Attach files** (their text is included with your message) **or a folder**. A folder becomes the chat's working folder: the model can list, read and search it, and write files in it.
+- **Attach files** (their text is included with your message): plain text, PDF, Word, Excel and PowerPoint. Long pasted text becomes an attachment too. **Or attach a folder**. A folder becomes the chat's working folder: the model can list, read and search it, and write files in it.
 - **Permission levels** for that folder: chat only, ask every time, read freely (ask before changes), or edit freely. Each request shows what the model wants to do, and for a file it wants to write, the content.
 - **Models:** see which model is running, switch to another one that is on your computers, or reload with a longer conversation memory. Only the main computer can switch.
 - **Usage:** a ring shows how full the conversation's memory is. Click it for tokens read and written, speed, time spent, and which computers are working.
 - **Commands:** type `/` in the message box, or press Ctrl/Cmd+K anywhere. `/help` lists what there is.
-- **Also:** thinking on or off, writing styles, your own standing instructions, edit and resend, try again, stop, a preview panel for HTML and SVG the model writes, light and dark, keyboard shortcuts, and a phone-sized layout.
+- **Versions:** trying again or editing a message keeps the earlier answers; flip between them with ‹ ›.
+- **Also:** thinking on or off, writing styles, your own standing instructions, stop, a preview panel for HTML and SVG the model writes, light and dark, keyboard shortcuts, and a phone-sized layout.
 
 Two things make it quick on slow hardware. Follow-up messages read only what is new: for Qwen-style models the page sends the conversation back exactly as it was written, where the standard route made the engine read every earlier token again on every turn (measured: 23 new tokens instead of 78). And there are no hidden extra requests, such as asking the model for a title.
 
@@ -90,7 +91,7 @@ Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs 
 - Main computer: macOS (Apple Silicon), Windows 10, Alpine Linux. Helpers: Windows 10 (NVIDIA card), macOS 15 (Intel), Alpine Linux (musl).
 - All three ways of adding a computer, and all three USB-kit launchers.
 - Pooled, single-computer-with-disk, helper graphics card, split-file model, model file already on disk, live switching off and on, sharing with the network.
-- The chat page in a Chromium browser against the running cluster: streaming, attachments, folder tools with each permission level, model reload with a longer memory, summarize-and-continue, thinking, preview. Dictation and read-aloud are built on the browser's own speech features and have not been tried with a real microphone.
+- The chat page in a Chromium browser against the running cluster: streaming, attachments (text, PDF, Excel; Word and PowerPoint files tested with the same reader outside the browser), answer versions, folder tools with each permission level, model reload with a longer memory, summarize-and-continue, thinking, preview. Dictation and read-aloud are built on the browser's own speech features and have not been tried with a real microphone.
 - Direct links between Windows 10, macOS 15 (firewall on, stealth mode on) and Alpine Linux (stateful firewall), with no firewall rule on any of them, including two computers that reach the main computer over different networks.
 - The Vulkan engine build, on an NVIDIA card. AMD and Intel cards use the same path but have not been tried on real AMD or Intel hardware.
 - The Linux Arm build under emulation (starts, pairs, reports hardware). Windows on Arm is built but untested.
@@ -105,7 +106,7 @@ Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs 
 - A model file that is already on disk cannot be fetched by the helpers themselves: the head sends them their share over your network, which is slow the first time.
 - PirateFace is list-only: Potluck does not contain a torrent client. Copy the link into your own torrent app, then put the file in a models folder.
 - The chat page and API are for this computer only unless you switch on sharing with your network. Sharing has no password.
-- Attachments must be plain text (notes, code, CSV, Markdown). PDFs, Office files and pictures are not read yet.
+- Pictures, scanned PDFs and PDFs whose fonts use their own private encoding cannot be read; the page says so instead of sending garbage. Older Office formats (.doc, .xls, .ppt) are not read.
 - Working in a folder with write access needs a Chromium browser (Chrome, Edge). Safari and Firefox attach a read-only copy.
 - Dictation depends on the browser: some recognise speech on the computer, others send audio to the browser maker's service. The page says which. It needs a microphone and only works on the main computer itself or over a secure address.
 - Chats live in one browser on one computer. Use export and import in Settings to move them.

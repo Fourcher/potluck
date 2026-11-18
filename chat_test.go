@@ -51,7 +51,7 @@ func TestChatHandler(t *testing.T) {
 	local, lan := "127.0.0.1:5000", "192.168.1.30:5000"
 
 	// The page and its scripts are built into the program.
-	for _, p := range []string{"/", "/chat.js", "/chat.css", "/md.js", "/store.js"} {
+	for _, p := range []string{"/", "/chat.js", "/chat.css", "/md.js", "/store.js", "/extract.js"} {
 		if w := do(chatReq("GET", p, local, "127.0.0.1:7720", nil, "")); w.Code != 200 || w.Body.Len() < 500 {
 			t.Fatalf("%s: status %d, %d bytes", p, w.Code, w.Body.Len())
 		}
