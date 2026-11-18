@@ -4,7 +4,7 @@ Run one large AI model across the spare computers you already own.
 
 A laptop with 16 GB, an old gaming PC, a Linux box in the closet: none of them can hold a big model alone, but together they can. Potluck pools their memory, splits the model between them, and gives you one chat page and one OpenAI-compatible API on your main computer.
 
-Version 1.3. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second.
+Version 1.4. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second.
 
 ## How you use it
 
@@ -55,6 +55,15 @@ One self-contained program per platform (about 9 MB, no installer). Written in G
 
 Ports on the main computer: 7716 control panel (this computer only), 7717 helpers (encrypted) and discovery, 7715 join page (local network), 7720 chat page and API (this computer only, unless you switch on sharing). Direct links use a UDP port the system picks.
 
+## Streaming from disk (InferSSD, experimental)
+
+For the biggest mixture-of-experts models, Potluck can also run a model on one computer with [InferSSD](https://github.com/wici-ai/inferssd), an engine built on llama.cpp that keeps the part of the model used for every word in memory and reads the experts each word needs straight from the SSD. A computer with an empty 2 TB drive can then run a model several times bigger than its memory: InferSSD's authors report 2.5 to 7.3 words a second for a 763-billion-parameter model on fast NVMe drives.
+
+- **When it is offered:** the plan sheet shows "stream from <computer>'s disk" when the model is one InferSSD knows (DeepSeek-V4.1, Muse Spark, Qwen3.5 to 3.8 mixture-of-experts) and a computer can run InferSSD and has room for the file. The model store marks such models "Streams from disk". It is never chosen for you: pooling or plain llama.cpp stay the default.
+- **Where it runs:** Windows x64 (a CUDA package for NVIDIA cards from the Turing generation on, otherwise a Vulkan package that also runs on the processor) and Apple Silicon Macs on macOS 15 or later. Not on Linux (InferSSD needs a source build there) or Intel Macs.
+- **What Potluck does:** downloads the pinned InferSSD release (0.1.5), checks it against the published SHA-256, keeps it and all its state inside Potluck's data folder, sets its memory budget from the computer's pedal, and serves its chat and API at the usual address.
+- **Limits:** one computer at a time; InferSSD has no network pooling, so the other computers are not used in this mode. Speed depends on the drive: NVMe is what it was measured on; an older SATA SSD will be slower and a hard disk far too slow.
+
 ## Pooling or disk?
 
 llama.cpp maps the model file rather than loading it, so a computer can run a model bigger than its memory: the operating system keeps what fits and reads the rest from disk when it is needed. Measured on 16 November 2026 with a 36.6 GB mixture-of-experts model (122B parameters, about 10B active per token):
@@ -87,6 +96,8 @@ What made the difference between 1.0 and 1.1, each measured on the cluster above
 Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs in `dist/` next to it: the USB kit and the join page hand them out. On a Mac the script also signs the Mac programs and builds `dist/Potluck.app` (set `POTLUCK_SIGN_ID` to a Developer ID to sign for distribution).
 
 ## Tested so far
+
+- InferSSD streaming: the package choice, plan, launch options and install were tested; the Windows Vulkan package was downloaded, checked and unpacked on a Windows 10 PC, and its version and options read. Running a model through it end to end has not been measured yet.
 
 - Main computer: macOS (Apple Silicon), Windows 10, Alpine Linux. Helpers: Windows 10 (NVIDIA card), macOS 15 (Intel), Alpine Linux (musl).
 - All three ways of adding a computer, and all three USB-kit launchers.

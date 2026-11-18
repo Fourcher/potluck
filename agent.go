@@ -99,8 +99,9 @@ type Agent struct {
 	done      int64
 	total     int64
 
-	direct *Direct           // this computer's end of direct links to other computers
-	links  map[string]string // how each helper of the model running here is reached: direct | relay
+	direct    *Direct           // this computer's end of direct links to other computers
+	streamDir string            // the installed InferSSD package, when there is one
+	links     map[string]string // how each helper of the model running here is reached: direct | relay
 
 	// set by whoever owns the agent
 	dialTunnel func(to, target string) (net.Conn, error)
@@ -236,6 +237,9 @@ type (
 		// ExpertCPU lists layers whose expert weights stay in memory while the rest of the
 		// layer sits on the graphics card.
 		ExpertCPU []int `json:"expertCPU,omitempty"`
+		// Stream: run the model with InferSSD, streaming experts from this computer's disk,
+		// instead of llama.cpp.
+		Stream bool `json:"stream,omitempty"`
 		// AllThreads: use every hardware thread instead of one per core. The main computer
 		// asks for it only in the layout where that measured faster.
 		AllThreads bool `json:"allThreads,omitempty"`
@@ -317,6 +321,21 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		a.pruneEngines(dir)
 		a.note("AI engine ready", 0, 0)
 		return map[string]string{"dir": dir, "gpuDevice": dev}, nil
+
+	case "ensure_stream":
+		var p StreamPackage
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		dir, err := a.ensureStream(a.jobCtx(), p, func(s string) { a.note(s, 0, 0) })
+		if err != nil {
+			return nil, err
+		}
+		a.mu.Lock()
+		a.streamDir = dir
+		a.mu.Unlock()
+		a.note("Disk-streaming engine ready", 0, 0)
+		return map[string]string{"dir": dir}, nil
 
 	case "fetch_model":
 		var in FetchModelReq
@@ -502,6 +521,9 @@ func (a *Agent) startRPC() (any, error) {
 }
 
 func (a *Agent) startHead(in StartHeadReq) (any, error) {
+	if in.Stream {
+		return a.startStream(in)
+	}
 	a.mu.Lock()
 	rt, old, gpuDev := a.rtDir, a.head, a.gpuDev
 	oldL := a.listeners
@@ -607,6 +629,48 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	a.mu.Unlock()
 	a.note("Loading the model", 0, 0)
 	return map[string]int{"port": api, "threads": threads}, nil
+}
+
+// startStream runs a model with InferSSD on this computer alone.
+func (a *Agent) startStream(in StartHeadReq) (any, error) {
+	a.mu.Lock()
+	dir, old, oldL := a.streamDir, a.head, a.listeners
+	a.listeners = nil
+	a.mu.Unlock()
+	bin := streamBin(dir)
+	if dir == "" || bin == "" {
+		return nil, errors.New("the disk-streaming engine is not installed yet")
+	}
+	old.Stop()
+	for _, l := range oldL {
+		l.Close()
+	}
+	model := filepath.Join(a.dir, "models", filepath.Base(in.File))
+	if _, err := os.Stat(model); err != nil {
+		return nil, errors.New("the model file is not on this computer")
+	}
+	api, err := freePort()
+	if err != nil {
+		return nil, err
+	}
+	info := a.Info()
+	// The pedal sets how much memory InferSSD's caches may take. The rest of the model stays
+	// on the disk and is read as needed.
+	cpu, gpu, _ := offer(info, 0)
+	budget := cpu >> 20
+	if budget < 1024 {
+		budget = 1024
+	}
+	a.pruneStreamRuns()
+	p, err := a.startProc("head", dir, bin, streamArgs(model, api, in.Ctx, budget, gpu == 0), false, info.Limits.Pedal < 100)
+	if err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	a.head, a.apiPort, a.links = p, api, nil
+	a.mu.Unlock()
+	a.note("Loading the model (the first start measures this computer's disk, one to three minutes)", 0, 0)
+	return map[string]int{"port": api}, nil
 }
 
 // Status reports what is running here.

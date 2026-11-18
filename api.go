@@ -276,7 +276,9 @@ func (app *App) serveUI() error {
 		}
 		// Two ways to run it: pooled across the computers, and (when one computer is close
 		// to big enough) on that computer alone with its disk covering the difference.
-		return map[string]any{"model": m, "info": info, "plan": h.planFor(info, "", m.Node), "solo": h.bestSolo(info, m.Node)}, nil
+		// A third, for the model families InferSSD knows: one computer streaming the experts
+		// from its disk, which reaches much bigger models than either of the others.
+		return map[string]any{"model": m, "info": info, "plan": h.planFor(info, "", m.Node), "solo": h.bestSolo(info, m.Node), "stream": h.bestStream(info, m.Node)}, nil
 	})
 
 	api("/api/start", func(r *http.Request) (any, error) {

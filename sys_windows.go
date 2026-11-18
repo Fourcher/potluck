@@ -4,6 +4,7 @@ package main
 
 import (
 	"os/exec"
+	"strconv"
 	"syscall"
 	"unsafe"
 )
@@ -65,4 +66,12 @@ func lowerPriority(pid int) {
 
 func hideWindow(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+}
+
+// killTree stops a program and the programs it started (InferSSD's launcher starts its
+// server as a child).
+func killTree(pid int) {
+	c := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid))
+	hideWindow(c)
+	_ = c.Run()
 }

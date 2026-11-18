@@ -840,7 +840,9 @@ func (h *Host) planNodes() []PlanNode {
 			continue
 		}
 		pn := PlanNode{ID: id, Name: n.Info.Name, CPUBytes: cpu, GPUBytes: gpu, Unified: uni, Cores: n.Info.Cores,
-			TwoDev: twoDev(n.Info), HasGPU: n.Info.usableGPU() != nil, RAMTotal: int64(n.Info.RAMTotal), LinkMs: n.LinkMs}
+			TwoDev: twoDev(n.Info), HasGPU: n.Info.usableGPU() != nil, RAMTotal: int64(n.Info.RAMTotal), LinkMs: n.LinkMs,
+			DiskFree: int64(n.Info.DiskFree)}
+		pn.StreamVariant, pn.StreamWhy = streamVariant(n.Info)
 		if n.NoGPU && !uni {
 			pn.GPUBytes, pn.TwoDev, pn.HasGPU = 0, false, false
 		}
@@ -885,6 +887,17 @@ func (h *Host) planFor(info *ModelInfo, solo, head string) *Plan {
 			}
 		}
 		return planLayout(info, nodes, head)
+	}
+	if id, ok := streamChoice(solo); ok {
+		if head != "" && head != id {
+			return &Plan{Reason: "The model file is on another computer; it can only be streamed from the computer that holds it."}
+		}
+		for _, n := range nodes {
+			if n.ID == id {
+				return planStream(info, n, head == id)
+			}
+		}
+		return &Plan{Reason: "That computer is not available right now."}
 	}
 	for _, n := range nodes {
 		if n.ID == solo {
@@ -1057,6 +1070,17 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 					ni.GPUs[i].Usable = false // install the plain build
 				}
 			}
+			if plan.Stream {
+				variant, why := streamVariant(ni)
+				if variant == "" {
+					return errors.New(ni.Name + ": streaming from disk is " + why)
+				}
+				pkg, err := h.streamPackage(variant)
+				if err != nil {
+					return err
+				}
+				return h.call(p.id, "ensure_stream", pkg, nil, 2*time.Hour)
+			}
 			spec, err := h.runtimeSpec(ni, p.isHead)
 			if err != nil {
 				return err
@@ -1156,7 +1180,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			helperLayers += plan.DevLayers[i]
 		}
 	}
-	req := StartHeadReq{File: model.File, Workers: plan.WorkerOrder, NGL: plan.NGL, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs,
+	req := StartHeadReq{File: model.File, Workers: plan.WorkerOrder, NGL: plan.NGL, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream,
 		ExpertCPU: plan.ExpertCPU,
 		// Every hardware thread only where it measured faster: pooled, with the card holding
 		// the trunk of all the head's layers (3.8 against 3.3 words/s). With whole layers on

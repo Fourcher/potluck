@@ -174,6 +174,14 @@ func (h *Host) judge(files []StoreFile) {
 			biggest = c
 		}
 	}
+	// The biggest model a computer could stream from its disk, for the families InferSSD knows.
+	var streamName string
+	var streamDisk int64
+	for _, n := range nodes {
+		if n.StreamVariant != "" && n.DiskFree > streamDisk {
+			streamName, streamDisk = n.Name, n.DiskFree
+		}
+	}
 	for i := range files {
 		f := &files[i]
 		need := f.Size + f.Size/25 + perDeviceOverhead // a little room for working memory
@@ -182,6 +190,8 @@ func (h *Host) judge(files []StoreFile) {
 			f.Verdict, f.Note = "one", "Fits on one of your computers."
 		case need+int64(len(nodes))*perDeviceOverhead <= sum:
 			f.Verdict, f.Note = "pool", "Too big for any one computer. Runs across your computers together."
+		case streamName != "" && streamNamePattern.MatchString(f.File) && f.Size+(4<<30) <= streamDisk:
+			f.Verdict, f.Note = "stream", fmt.Sprintf("Too big for your computers' memory, but %s may run it by streaming from its disk. Checked when you set it up.", streamName)
 		default:
 			f.Verdict, f.Note = "no", fmt.Sprintf("Needs about %s more memory than your computers offer.", humanBytes(need-sum))
 		}

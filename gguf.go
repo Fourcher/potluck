@@ -338,6 +338,11 @@ type PlanNode struct {
 	Cores    int     `json:"cores"`
 	RAMTotal int64   `json:"ramTotal"`
 	LinkMs   float64 `json:"linkMs"` // typical round trip to this computer, 0 when not measured
+	// For streaming from disk (InferSSD): free space where the models go, and which package
+	// suits this computer ("" with the reason when none does).
+	DiskFree      int64  `json:"diskFree"`
+	StreamVariant string `json:"streamVariant,omitempty"`
+	StreamWhy     string `json:"streamWhy,omitempty"`
 }
 
 // PlanShare is what one computer ends up holding.
@@ -369,6 +374,7 @@ type Plan struct {
 	CardTrunk  bool  `json:"cardTrunk,omitempty"`
 	ExpertCPU  []int `json:"expertCPU,omitempty"`
 	Solo       bool  `json:"solo"`     // one computer alone, letting its disk stand in for missing memory
+	Stream     bool  `json:"stream"`   // that computer runs InferSSD, streaming experts from its disk
 	Overflow   int64 `json:"overflow"` // bytes of the model that do not fit in that computer's memory
 	ModelBytes int64 `json:"modelBytes"`
 	OfferedSum int64 `json:"offeredSum"`

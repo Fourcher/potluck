@@ -21,6 +21,8 @@ type GPU struct {
 	Unified   bool   `json:"unified"` // shares system RAM (Apple Silicon)
 	Usable    bool   `json:"usable"`
 	Backend   string `json:"backend"` // which engine build drives it: cuda | vulkan | metal
+	// ComputeCap is an NVIDIA card's compute capability (6.1, 7.5, 8.6...), 0 when unknown.
+	ComputeCap float64 `json:"computeCap,omitempty"`
 }
 
 // Limits is how hard a computer is allowed to work: the "pedal".
@@ -336,6 +338,17 @@ func nvidiaGPUs() []GPU {
 			g.Usable, g.Backend = true, "vulkan" // on Linux the Vulkan build needs nothing beyond the driver
 		}
 		gpus = append(gpus, g)
+	}
+	// Asked separately: drivers too old to know the field would fail the whole query above.
+	if len(gpus) > 0 {
+		caps := strings.Split(strings.TrimSpace(run(6*time.Second, "nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader")), "\n")
+		for i := range gpus {
+			if i < len(caps) {
+				if c, err := strconv.ParseFloat(strings.TrimSpace(caps[i]), 64); err == nil {
+					gpus[i].ComputeCap = c
+				}
+			}
+		}
 	}
 	return gpus
 }

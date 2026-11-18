@@ -2,6 +2,7 @@ package main
 
 import (
 	"math/rand"
+	"strings"
 	"testing"
 )
 
@@ -378,6 +379,75 @@ func TestTrunkPlanTieGoesToBestLink(t *testing.T) {
 	for _, s := range p.Shares[1:] {
 		if s.ID == "llmos" && s.CPULayers != 12 {
 			t.Fatalf("the better-connected helper should be filled to its 12 layers, got %d", s.CPULayers)
+		}
+	}
+}
+
+func TestStreamVariant(t *testing.T) {
+	for _, c := range []struct {
+		info NodeInfo
+		want string
+	}{
+		{NodeInfo{OS: "windows", Arch: "amd64", GPUs: []GPU{{Vendor: "nvidia", ComputeCap: 6.1}}}, "windows-vulkan"},
+		{NodeInfo{OS: "windows", Arch: "amd64", GPUs: []GPU{{Vendor: "nvidia", ComputeCap: 8.6}}}, "windows-cuda"},
+		{NodeInfo{OS: "windows", Arch: "amd64"}, "windows-vulkan"},
+		{NodeInfo{OS: "darwin", Arch: "arm64", OSName: "macOS 27.2.1"}, "macos"},
+		{NodeInfo{OS: "darwin", Arch: "arm64", OSName: "macOS 14.6"}, ""},
+		{NodeInfo{OS: "darwin", Arch: "amd64", OSName: "macOS 15.7"}, ""},
+		{NodeInfo{OS: "linux", Arch: "amd64"}, ""},
+		{NodeInfo{OS: "windows", Arch: "arm64"}, ""},
+	} {
+		if got, why := streamVariant(c.info); got != c.want || (got == "" && why == "") {
+			t.Fatalf("%+v: got %q (%q), want %q", c.info, got, why, c.want)
+		}
+	}
+}
+
+func TestPlanStream(t *testing.T) {
+	m := moeModel()
+	m.Arch, m.FileSize = "qwen35moe", m.TotalBytes()
+	pc := PlanNode{ID: "pc", Name: "PC", CPUBytes: 20 << 30, DiskFree: 300 << 30, StreamVariant: "windows-vulkan"}
+	if p := planStream(m, pc, false); !p.Fits || !p.Stream || !p.Solo || p.Head != "pc" || p.Overflow <= 0 {
+		t.Fatalf("expected a stream plan with overflow, got %+v", p)
+	}
+	small := pc
+	small.DiskFree = 10 << 30
+	if p := planStream(m, small, false); p.Fits || p.Reason == "" {
+		t.Fatal("too little disk space must be refused with a reason")
+	}
+	if p := planStream(m, small, true); !p.Fits {
+		t.Fatal("a file already on that computer needs no free space")
+	}
+	linux := pc
+	linux.StreamVariant, linux.StreamWhy = "", "not available on Linux yet"
+	if p := planStream(m, linux, false); p.Fits {
+		t.Fatal("a computer without a package must be refused")
+	}
+	m.Arch = "llama"
+	if p := planStream(m, pc, false); p.Fits {
+		t.Fatal("a model family InferSSD does not know must be refused")
+	}
+	if id, ok := streamChoice("stream:pc"); !ok || id != "pc" {
+		t.Fatal("stream choice not recognised")
+	}
+	if _, ok := streamChoice("pc"); ok {
+		t.Fatal("a plain solo choice is not a stream choice")
+	}
+	for name, want := range map[string]bool{
+		"DeepSeek-V4.1-Flash-1017-UD-IQ1_S-00001-of-00005.gguf": true, "Qwen3.5-122B-A10B-UD-IQ2_XXS.gguf": true,
+		"Qwen3.8-Flash-Next-IQ4_XS.gguf": true, "Llama-3.3-70B-Q4_K_M.gguf": false, "Qwen3-30B-A3B-Q4_K_M.gguf": false,
+	} {
+		if streamNamePattern.MatchString(name) != want {
+			t.Fatalf("%s: name match %v", name, !want)
+		}
+	}
+}
+
+func TestStreamArgs(t *testing.T) {
+	a := strings.Join(streamArgs("/m/x.gguf", 9000, 8192, 20480, true), " ")
+	for _, want := range []string{"serve -m /m/x.gguf", "--host 127.0.0.1", "--port 9000", "--context 8192", "host.budget_mib=20480", "vram.budget=0"} {
+		if !strings.Contains(a, want) {
+			t.Fatalf("%q missing from %q", want, a)
 		}
 	}
 }

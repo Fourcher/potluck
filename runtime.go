@@ -437,6 +437,7 @@ func (p *proc) Stop() {
 	cmd := p.cmd
 	p.mu.Unlock()
 	if cmd != nil && cmd.Process != nil {
+		killTree(cmd.Process.Pid)
 		_ = cmd.Process.Kill()
 	}
 	select {
@@ -457,6 +458,9 @@ func (a *Agent) engineCmd(bin string, args ...string) *exec.Cmd {
 	}
 	cmd.Dir = binDir // engine backends are looked up next to the program and in the current folder
 	cmd.Env = append(os.Environ(), "LLAMA_CACHE="+filepath.Join(a.dir, "cache"), "HF_HUB_CACHE="+filepath.Join(a.dir, "cache", "hub"))
+	if strings.HasPrefix(strings.ToLower(filepath.Base(bin)), "inferssd") {
+		cmd.Env = append(cmd.Env, a.streamEnv()...)
+	}
 	if runtime.GOOS == "linux" && !a.info.Musl {
 		cmd.Env = append(cmd.Env, "LD_LIBRARY_PATH="+binDir)
 	}

@@ -167,7 +167,7 @@ function viewComputers() {
 // ---------- main computer: models ----------
 
 function verdictBadge(f) {
-  const map = { one: ["ok", "Runs on one computer"], pool: ["main", "Runs pooled"], no: ["bad", "Too big for now"], split: ["warn", "Not supported yet"] };
+  const map = { one: ["ok", "Runs on one computer"], pool: ["main", "Runs pooled"], stream: ["warn", "Streams from disk"], no: ["bad", "Too big for now"], split: ["warn", "Not supported yet"] };
   const [cls, text] = map[f.verdict] || ["", ""];
   return `<span class="badge ${cls}" title="${esc(f.note)}">${text}</span>`;
 }
@@ -181,7 +181,7 @@ function modelCard(mod) {
   if (mod.files && !store.files[mod.repo]) store.files[mod.repo] = mod.files;
   const files = store.files[mod.repo];
   const open = !!store.open[mod.repo];
-  const runs = f => f.verdict === "one" || f.verdict === "pool";
+  const runs = f => f.verdict === "one" || f.verdict === "pool" || f.verdict === "stream";
   // The best pick is the biggest size that runs here, leaving out the uncompressed originals.
   const best = files ? files.filter(f => runs(f) && !/^(BF16|F16|F32)$/.test(f.quant)).slice(-1)[0] : null;
   const rows = files && open ? `<div class="files">${files.map(f => `<div class="file">
@@ -269,7 +269,7 @@ function planBar(plan) {
 function viewSheet() {
   if (!sheet) return "";
   if (sheet.loading) return `<div class="sheet"><div class="card"><p>Reading the model's blueprint and working out a layout…</p></div></div>`;
-  const p = sheet.plan, solo = sheet.solo, m = sheet.model, info = sheet.info;
+  const p = sheet.plan, solo = sheet.solo, stream = sheet.stream, m = sheet.model, info = sheet.info;
   const isLocal = m.source === "local";
   const go = isLocal ? "Run it" : "Download and run";
   const ctx = `<label class="small">Conversation memory <select id="ctx"><option value="4096">Normal (4,096 tokens)</option><option value="8192">Long (8,192)</option><option value="16384">Very long (16,384)</option></select></label>`;
@@ -292,8 +292,20 @@ function viewSheet() {
       <h2 style="font-size:16px">It can still run on ${esc(solo.shares[0].name)}, with help from its disk</h2>
       <p class="muted small">About ${gb(solo.overflow)} of it will not fit in memory and is read from disk as needed. Fine with an SSD, slow with a hard disk.</p>${planBar(solo)}
       <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start" data-solo="${esc(solo.head)}">${go} on ${esc(solo.shares[0].name)}</button></div>`;
+  } else if (stream && stream.fits) {
+    body = `<div class="note"><b>Too big for your computers' memory, pooled or alone.</b> ${esc(p.reason)}</div>`;
   } else {
-    body = `<div class="err"><b>This one does not fit yet.</b> ${esc(p.reason)} Add a computer, press a pedal further down, or pick a smaller size.</div>`;
+    body = `<div class="err"><b>This one does not fit yet.</b> ${esc(p.reason)} Add a computer, press a pedal further down, or pick a smaller size.${stream && stream.reason ? `<br><span class="small">Streaming from disk: ${esc(stream.reason)}</span>` : ""}</div>`;
+  }
+  // Third way, for the model families InferSSD knows: one computer streams the experts from
+  // its disk. It reaches far bigger models, at a few words a second on a fast drive.
+  if (stream && stream.fits) {
+    const n = esc(stream.shares[0].name), alone = !p.fits && !(solo && solo.fits);
+    body += `<h2 style="font-size:16px">${alone ? "It can run on " + n + " by streaming from its disk" : "Or: stream it from " + n + "'s disk"}</h2>
+      <p class="muted small">Uses the InferSSD engine: the part of the model used for every word stays in memory, and the experts each word needs are read from ${n}'s drive as they are needed${stream.overflow > 0 ? `, about ${gb(stream.overflow)} more than its free memory` : ""}.
+      Expect a few words a second with a fast (NVMe) SSD and less with an older one; a hard disk is far too slow. The first start measures the drive for a few minutes. Runs on that one computer: the others are not used.</p>
+      ${alone ? `<div class="row" style="margin-top:12px">${ctx}<button class="btn" data-a="start" data-solo="stream:${esc(stream.head)}">${go} with streaming</button></div>`
+        : `<button class="btn ghost" data-a="start" data-solo="stream:${esc(stream.head)}">Stream from ${n}'s disk instead</button>`}`;
   }
   return `<div class="sheet" data-a="closesheet"><div class="card" data-stop>
     <div class="row spread"><h1 style="font-size:21px">${esc(m.title || m.file)}</h1><button class="link" data-a="closesheet">Close</button></div>
@@ -336,7 +348,7 @@ function viewRun() {
   }
   const p = c.plan || {};
   return `<div class="row spread"><div><h1>${title} is running</h1>
-      <p class="muted">${p.solo ? `Running on ${esc(p.shares[0].name)} alone${p.overflow > 0 ? `, reading about ${gb(p.overflow)} of it from disk as needed` : ""}.` : p.needsPool ? `Too big for the memory of any one of your computers. Pooled across ${p.machines}.` : `Running on ${p.machines || 1} ${p.machines > 1 ? "computers" : "computer"}.`}</p></div>
+      <p class="muted">${p.stream ? `Running on ${esc(p.shares[0].name)}, streaming from its disk with InferSSD.` : p.solo ? `Running on ${esc(p.shares[0].name)} alone${p.overflow > 0 ? `, reading about ${gb(p.overflow)} of it from disk as needed` : ""}.` : p.needsPool ? `Too big for the memory of any one of your computers. Pooled across ${p.machines}.` : `Running on ${p.machines || 1} ${p.machines > 1 ? "computers" : "computer"}.`}</p></div>
       <div class="row"><a class="btn" href="${esc(m.chatURL)}" target="_blank" rel="noopener">Open chat</a><button class="btn ghost" data-a="stop">Stop</button></div></div>
     ${m.stale ? `<div class="banner"><div class="row spread"><div>A pedal changed on a computer that is part of this model. It takes effect when the model is laid out again.</div><button class="btn" data-a="again">Apply now</button></div></div>` : ""}
     ${planBar(p)}
@@ -438,7 +450,7 @@ const actions = {
   },
   again() {
     const c = S.main.cluster, m = c.model || S.main.lastModel;
-    if (m) { logText = ""; act(() => api("/api/start", { ...m, ctx: 4096, solo: c.plan && c.plan.solo ? c.plan.head : "" })); }
+    if (m) { logText = ""; act(() => api("/api/start", { ...m, ctx: 4096, solo: c.plan && c.plan.stream ? "stream:" + c.plan.head : c.plan && c.plan.solo ? c.plan.head : "" })); }
   },
   stop() { logText = ""; act(() => api("/api/stop", {})); },
   test() { act(() => api("/api/test", {})); },
