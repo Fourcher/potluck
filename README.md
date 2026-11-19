@@ -4,7 +4,7 @@ Run one large AI model across the spare computers you already own.
 
 A laptop with 16 GB, an old gaming PC, a Linux box in the closet: none of them can hold a big model alone, but together they can. Potluck pools their memory, splits the model between them, and gives you one chat page and one OpenAI-compatible API on your main computer.
 
-Version 1.4. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second.
+Version 1.5. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second.
 
 ## How you use it
 
@@ -54,6 +54,25 @@ One self-contained program per platform (about 9 MB, no installer). Written in G
 - **Graphics cards:** NVIDIA on Windows (CUDA), AMD and Intel cards with their own memory on Windows and Linux, and NVIDIA on Linux (Vulkan), Apple Silicon (Metal). Each engine reports the device it can really use; if it finds none, the model is planned again without it. After loading, Potluck checks the engine's own report against the plan.
 
 Ports on the main computer: 7716 control panel (this computer only), 7717 helpers (encrypted) and discovery, 7715 join page (local network), 7720 chat page and API (this computer only, unless you switch on sharing). Direct links use a UDP port the system picks.
+
+## Measuring your computers, and expected speeds
+
+Each computer card has a **Measure this computer** button. It takes about ten seconds, downloads nothing, and measures how fast the computer reads its memory (which sets how fast a model writes) and, when a model file bigger than its free memory is already there, how fast its drive reads. The result is saved as that computer's profile, and marked out of date when its processor, memory or graphics card changes. It is never run on a computer while it lends to a running model. From the command line, `potluck bench` prints the same measurement.
+
+With profiles, the model store shows for each file how fast it is expected to write, for each way it can run: on one computer, pooled, or streamed from disk. Every "Measure speed" result is saved too, and once a model has run here the store shows that measured speed instead of the estimate.
+
+The estimate is checked against every speed measured on the test computers (`bench_test.go`):
+
+| Model and computers | Estimate | Measured |
+|---|---|---|
+| Qwen3-30B-A3B Q4_K_M, Ryzen 5 2400G reading 32 GB/s | 5.4–11.8 | 8.0–9.8 |
+| Qwen3-4B Q4_K_M, i7-1260P reading 42 GB/s | 6.0–13.1 | 12.6 |
+| Qwen3-4B Q2_K, same | 9.0–19.5 | 17.4 |
+| Qwen3-4B IQ2_XXS, same | 11.6–25.0 | 13.8–15.9 |
+| Qwen3.5-122B IQ2_XXS, pooled over three computers | 1.7–3.9 | 2.3 to 4.1 |
+| Qwen3.5-122B IQ2_XXS, streamed from a SATA SSD (443 MB/s) | 0.6–1.4 | 1.0 |
+
+Words per second, writing. The ranges are wide on purpose: they rest on two measurements per computer, not on running the model. Graphics cards are not measured yet; on computers where a card does much of the work, the estimate is conservative.
 
 ## Streaming from disk (InferSSD, experimental)
 

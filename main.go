@@ -65,9 +65,12 @@ func main() {
 	case "version":
 		fmt.Println("potluck", version)
 		return
+	case "bench":
+		benchCommand(*dataDir)
+		return
 	case "", "main", "join", "helper":
 	default:
-		fmt.Println("Usage: potluck [main | join] [--data DIR] [--name NAME] [--no-browser] [--token CODE] [--main ADDRESS]")
+		fmt.Println("Usage: potluck [main | join | bench] [--data DIR] [--name NAME] [--no-browser] [--token CODE] [--main ADDRESS]")
 		os.Exit(2)
 	}
 	if role == "join" {

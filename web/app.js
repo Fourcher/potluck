@@ -113,6 +113,18 @@ function viewHelper() {
 
 // ---------- main computer: computers ----------
 
+// profileLine shows a computer's measured speed, and the button to measure it.
+function profileLine(n) {
+  if (!n.online) return "";
+  const p = (S.main.profiles || {})[n.info.id], busy = n.role && S.main.cluster.phase !== "idle";
+  const stale = p && p.signature && p.signature !== [n.info.cpu, n.info.threads, Math.floor((n.info.ramTotal || 0) / 1073741824), (n.info.gpus || []).filter(g => g.usable).map(g => g.name)[0] || ""].join("|");
+  const what = p ? `Reads memory at <b>${p.memGBs} GB/s</b>${p.diskMBs ? `, its drive at <b>${Math.round(p.diskMBs)} MB/s</b>` : ""}. <span class="muted">Measured ${new Date(p.when).toLocaleDateString()}${stale ? ", before its hardware changed" : ""}.</span>`
+    : `<span class="muted">Not measured yet. Measuring takes about ten seconds and lets Potluck estimate how fast each model will run here.</span>`;
+  const btn = busy ? "" : ` <button class="link" data-a="bench" data-id="${esc(n.info.id)}">${p ? "Measure again" : "Measure this computer"}</button>`;
+  return `<div class="small" style="margin-top:6px">${benching[n.info.id] ? "Measuring…" : what + btn}</div>`;
+}
+const benching = {};
+
 function nodeCard(n) {
   const i = n.info, L = i.limits || {};
   const badge = n.role === "head" ? `<span class="badge ok">Runs the model</span>` : n.role === "worker" ? `<span class="badge ok">Holds part of the model</span>` : "";
@@ -122,7 +134,7 @@ function nodeCard(n) {
     <div class="row spread"><div class="row"><span class="dot ${n.online ? "on" : ""}" title="${n.online ? "Connected" : "Not connected"}"></span><h3>${esc(i.name)}</h3></div>
       <div class="row">${n.isMain ? `<span class="badge main">Main computer</span>` : ""}${badge}</div></div>
     ${specs(i)}
-    <div class="lend">${lend}</div>${slow}
+    <div class="lend">${lend}</div>${slow}${profileLine(n)}
     ${limitsUI(i.id, L, n.isMain)}
     ${progress(n.status, n.done, n.total)}
     <div class="row small" style="margin-top:6px"><button class="link" data-a="rename" data-id="${esc(i.id)}" data-name="${esc(i.name)}">Rename</button>
@@ -166,6 +178,15 @@ function viewComputers() {
 
 // ---------- main computer: models ----------
 
+// speedLine: how fast this file is expected to write here, or how fast it did.
+function speedLine(f) {
+  if (f.measured) return `<br><span class="small"><b>${f.measured.gen} words/s</b> measured on ${esc(f.measured.layout)}</span>`;
+  const est = (f.estimates || []).filter(e => e.high > 0), none = (f.estimates || []).find(e => !e.high);
+  if (!est.length) return none ? `<br><span class="small muted">${esc(none.basis)}</span>` : "";
+  const label = { one: "on one computer", pool: "pooled", stream: "streamed from disk" };
+  return `<br><span class="small">Estimate: ${est.map(e => `<b>${e.low}–${e.high} words/s</b> ${label[e.route]}${e.machine ? " (" + esc(e.machine) + ")" : ""}`).join(", ")}</span>`;
+}
+
 function verdictBadge(f) {
   const map = { one: ["ok", "Runs on one computer"], pool: ["main", "Runs pooled"], stream: ["warn", "Streams from disk"], no: ["bad", "Too big for now"], split: ["warn", "Not supported yet"] };
   const [cls, text] = map[f.verdict] || ["", ""];
@@ -185,7 +206,7 @@ function modelCard(mod) {
   // The best pick is the biggest size that runs here, leaving out the uncompressed originals.
   const best = files ? files.filter(f => runs(f) && !/^(BF16|F16|F32)$/.test(f.quant)).slice(-1)[0] : null;
   const rows = files && open ? `<div class="files">${files.map(f => `<div class="file">
-      <span class="q">${esc(f.quant)}${best && f.file === best.file ? ` <span class="badge main">Best fit</span>` : ""}</span><span>${gb(f.size)}</span><span class="n">${verdictBadge(f)} <span class="muted small">${esc(f.note)}</span></span>
+      <span class="q">${esc(f.quant)}${best && f.file === best.file ? ` <span class="badge main">Best fit</span>` : ""}</span><span>${gb(f.size)}</span><span class="n">${verdictBadge(f)} <span class="muted small">${esc(f.note)}</span>${speedLine(f)}</span>
       <button class="btn sm ${runs(f) ? "" : "quiet"}" data-a="plan" data-repo="${esc(mod.repo)}" data-file="${esc(f.file)}" ${f.verdict === "split" ? "disabled" : ""}>${f.verdict === "no" ? "Why not?" : "Set up"}</button>
     </div>`).join("")}</div>` : "";
   const fit = files ? (() => { const n = files.filter(runs).length; return n ? `<span class="badge ${best && best.verdict === "pool" ? "main" : "ok"}">${best && best.verdict === "pool" ? "Runs pooled across your computers" : "Runs here"}</span>` : `<span class="badge bad">Too big for your setup</span>`; })() : "";
@@ -418,6 +439,10 @@ const actions = {
     const n = S.main ? S.main.nodes.find(x => x.info.id === t.dataset.id) : null;
     const limits = n ? n.info.limits : S.helper.info.limits;
     act(() => api("/api/node", { id: t.dataset.id, name: name.trim(), limits }));
+  },
+  bench(t) {
+    const id = t.dataset.id; benching[id] = true; draw(true);
+    api("/api/bench", { id }).then(() => toast("Measured.")).catch(e => toast(e.message)).finally(() => { delete benching[id]; refresh && refresh(); });
   },
   forget(t) { if (confirm(`Remove ${t.dataset.name} from your setup? It can join again later.`)) act(() => api("/api/forget", { id: t.dataset.id })); },
   leave() { if (confirm("Stop lending this computer? It will look for a main computer again.")) act(() => api("/api/forget", {})); },

@@ -10,7 +10,7 @@
 # through the macOS firewall, but still triggers the "unidentified developer" warning.
 set -e
 cd "$(dirname "$0")"
-VERSION="${1:-1.4.0}"
+VERSION="${1:-1.5.0}"
 mkdir -p dist
 for t in windows/amd64 windows/arm64 darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
   os=${t%/*}; arch=${t#*/}; out="dist/potluck-$os-$arch"; [ "$os" = windows ] && out="$out.exe"

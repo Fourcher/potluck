@@ -1332,6 +1332,48 @@ func (h *Host) stopAll() {
 }
 
 // Test sends one short question to the running model and records the speed.
+// layoutName describes how a model ran, for the list of measured speeds.
+func layoutName(p *Plan) string {
+	var names []string
+	for _, s := range p.Shares {
+		if s.CPULayers+s.GPULayers > 0 || s.Role == "head" {
+			names = append(names, s.Name)
+		}
+	}
+	switch {
+	case p.Stream:
+		return names[0] + ", streaming from disk"
+	case len(names) == 1:
+		return names[0] + " alone"
+	}
+	return "pooled: " + strings.Join(names, ", ")
+}
+
+// Benchmark measures one computer and saves its profile.
+func (h *Host) Benchmark(id string) (*Profile, error) {
+	h.mu.Lock()
+	n := h.nodes[id]
+	busy := n != nil && n.Role != "" && h.cluster.Phase != "idle"
+	h.mu.Unlock()
+	if n == nil {
+		return nil, errors.New("unknown computer")
+	}
+	if busy {
+		return nil, errors.New(n.Info.Name + " is lending to the running model; stop it first, so the measurement is fair")
+	}
+	var p Profile
+	if err := h.call(id, "bench", nil, &p, 2*time.Minute); err != nil {
+		return nil, err
+	}
+	h.cfg.Update(func(c *Config) {
+		if c.Profiles == nil {
+			c.Profiles = map[string]*Profile{}
+		}
+		c.Profiles[id] = &p
+	})
+	return &p, nil
+}
+
 func (h *Host) Test() error {
 	h.mu.Lock()
 	if h.cluster.Phase != "running" {
@@ -1368,6 +1410,15 @@ func (h *Host) Test() error {
 		h.cluster.Testing = false
 		if err == nil {
 			h.cluster.TPS, h.cluster.PTPS = out.Timings.Predicted, out.Timings.Prompt
+			if m := h.cluster.Model; m != nil && h.cluster.Plan != nil && out.Timings.Predicted > 0 {
+				rec := Measured{File: m.File, Layout: layoutName(h.cluster.Plan), Gen: round1(out.Timings.Predicted), Prompt: round1(out.Timings.Prompt), When: time.Now()}
+				go h.cfg.Update(func(c *Config) {
+					c.Measured = append([]Measured{rec}, c.Measured...)
+					if len(c.Measured) > 50 {
+						c.Measured = c.Measured[:50]
+					}
+				})
+			}
 			if len(out.Choices) > 0 {
 				h.cluster.Reply = strings.TrimSpace(out.Choices[0].Message.Content)
 				if h.cluster.Reply == "" {

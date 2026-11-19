@@ -44,8 +44,12 @@ type StoreFile struct {
 	Size    int64  `json:"size"`
 	SHA256  string `json:"sha256"`
 	Parts   int    `json:"parts"`   // >1: the model comes as several files
-	Verdict string `json:"verdict"` // one | pool | no
-	Note    string `json:"note"`
+	Verdict string `json:"verdict"` // one | pool | stream | no
+	// Estimates: expected speed for each way it can run, from the computers' benchmarks.
+	// Measured: the speed seen when it actually ran here, when it has.
+	Estimates []Estimate `json:"estimates,omitempty"`
+	Measured  *Measured  `json:"measured,omitempty"`
+	Note      string     `json:"note"`
 }
 
 // StoreModel is one entry in the model store.
@@ -163,6 +167,8 @@ func hfFiles(repo string) ([]StoreFile, error) {
 // judge marks every file with what this set of computers can do with it.
 func (h *Host) judge(files []StoreFile) {
 	nodes := h.planNodes()
+	cfg := h.cfg.Get()
+	profiles, measured := cfg.Profiles, cfg.Measured
 	var sum, biggest int64
 	for _, n := range nodes {
 		c := n.CPUBytes + n.GPUBytes
@@ -194,6 +200,15 @@ func (h *Host) judge(files []StoreFile) {
 			f.Verdict, f.Note = "stream", fmt.Sprintf("Too big for your computers' memory, but %s may run it by streaming from its disk. Checked when you set it up.", streamName)
 		default:
 			f.Verdict, f.Note = "no", fmt.Sprintf("Needs about %s more memory than your computers offer.", humanBytes(need-sum))
+		}
+		if f.Verdict != "no" {
+			f.Estimates = estimateFile(*f, nodes, profiles)
+			for i := range measured {
+				if measured[i].File == f.File {
+					f.Measured = &measured[i]
+					break
+				}
+			}
 		}
 	}
 }

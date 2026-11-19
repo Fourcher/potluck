@@ -37,6 +37,10 @@ type Config struct {
 	// Known remembers where each model that Potluck downloaded came from, by file name, so
 	// it can be started again the same way from the chat page.
 	Known map[string]ModelRef `json:"known,omitempty"`
+	// Profiles: each computer's last benchmark, by computer. Measured: speeds seen on real
+	// runs, newest first.
+	Profiles map[string]*Profile `json:"profiles,omitempty"`
+	Measured []Measured          `json:"measured,omitempty"`
 }
 
 // ConfigStore saves Config to disk on every change.
@@ -271,6 +275,17 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 
 	case "ping":
 		return nil, nil
+
+	case "bench":
+		// Measure this computer and keep the result beside its other data.
+		if a.head.Running() || a.rpc.Running() {
+			return nil, errors.New("this computer is lending to a running model; measure it when the model is stopped")
+		}
+		p := runBenchmark(a.Info(), a.dir)
+		if b, err := json.MarshalIndent(p, "", "  "); err == nil {
+			_ = os.WriteFile(filepath.Join(a.dir, "profile.json"), b, 0o644)
+		}
+		return p, nil
 
 	case "expect":
 		// The main computer introduces a computer that will link to this one directly.

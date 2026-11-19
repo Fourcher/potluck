@@ -312,6 +312,20 @@ func (app *App) serveUI() error {
 		return nil, nil
 	})
 
+	api("/api/bench", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		var in struct {
+			ID string `json:"id"`
+		}
+		if err := body(r, &in); err != nil {
+			return nil, err
+		}
+		return h.Benchmark(in.ID)
+	})
+
 	api("/api/test", func(r *http.Request) (any, error) {
 		h, err := needMain()
 		if err != nil {
@@ -476,7 +490,7 @@ func (app *App) state() map[string]any {
 		out["main"] = map[string]any{
 			"nodes": nodes, "pending": pend, "cluster": cl, "joinURL": join, "addrs": ips,
 			"headChoice": c.HeadChoice, "chatURL": "http://127.0.0.1:" + strconv.Itoa(portChat),
-			"totalOffer": total, "biggestOffer": biggest, "lastModel": c.LastModel, "firewall": app.firewall(),
+			"totalOffer": total, "biggestOffer": biggest, "lastModel": c.LastModel, "firewall": app.firewall(), "profiles": c.Profiles, "measured": c.Measured,
 			"shareChat": c.ShareChat, "sharedURL": shared, "dataDir": app.dir, "pauseWhy": pauseWhy, "stale": stale,
 		}
 	}
