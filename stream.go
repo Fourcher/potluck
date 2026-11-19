@@ -275,6 +275,13 @@ func (a *Agent) streamEnv() []string {
 	if runtime.GOOS == "windows" {
 		env = append(env, "USERPROFILE="+home, "LOCALAPPDATA="+filepath.Join(home, "AppData", "Local"), "APPDATA="+filepath.Join(home, "AppData", "Roaming"))
 	}
+	a.mu.Lock()
+	noGPU := a.streamNoGPU
+	a.mu.Unlock()
+	if noGPU {
+		// Hide every graphics card from the engine: Vulkan and CUDA builds alike.
+		env = append(env, "GGML_VK_VISIBLE_DEVICES=", "CUDA_VISIBLE_DEVICES=-1")
+	}
 	return env
 }
 

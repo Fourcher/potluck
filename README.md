@@ -62,6 +62,8 @@ For the biggest mixture-of-experts models, Potluck can also run a model on one c
 - **When it is offered:** the plan sheet shows "stream from <computer>'s disk" when the model is one InferSSD knows (DeepSeek-V4.1, Muse Spark, Qwen3.5 to 3.8 mixture-of-experts) and a computer can run InferSSD and has room for the file. The model store marks such models "Streams from disk". It is never chosen for you: pooling or plain llama.cpp stay the default.
 - **Where it runs:** Windows x64 (a CUDA package for NVIDIA cards from the Turing generation on, otherwise a Vulkan package that also runs on the processor) and Apple Silicon Macs on macOS 15 or later. Not on Linux (InferSSD needs a source build there) or Intel Macs.
 - **What Potluck does:** downloads the pinned InferSSD release (0.1.5), checks it against the published SHA-256, keeps it and all its state inside Potluck's data folder, sets its memory budget from the computer's pedal, and serves its chat and API at the usual address.
+- **Measured here (18 November 2026):** the 36.6 GB, 122-billion-parameter model on the 30 GB Windows PC (4-core Ryzen 5 2400G, SATA SSD read at 0.55 GB/s). Its 4 GB GTX 1050 Ti is too small for the part of the model every word uses, so Potluck ran InferSSD on the processor alone: about 1 word a second writing and reading (0.95 to 0.98, and 1.0 to 1.06), with the processor at 90% and the drive only partly busy. Plain llama.cpp on the same PC, with the card holding that part, does 2 to 3. So for a model a little bigger than memory, the existing options win; streaming is for models far bigger than memory, on machines with a fast drive and a modern card, which is what InferSSD's own figures come from. Not measured here: the CUDA package, Apple Silicon, NVMe drives.
+- **Small graphics cards:** when a computer's card cannot hold the part of the model every word uses, Potluck runs InferSSD without the card instead of letting it fail to load.
 - **Limits:** one computer at a time; InferSSD has no network pooling, so the other computers are not used in this mode. Speed depends on the drive: NVMe is what it was measured on; an older SATA SSD will be slower and a hard disk far too slow.
 
 ## Pooling or disk?
@@ -97,7 +99,7 @@ Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs 
 
 ## Tested so far
 
-- InferSSD streaming: the package choice, plan, launch options and install were tested; the Windows Vulkan package was downloaded, checked and unpacked on a Windows 10 PC, and its version and options read. Running a model through it end to end has not been measured yet.
+- InferSSD streaming end to end on a Windows 10 PC through Potluck: package choice, download and checksum, install, launch with all its state kept in Potluck's data folder, loading without a too-small graphics card, chat through the usual address, and a clean stop.
 
 - Main computer: macOS (Apple Silicon), Windows 10, Alpine Linux. Helpers: Windows 10 (NVIDIA card), macOS 15 (Intel), Alpine Linux (musl).
 - All three ways of adding a computer, and all three USB-kit launchers.

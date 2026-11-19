@@ -69,6 +69,15 @@ func (m *ModelInfo) trunkBytes(l int) int64 {
 	return m.LayerBytes[l]
 }
 
+// denseBytes is the part of the model every word uses: everything but the expert weights.
+func (m *ModelInfo) denseBytes() int64 {
+	d := m.TotalBytes()
+	for _, e := range m.ExpertBytes {
+		d -= e
+	}
+	return d
+}
+
 func (m *ModelInfo) expertBytes(l int) int64 {
 	if l < len(m.ExpertBytes) {
 		return m.ExpertBytes[l]

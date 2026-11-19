@@ -99,9 +99,11 @@ type Agent struct {
 	done      int64
 	total     int64
 
-	direct    *Direct           // this computer's end of direct links to other computers
-	streamDir string            // the installed InferSSD package, when there is one
-	links     map[string]string // how each helper of the model running here is reached: direct | relay
+	direct    *Direct // this computer's end of direct links to other computers
+	streamDir string  // the installed InferSSD package, when there is one
+	// streamNoGPU: InferSSD runs without the graphics card (too small for the model).
+	streamNoGPU bool
+	links       map[string]string // how each helper of the model running here is reached: direct | relay
 
 	// set by whoever owns the agent
 	dialTunnel func(to, target string) (net.Conn, error)
@@ -240,6 +242,9 @@ type (
 		// Stream: run the model with InferSSD, streaming experts from this computer's disk,
 		// instead of llama.cpp.
 		Stream bool `json:"stream,omitempty"`
+		// DenseBytes is the size of the part of the model every word uses. InferSSD puts it on
+		// the graphics card; when the card is too small for it, the card is left out.
+		DenseBytes int64 `json:"denseBytes,omitempty"`
 		// AllThreads: use every hardware thread instead of one per core. The main computer
 		// asks for it only in the layout where that measured faster.
 		AllThreads bool `json:"allThreads,omitempty"`
@@ -661,8 +666,15 @@ func (a *Agent) startStream(in StartHeadReq) (any, error) {
 	if budget < 1024 {
 		budget = 1024
 	}
+	// InferSSD keeps the part of the model used for every word on the graphics card and
+	// refuses to load when it does not fit (seen with a 4 GB card and a 4 GB part). Then run
+	// without the card: processor and memory only.
+	noGPU := gpu == 0 || (in.DenseBytes > 0 && gpu < in.DenseBytes+(512<<20))
+	a.mu.Lock()
+	a.streamNoGPU = noGPU
+	a.mu.Unlock()
 	a.pruneStreamRuns()
-	p, err := a.startProc("head", dir, bin, streamArgs(model, api, in.Ctx, budget, gpu == 0), false, info.Limits.Pedal < 100)
+	p, err := a.startProc("head", dir, bin, streamArgs(model, api, in.Ctx, budget, noGPU), false, info.Limits.Pedal < 100)
 	if err != nil {
 		return nil, err
 	}

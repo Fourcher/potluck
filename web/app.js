@@ -303,7 +303,7 @@ function viewSheet() {
     const n = esc(stream.shares[0].name), alone = !p.fits && !(solo && solo.fits);
     body += `<h2 style="font-size:16px">${alone ? "It can run on " + n + " by streaming from its disk" : "Or: stream it from " + n + "'s disk"}</h2>
       <p class="muted small">Uses the InferSSD engine: the part of the model used for every word stays in memory, and the experts each word needs are read from ${n}'s drive as they are needed${stream.overflow > 0 ? `, about ${gb(stream.overflow)} more than its free memory` : ""}.
-      Expect a few words a second with a fast (NVMe) SSD and less with an older one; a hard disk is far too slow. The first start measures the drive for a few minutes. Runs on that one computer: the others are not used.</p>
+      Expect a few words a second with a fast (NVMe) SSD and less with an older one; a hard disk is far too slow. The first start measures the drive for a few minutes. Runs on that one computer: the others are not used.${alone ? "" : " For a model that fits the options above, they are usually faster: streaming pays off when a model is far bigger than memory, on a computer with a fast drive and a modern graphics card (measured on a 4-core PC with an old 4 GB card: about 1 word a second, against 2 to 3 with the option above)."}</p>
       ${alone ? `<div class="row" style="margin-top:12px">${ctx}<button class="btn" data-a="start" data-solo="stream:${esc(stream.head)}">${go} with streaming</button></div>`
         : `<button class="btn ghost" data-a="start" data-solo="stream:${esc(stream.head)}">Stream from ${n}'s disk instead</button>`}`;
   }

@@ -1180,7 +1180,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			helperLayers += plan.DevLayers[i]
 		}
 	}
-	req := StartHeadReq{File: model.File, Workers: plan.WorkerOrder, NGL: plan.NGL, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream,
+	req := StartHeadReq{File: model.File, Workers: plan.WorkerOrder, NGL: plan.NGL, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream, DenseBytes: info.denseBytes(),
 		ExpertCPU: plan.ExpertCPU,
 		// Every hardware thread only where it measured faster: pooled, with the card holding
 		// the trunk of all the head's layers (3.8 against 3.3 words/s). With whole layers on
