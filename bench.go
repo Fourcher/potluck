@@ -29,6 +29,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 // Profile is what Potluck knows about one computer's speed.
@@ -119,10 +120,25 @@ func memReadSpeed(threads int, ramTotal uint64, d time.Duration) float64 {
 	return math.Round(gbs*10) / 10
 }
 
-// diskReadSpeed reads random 4 MiB blocks from the biggest model file in dir. Only a file
-// bigger than the free memory gives an honest number (the rest would come from the
-// operating system's cache), so smaller files are not measured.
+// alignedBuf returns a buffer whose start is aligned to 4 KiB, as uncached reads require.
+func alignedBuf(n int) []byte {
+	const align = 4096
+	raw := make([]byte, n+align)
+	off := int(uintptr(unsafe.Pointer(&raw[0])) & (align - 1))
+	if off != 0 {
+		off = align - off
+	}
+	return raw[off : off+n]
+}
+
+const benchBlock = 4 << 20
+
+// diskReadSpeed measures how fast the drive holding dir reads random 4 MiB blocks, the way a
+// model is read from disk. It reads past the operating system's cache, so it measures the
+// drive and not the memory: from the biggest model file there, or, when there is none of at
+// least 1 GiB, from a 1 GiB file it writes for the purpose and deletes again.
 func diskReadSpeed(dir string, ramAvail uint64, d time.Duration) (float64, string) {
+	_ = os.MkdirAll(dir, 0o755)
 	var best string
 	var bestSize int64
 	_ = filepath.WalkDir(dir, func(p string, e os.DirEntry, err error) error {
@@ -133,35 +149,90 @@ func diskReadSpeed(dir string, ramAvail uint64, d time.Duration) (float64, strin
 		}
 		return nil
 	})
-	if best == "" {
-		return 0, "No model file on this computer yet, so its drive was not measured."
+	if bestSize < 1<<30 {
+		if diskFree(dir) < 3<<30 {
+			return 0, "Less than 3 GB free on the drive, so it was not measured."
+		}
+		tmp := filepath.Join(dir, ".potluck-drive-test")
+		defer os.Remove(tmp)
+		if err := writeTestFile(tmp, 1<<30); err != nil {
+			return 0, "Could not write a test file to measure the drive."
+		}
+		best, bestSize = tmp, 1<<30
 	}
-	if uint64(bestSize) < ramAvail {
-		return 0, "The model files here fit in memory, so a drive measurement would only measure the memory."
+	if mbs, err := readRandomBlocks(best, bestSize, d, true); err == nil {
+		return mbs, ""
 	}
-	f, err := os.Open(best)
+	// Uncached reads are not possible here: only a file bigger than the free memory then
+	// gives an honest number.
+	if best != "" && uint64(bestSize) > ramAvail && !strings.HasSuffix(best, ".potluck-drive-test") {
+		if mbs, err := readRandomBlocks(best, bestSize, d, false); err == nil {
+			return mbs, ""
+		}
+	}
+	return 0, "This drive could not be measured without the computer's cache getting in the way."
+}
+
+// writeTestFile writes size bytes of varied data and makes sure they reach the drive.
+func writeTestFile(path string, size int64) error {
+	f, err := openUncached(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
-		return 0, "Could not open a model file to measure the drive."
+		if f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644); err != nil {
+			return err
+		}
+	}
+	buf := alignedBuf(benchBlock)
+	r := mrand.New(mrand.NewSource(1))
+	for i := range buf {
+		buf[i] = byte(r.Intn(256))
+	}
+	for written := int64(0); written < size; written += benchBlock {
+		buf[0], buf[1] = byte(written>>22), byte(written>>30)
+		if _, err := f.Write(buf); err != nil {
+			f.Close()
+			return err
+		}
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// readRandomBlocks reads random aligned 4 MiB blocks for d and returns MB/s.
+func readRandomBlocks(path string, size int64, d time.Duration, uncached bool) (float64, error) {
+	var f *os.File
+	var err error
+	if uncached {
+		f, err = openUncached(path, os.O_RDONLY)
+	} else {
+		f, err = os.Open(path)
+	}
+	if err != nil {
+		return 0, err
 	}
 	defer f.Close()
-	const block = 4 << 20
-	buf := make([]byte, block)
-	blocks := bestSize / block
+	buf := alignedBuf(benchBlock)
+	blocks := size / benchBlock
+	if blocks < 1 {
+		return 0, errors.New("file too small")
+	}
 	r := mrand.New(mrand.NewSource(time.Now().UnixNano()))
 	var read int64
 	deadline := time.Now().Add(d)
 	t0 := time.Now()
 	for time.Now().Before(deadline) {
-		n, err := f.ReadAt(buf, r.Int63n(blocks)*block)
+		n, err := f.ReadAt(buf, r.Int63n(blocks)*benchBlock)
 		read += int64(n)
 		if err != nil && !errors.Is(err, io.EOF) {
-			break
+			return 0, err
 		}
 	}
 	if read == 0 {
-		return 0, "Could not read the model file to measure the drive."
+		return 0, errors.New("nothing read")
 	}
-	return math.Round(float64(read) / time.Since(t0).Seconds() / 1e6), ""
+	return math.Round(float64(read) / time.Since(t0).Seconds() / 1e6), nil
 }
 
 // ---------- estimates ----------
@@ -207,6 +278,18 @@ func bytesPerWord(file string, size int64) int64 {
 
 func isIQuant(file string) bool { return regexp.MustCompile(`(?i)[-.]IQ[123]`).MatchString(file) }
 
+// cardSaving is the share of each word's time a computer's own graphics card saves by
+// holding the part of a mixture-of-experts model that every word uses (Potluck's layout for
+// such models). Measured on a GTX 1050 Ti with Qwen3-30B-A3B: 9.7 words/s without the card,
+// 12.7 with it, so about 24% less time per word. Ordinary (dense) models are not covered yet:
+// no measurement backs a factor for them.
+func cardSaving(n PlanNode, file string) float64 {
+	if n.Unified || n.GPUBytes < 1<<30 || !activeRatio.MatchString(file) {
+		return 0
+	}
+	return 0.24 * math.Min(1, float64(n.GPUBytes)/float64(2<<30))
+}
+
 // genSpeed is the estimated writing speed for reading bpw bytes per word at memGBs.
 func genSpeed(bpw int64, memGBs float64, threads int, iquant bool) float64 {
 	if bpw <= 0 || memGBs <= 0 {
@@ -242,7 +325,7 @@ func estimateFile(f StoreFile, nodes []PlanNode, profiles map[string]*Profile) [
 		if f.Size+f.Size/25+perDeviceOverhead > hold {
 			continue
 		}
-		v := genSpeed(bpw, p.MemGBs, p.Threads, iq)
+		v := genSpeed(bpw, p.MemGBs, p.Threads, iq) / (1 - cardSaving(n, f.File))
 		if best == nil || v > best.High/1.3 {
 			lo, hi := rng(v)
 			best = &Estimate{Route: "one", Low: lo, High: hi, Machine: n.Name, Basis: fmt.Sprintf("%s reads memory at %.0f GB/s", n.Name, p.MemGBs)}
@@ -257,6 +340,7 @@ func estimateFile(f StoreFile, nodes []PlanNode, profiles map[string]*Profile) [
 			bytes int64
 			p     *Profile
 			link  float64
+			save  float64
 		}
 		var ms []m
 		var held int64
@@ -281,7 +365,7 @@ func estimateFile(f StoreFile, nodes []PlanNode, profiles map[string]*Profile) [
 			if take <= 0 {
 				continue
 			}
-			ms = append(ms, m{take, p, n.LinkMs})
+			ms = append(ms, m{take, p, n.LinkMs, cardSaving(n, f.File)})
 			held += take
 		}
 		if ok && held >= f.Size && len(ms) > 0 {
@@ -289,7 +373,7 @@ func estimateFile(f StoreFile, nodes []PlanNode, profiles map[string]*Profile) [
 			for i, x := range ms {
 				share := int64(float64(bpw) * float64(x.bytes) / float64(f.Size))
 				if v := genSpeed(share, x.p.MemGBs, x.p.Threads, iq); v > 0 {
-					sec += 1 / v
+					sec += (1 - x.save) / v
 				}
 				if i > 0 {
 					link := x.link
@@ -300,9 +384,8 @@ func estimateFile(f StoreFile, nodes []PlanNode, profiles map[string]*Profile) [
 				}
 			}
 			if sec > 0 {
-				// Wider than one computer's range: the network, and a graphics card holding
-				// the part every word uses (not modelled here), move it more.
-				lo, hi := round1(0.6/sec), round1(1.5/sec)
+				// Wider than one computer's range: the network moves it more.
+				lo, hi := round1(0.6/sec), round1(1.3/sec)
 				out = append(out, Estimate{Route: "pool", Low: lo, High: hi, Basis: fmt.Sprintf("%d computers, each reading its share, plus the network between them", len(ms))})
 			}
 		}

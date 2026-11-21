@@ -4,7 +4,7 @@ Run one large AI model across the spare computers you already own.
 
 A laptop with 16 GB, an old gaming PC, a Linux box in the closet: none of them can hold a big model alone, but together they can. Potluck pools their memory, splits the model between them, and gives you one chat page and one OpenAI-compatible API on your main computer.
 
-Version 1.5. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second.
+Version 1.5.1. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second.
 
 ## How you use it
 
@@ -57,7 +57,7 @@ Ports on the main computer: 7716 control panel (this computer only), 7717 helper
 
 ## Measuring your computers, and expected speeds
 
-Each computer card has a **Measure this computer** button. It takes about ten seconds, downloads nothing, and measures how fast the computer reads its memory (which sets how fast a model writes) and, when a model file bigger than its free memory is already there, how fast its drive reads. The result is saved as that computer's profile, and marked out of date when its processor, memory or graphics card changes. It is never run on a computer while it lends to a running model. From the command line, `potluck bench` prints the same measurement.
+Each computer card has a **Measure this computer** button. It takes about ten seconds, downloads nothing, and measures how fast the computer reads its memory (which sets how fast a model writes) and how fast the drive holding its models reads random 4 MB blocks, past the computer's cache so it measures the drive and not the memory (from the biggest model file there, or from a 1 GB test file it writes and deletes again). The result is saved as that computer's profile, and marked out of date when its processor, memory or graphics card changes. It is never run on a computer while it lends to a running model. From the command line, `potluck bench` prints the same measurement.
 
 With profiles, the model store shows for each file how fast it is expected to write, for each way it can run: on one computer, pooled, or streamed from disk. Every "Measure speed" result is saved too, and once a model has run here the store shows that measured speed instead of the estimate.
 
@@ -65,14 +65,17 @@ The estimate is checked against every speed measured on the test computers (`ben
 
 | Model and computers | Estimate | Measured |
 |---|---|---|
-| Qwen3-30B-A3B Q4_K_M, Ryzen 5 2400G reading 32 GB/s | 5.4–11.8 | 8.0–9.8 |
+| Qwen3-30B-A3B Q4_K_M, Ryzen 5 2400G reading 32 GB/s, processor only | 5.4–11.8 | 8.0–9.8 |
+| Same, with its GTX 1050 Ti holding the part every word uses (Potluck's layout) | 7.2–15.5 | 12.7 |
 | Qwen3-4B Q4_K_M, i7-1260P reading 42 GB/s | 6.0–13.1 | 12.6 |
 | Qwen3-4B Q2_K, same | 9.0–19.5 | 17.4 |
 | Qwen3-4B IQ2_XXS, same | 11.6–25.0 | 13.8–15.9 |
-| Qwen3.5-122B IQ2_XXS, pooled over three computers | 1.7–3.9 | 2.3 to 4.1 |
+| Qwen3.5-122B IQ2_XXS, pooled over three computers | 2.2–4.7 | 2.3 to 4.1 |
 | Qwen3.5-122B IQ2_XXS, streamed from a SATA SSD (443 MB/s) | 0.6–1.4 | 1.0 |
 
-Words per second, writing. The ranges are wide on purpose: they rest on two measurements per computer, not on running the model. Graphics cards are not measured yet; on computers where a card does much of the work, the estimate is conservative.
+Words per second, writing. The ranges are wide on purpose: they rest on two measurements per computer, not on running the model. A graphics card's help is counted for mixture-of-experts models, where Potluck puts the part every word uses on the card (measured: about 24% less time per word with a 4 GB GTX 1050 Ti). For ordinary (dense) models no measurement backs a factor yet, so their estimates leave the card out and are on the low side where a card does much of the work.
+
+Measured drive speeds (uncached random 4 MB reads): about 3,400 MB/s for an NVMe drive in a laptop, 2,500 MB/s for a MacBook Pro's SSD, 750 MB/s for an external USB SSD, 515 MB/s for a SATA SSD.
 
 ## Streaming from disk (InferSSD, experimental)
 
