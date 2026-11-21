@@ -25,7 +25,7 @@ const (
 	portLink  = 7717 // helpers connect here (encrypted), and discovery (UDP)
 	portJoin  = 7715 // "add a computer" web page for the local network
 	portChat  = 7720 // this computer only: chat page and OpenAI-compatible API of the running model
-	engineTag = "b12359"
+	engineTag = "b12608"
 )
 
 // Node is one computer as the main computer sees it.
@@ -110,9 +110,9 @@ func newHost(a *Agent, id *Identity, cfg *ConfigStore) *Host {
 		if c.JoinSecret == "" {
 			c.JoinSecret = randomHex(8)
 		}
-		if c.EngineTag == "" {
-			c.EngineTag = engineTag
-		}
+		// The engine version follows the program: a new Potluck brings the engine it was
+		// tested with (b12608 for Inkling 2 models), and every computer installs the same one.
+		c.EngineTag = engineTag
 	})
 	self := &Node{Info: a.Info(), Online: true, IsMain: true}
 	h.nodes[id.FP] = self

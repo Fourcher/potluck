@@ -210,7 +210,7 @@ function modelCard(mod) {
       <button class="btn sm ${runs(f) ? "" : "quiet"}" data-a="plan" data-repo="${esc(mod.repo)}" data-file="${esc(f.file)}" ${f.verdict === "split" ? "disabled" : ""}>${f.verdict === "no" ? "Why not?" : "Set up"}</button>
     </div>`).join("")}</div>` : "";
   const fit = files ? (() => { const n = files.filter(runs).length; return n ? `<span class="badge ${best && best.verdict === "pool" ? "main" : "ok"}">${best && best.verdict === "pool" ? "Runs pooled across your computers" : "Runs here"}</span>` : `<span class="badge bad">Too big for your setup</span>`; })() : "";
-  return `<div class="model"><div class="row spread"><div><h3>${esc(mod.repo)}</h3>${mod.blurb ? `<p class="muted small">${esc(mod.blurb)}</p>` : ""}
+  return `<div class="model${mod.recommended ? " recommended" : ""}"><div class="row spread"><div><h3>${mod.recommended ? `<span class="badge main" title="Potluck's recommended model to start with">★ Recommended</span> ` : ""}${esc(mod.repo)}</h3>${mod.blurb ? `<p class="muted small">${esc(mod.blurb)}</p>` : ""}
       ${mod.downloads ? `<p class="muted small">${mod.downloads.toLocaleString()} downloads</p>` : ""}</div>
       <div class="row">${fit}${best ? `<button class="btn sm" data-a="plan" data-repo="${esc(mod.repo)}" data-file="${esc(best.file)}">Set up best fit (${gb(best.size)})</button>` : ""}
       <button class="btn sm ghost" data-a="files" data-repo="${esc(mod.repo)}">${open ? "Hide sizes" : files ? `All ${files.length} sizes` : "Show sizes"}</button></div></div>${rows}</div>`;

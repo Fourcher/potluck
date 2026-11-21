@@ -4,7 +4,9 @@ Run one large AI model across the spare computers you already own.
 
 A laptop with 16 GB, an old gaming PC, a Linux box in the closet: none of them can hold a big model alone, but together they can. Potluck pools their memory, splits the model between them, and gives you one chat page and one OpenAI-compatible API on your main computer.
 
-Version 1.5.1. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second.
+Version 1.6.0. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second (3.2 on 21 November with the newer engine in 1.6.0).
+
+**Recommended model to start with: Inkling 2 Mini** (`AtomicChat/Inkling-2-Mini-Uncensored-GGUF`), starred in the Models tab. Its 8.7 GB IQ2_M size ran on one Windows PC with 30 GB and a 4 GB GTX 1050 Ti at 2.5 to 3 words per second on 21 November 2026. This version has had its refusals removed: it answers what it is asked. It always thinks briefly before answering; switching Think off in the chat page keeps that as short as the model allows.
 
 ## How you use it
 
@@ -133,6 +135,8 @@ Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs 
 - Lessons built in: GitHub's "latest" llama.cpp release no longer carries binaries; Alpine needs a private glibc; the Intel macOS engine build is unsigned and must be signed locally; the macOS firewall and Local Network privacy rules; a Windows TCP setting that caps single connections (hence many parallel download streams); firewalls that drop discovery replies (hence the address scan fallback); the engine needs helpers named before its device list.
 
 ## Known limits
+
+- Inkling 2 Mini cannot be stopped from thinking entirely: with Think off it still writes a short line of reasoning (shown folded under "Thought about it") before its answer.
 
 - Not signed with a paid developer certificate or notarized. Windows shows a SmartScreen warning; on macOS use `Potluck.app` (right-click, Open the first time), the USB kit, or the terminal one-liner on the join page. `build.sh` signs and notarizes when given a Developer ID and stored notary credentials.
 - When a direct link cannot be made, traffic between the running computer and that helper is relayed through the main computer, which is slower.

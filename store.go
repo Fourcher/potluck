@@ -63,10 +63,17 @@ type StoreModel struct {
 	Seeds     int         `json:"seeds,omitempty"`
 	Magnet    string      `json:"magnet,omitempty"`
 	Files     []StoreFile `json:"files,omitempty"`
+	// Recommended marks the model Potluck suggests trying first.
+	Recommended bool `json:"recommended,omitempty"`
 }
 
-// featured is the starting shelf: popular open models from small to very large.
+// recommendedRepo is the model Potluck suggests first (starred in the model store).
+const recommendedRepo = "AtomicChat/Inkling-2-Mini-Uncensored-GGUF"
+
+// featured is the starting shelf: the recommended model, then popular open models from small
+// to very large.
 var featured = []struct{ Repo, Blurb string }{
+	{recommendedRepo, "Our pick to start with: Inkling 2 Mini, 26 billion parameters, whose smallest size runs on a 12 GB laptop. This version has had its refusals removed: it answers what it is asked."},
 	{"unsloth/gemma-4-12B-it-GGUF", "Small and quick. Runs on almost anything."},
 	{"unsloth/Qwen3.8-27B-GGUF", "Strong all-rounder."},
 	{"unsloth/gemma-4-26B-A4B-it-GGUF", "Fast for its size: only part of it runs per word."},
@@ -122,8 +129,8 @@ func hfFiles(repo string) ([]StoreFile, error) {
 	for _, e := range tree {
 		low := strings.ToLower(e.Path)
 		base := low[strings.LastIndex(low, "/")+1:]
-		if !strings.HasSuffix(low, ".gguf") || strings.Contains(low, "mmproj") || strings.Contains(low, "imatrix") || strings.HasPrefix(base, "mtp-") {
-			continue // helper files (vision projector, calibration data, speculative head), not the model itself
+		if !strings.HasSuffix(low, ".gguf") || strings.Contains(low, "mmproj") || strings.Contains(low, "imatrix") || strings.HasPrefix(base, "mtp-") || strings.Contains(low, "lora") {
+			continue // helper files (vision projector, calibration data, speculative head, adapter), not the model itself
 		}
 		key, parts := e.Path, 1
 		if m := splitRe.FindStringSubmatch(e.Path); m != nil {
@@ -223,7 +230,7 @@ func (h *Host) storeSearch(source, q string) ([]StoreModel, error) {
 		out := make([]StoreModel, len(featured))
 		var wg sync.WaitGroup
 		for i, f := range featured {
-			out[i] = StoreModel{Source: "hf", Repo: f.Repo, Blurb: f.Blurb}
+			out[i] = StoreModel{Source: "hf", Repo: f.Repo, Blurb: f.Blurb, Recommended: f.Repo == recommendedRepo}
 			wg.Add(1)
 			go func(i int, repo string) {
 				defer wg.Done()
@@ -247,7 +254,7 @@ func (h *Host) storeSearch(source, q string) ([]StoreModel, error) {
 	}
 	out := make([]StoreModel, 0, len(res))
 	for _, r := range res {
-		out = append(out, StoreModel{Source: "hf", Repo: r.ID, Downloads: r.Downloads, Likes: r.Likes})
+		out = append(out, StoreModel{Source: "hf", Repo: r.ID, Downloads: r.Downloads, Likes: r.Likes, Recommended: r.ID == recommendedRepo})
 	}
 	return out, nil
 }

@@ -431,6 +431,12 @@ function systemPrompt() {
   if (toolSpecs()) p.push(`The user has shared a folder named "${S.folder.name}". Use the tools to look at${S.folder.kind === "handle" ? " or change" : ""} files in it when that helps. Paths are relative to that folder. Do not guess what a file contains: read it.`);
   return p.join("\n\n");
 }
+// thinkingKwargs tells the model's chat template whether to think first. Qwen-style
+// templates take enable_thinking; others (Inkling 2) take a reasoning effort, where "none"
+// keeps the thinking as short as the model allows.
+function thinkingKwargs(on = !!S.settings.thinking) {
+  return { enable_thinking: on, reasoning_effort: on ? "high" : "none" };
+}
 function apiMessages() {
   const out = [{ role: "system", content: systemPrompt() }];
   for (const m of S.cur.messages) {
@@ -472,7 +478,7 @@ function parseToolCalls(raw) {
   return calls;
 }
 async function streamDirect(msg, signal) {
-  const s = S.settings, tools = toolSpecs(), body = { messages: apiMessages(), chat_template_kwargs: { enable_thinking: false } };
+  const s = S.settings, tools = toolSpecs(), body = { messages: apiMessages(), chat_template_kwargs: thinkingKwargs(false) };
   if (tools) body.tools = tools;
   const fail = async r => { let t = await r.text(); try { const j = JSON.parse(t); t = (j.error && (j.error.message || j.error)) || t; } catch { } return String(t); };
   const tr = await fetch("/apply-template", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
@@ -517,7 +523,7 @@ async function streamDirect(msg, signal) {
 }
 async function streamOnce(msg, signal) {
   const s = S.settings, tools = toolSpecs();
-  const body = { messages: apiMessages(), stream: true, stream_options: { include_usage: true }, cache_prompt: true, chat_template_kwargs: { enable_thinking: !!s.thinking } };
+  const body = { messages: apiMessages(), stream: true, stream_options: { include_usage: true }, cache_prompt: true, chat_template_kwargs: thinkingKwargs() };
   if (tools) body.tools = tools;
   if (s.temperature !== "" && !isNaN(+s.temperature)) body.temperature = +s.temperature;
   if (s.maxTokens !== "" && +s.maxTokens > 0) body.max_tokens = +s.maxTokens;
@@ -655,7 +661,7 @@ async function compact() {
   const c = S.cur; if (S.gen || !c.messages.length) return toast("There is nothing to summarize yet.");
   if (!running()) return toast("No model is running.");
   S.compacting = true; drawStatus();
-  const body = { messages: [...apiMessages(), { role: "user", content: "Summarize our conversation so far for your own later use. Keep every fact, decision, name, number and open question that matters, in compact notes. Do not add anything new." }], stream: false, chat_template_kwargs: { enable_thinking: false } };
+  const body = { messages: [...apiMessages(), { role: "user", content: "Summarize our conversation so far for your own later use. Keep every fact, decision, name, number and open question that matters, in compact notes. Do not add anything new." }], stream: false, chat_template_kwargs: thinkingKwargs(false) };
   try {
     const r = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const j = await r.json(); if (!r.ok) throw new Error((j.error && j.error.message) || "The model did not answer.");
