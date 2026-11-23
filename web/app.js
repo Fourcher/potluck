@@ -12,6 +12,7 @@ let sheet = null;                   // plan preview
 let kit = { drives: null, msg: "" };
 let logText = "";
 let disk = { data: null, loading: false, sums: {} };   // what Potluck keeps on each computer's disk
+let found = { data: null, loading: false, deep: false, error: "" };   // models other apps keep on this computer
 
 async function api(path, body) {
   const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify(body) };
@@ -74,9 +75,12 @@ function viewChoose() {
   return `<h1>What is this computer's job?</h1>
   <p class="muted">You choose once. Everything Potluck stores stays in one folder that you can delete to remove it.</p>
   <div class="choose">
+    <div class="card"><h3>Just this computer</h3>
+      <p class="muted">Run models here, on this computer alone. Nothing else to set up. Models you already have from LM Studio, Ollama or Hugging Face are found and used where they are. You can add other computers later.</p>
+      <p style="margin-top:16px"><button class="btn" data-a="role" data-role="single">Use this computer</button></p></div>
     <div class="card"><h3>This is my main computer</h3>
       <p class="muted">You sit at this one. It finds your other computers, lets you pick models, and shows the chat. It only lends its own muscle if you turn that on.</p>
-      <p style="margin-top:16px"><button class="btn" data-a="role" data-role="main">Make this my main computer</button></p></div>
+      <p style="margin-top:16px"><button class="btn ghost" data-a="role" data-role="main">Make this my main computer</button></p></div>
     <div class="card"><h3>This is a spare computer</h3>
       <p class="muted">It lends its memory and processor to your main computer. You decide how much, and at what hours.</p>
       <p style="margin-top:16px"><button class="btn ghost" data-a="role" data-role="helper">Lend this computer</button></p></div>
@@ -204,12 +208,14 @@ function modelCard(mod) {
   const open = !!store.open[mod.repo];
   const runs = f => f.verdict === "one" || f.verdict === "pool" || f.verdict === "stream";
   // The best pick is the biggest size that runs here, leaving out the uncompressed originals.
-  const best = files ? files.filter(f => runs(f) && !/^(BF16|F16|F32)$/.test(f.quant)).slice(-1)[0] : null;
+  // Prefer a size that fits in memory; streaming from disk only when nothing else runs.
+  const pick = v => files ? files.filter(f => f.verdict === v && !/^(BF16|F16|F32)$/.test(f.quant)).slice(-1)[0] : null;
+  const best = pick("one") || pick("pool") || pick("stream");
   const rows = files && open ? `<div class="files">${files.map(f => `<div class="file">
       <span class="q">${esc(f.quant)}${best && f.file === best.file ? ` <span class="badge main">Best fit</span>` : ""}</span><span>${gb(f.size)}</span><span class="n">${verdictBadge(f)} <span class="muted small">${esc(f.note)}</span>${speedLine(f)}</span>
       <button class="btn sm ${runs(f) ? "" : "quiet"}" data-a="plan" data-repo="${esc(mod.repo)}" data-file="${esc(f.file)}" ${f.verdict === "split" ? "disabled" : ""}>${f.verdict === "no" ? "Why not?" : "Set up"}</button>
     </div>`).join("")}</div>` : "";
-  const fit = files ? (() => { const n = files.filter(runs).length; return n ? `<span class="badge ${best && best.verdict === "pool" ? "main" : "ok"}">${best && best.verdict === "pool" ? "Runs pooled across your computers" : "Runs here"}</span>` : `<span class="badge bad">Too big for your setup</span>`; })() : "";
+  const fit = files ? (() => { const n = files.filter(runs).length; return n ? `<span class="badge ${best && best.verdict === "pool" ? "main" : best && best.verdict === "stream" ? "warn" : "ok"}">${best && best.verdict === "pool" ? "Runs pooled across your computers" : best && best.verdict === "stream" ? "Only by streaming from disk (slow)" : "Runs here"}</span>` : `<span class="badge bad">Too big for your setup</span>`; })() : "";
   return `<div class="model${mod.recommended ? " recommended" : ""}"><div class="row spread"><div><h3>${mod.recommended ? `<span class="badge main" title="Potluck's recommended model to start with">★ Recommended</span> ` : ""}${esc(mod.repo)}</h3>${mod.blurb ? `<p class="muted small">${esc(mod.blurb)}</p>` : ""}
       ${mod.downloads ? `<p class="muted small">${mod.downloads.toLocaleString()} downloads</p>` : ""}</div>
       <div class="row">${fit}${best ? `<button class="btn sm" data-a="plan" data-repo="${esc(mod.repo)}" data-file="${esc(best.file)}">Set up best fit (${gb(best.size)})</button>` : ""}
@@ -220,6 +226,8 @@ function viewModels() {
   if (store.results === null && !store.loading) searchStore();
   const pf = store.source === "pirateface";
   return `<h1>Models</h1>
+    ${foundView()}
+    <h2>Get a model</h2>
     <p class="muted">Every size is checked against the computers you have connected right now.</p>
     <div class="tools">
       <div class="seg"><button class="${pf ? "" : "on"}" data-a="source" data-source="hf">Hugging Face</button><button class="${pf ? "on" : ""}" data-a="source" data-source="pirateface">PirateFace</button></div>
@@ -230,6 +238,7 @@ function viewModels() {
     ${store.error ? `<div class="err">${esc(store.error)}</div>` : ""}
     ${store.loading ? `<p class="muted">Searching…</p>` : (store.results || []).map(modelCard).join("") || `<p class="muted">Nothing found.</p>`}
     ${pf ? "" : diskView()}
+    ${pf ? "" : localSettings()}
     ${pf ? "" : `<h2>Have a direct link?</h2><div class="tools"><input type="text" id="url" placeholder="https://…/model.gguf" style="flex:1;min-width:260px" aria-label="Direct link to a model file"><button class="btn quiet" data-a="planurl">Check it</button></div>`}`;
 }
 
@@ -246,6 +255,10 @@ function diskView() {
     const models = (d.models || []).map(f => {
       const later = /-(?!00001)\d{5}-of-\d{5}\.gguf$/.test(f.file);   // a later piece of a multi-file model
       const sum = disk.sums[id + "/" + f.file];
+      if (f.found) return `<div class="file"><span class="q">${esc(f.file.replace(/\.gguf$/, ""))}</span><span>${gb(f.size)}</span>
+        <span class="n muted small">Kept by another app at <span style="overflow-wrap:anywhere">${esc(f.found)}</span>. Potluck reads it there and never changes it.</span>
+        <span class="row"><button class="btn sm" data-a="planlocal" data-node="${esc(id)}" data-file="${esc(f.file)}">Set up</button>
+        <button class="btn sm quiet" data-a="forget" data-node="${esc(id)}" data-file="${esc(f.file)}">Remove from list</button></span></div>`;
       return `<div class="file"><span class="q">${esc(f.file.replace(/\.gguf$/, ""))}</span><span>${gb(f.size)}</span>
         <span class="n muted small">${f.complete ? (later ? "Part of a model that comes in several files" : "On " + esc(n.info.name)) : "Unfinished download"}${sum ? `<br>SHA-256: <span style="user-select:all;overflow-wrap:anywhere">${esc(sum)}</span>` : ""}</span>
         <span class="row">${f.complete && !later ? `<button class="btn sm" data-a="planlocal" data-node="${esc(id)}" data-file="${esc(f.file)}">Set up</button>` : ""}
@@ -260,6 +273,52 @@ function diskView() {
       <p class="muted small" style="margin-top:8px">Have a model file already, for example one fetched with a torrent app? Put the .gguf file in this folder on ${esc(n.info.name)} and it appears here: <span style="user-select:all;overflow-wrap:anywhere">${esc(d.dir || "")}</span></p></div>`;
   }).join("");
   return `<h2>On your computers' disks</h2>${rows || `<p class="muted">Nothing downloaded yet.</p>`}`;
+}
+
+// ---------- models already on this computer ----------
+
+function loadFound(deep) {
+  found.loading = true; found.deep = !!deep; found.error = ""; draw(true);
+  api("/api/discover", { deep: !!deep }).then(r => { found.data = r; found.loading = false; draw(true); })
+    .catch(e => { found.loading = false; found.error = e.message; draw(true); });
+}
+
+function foundView() {
+  if (!found.data && !found.loading && !found.error) loadFound(false);
+  const d = found.data || { models: [], engines: [] }, models = d.models || [];
+  const here = { fits: ["ok", "Fits this computer"], tight: ["warn", "Tight on this computer"], no: ["bad", "Too big for this computer alone"] };
+  const rows = models.map(f => {
+    const [cls, word] = here[f.here] || ["bad", "Cannot be read"];
+    const facts = [f.quant, f.arch, f.ctx ? `remembers up to ${f.ctx.toLocaleString()} tokens` : "", f.params ? (f.params / 1e9).toFixed(f.params < 1e10 ? 1 : 0) + " billion weights" : ""].filter(Boolean).map(esc).join(" · ");
+    return `<div class="file"><span class="q">${esc(f.title)}</span><span>${gb(f.size)}</span>
+      <span class="n small"><span class="badge ${cls}">${word}</span> <span class="muted">${facts}<br>${esc(f.error || f.hereNote)}${S.main.nodes.length > 1 && f.verdict === "pool" ? " " + esc(f.note) : ""}<br>From ${esc(f.from)}: <span style="overflow-wrap:anywhere">${esc(f.path)}</span></span>${speedLine(f)}</span>
+      <span class="row">${f.error ? "" : `<button class="btn sm ${f.here === "no" && f.verdict !== "pool" ? "quiet" : ""}" data-a="usefound" data-path="${esc(f.path)}">${f.inUse ? "Set up" : "Use it"}</button>`}</span></div>`;
+  }).join("");
+  const eng = (d.engines || []).map(e => `<li><span style="overflow-wrap:anywhere">${esc(e.path)}</span> <span class="muted">${esc(e.note)}</span></li>`).join("");
+  return `<h2>Already on this computer</h2>
+    <p class="muted small">Models that LM Studio, Ollama, Hugging Face, llama.cpp or you put on this computer. Potluck uses them where they are: nothing is copied, moved or downloaded again.</p>
+    ${found.error ? `<div class="err">${esc(found.error)}</div>` : ""}
+    ${found.loading ? `<p class="muted">${found.deep ? "Searching the whole computer…" : "Looking…"}</p>` : rows ? `<div class="files">${rows}</div>` : `<p class="muted">No models found in the usual places.</p>`}
+    <div class="row" style="margin-top:10px"><button class="btn sm ghost" data-a="founddeep" ${found.loading ? "disabled" : ""}>Search the whole computer</button>
+      <button class="btn sm quiet" data-a="foundagain" ${found.loading ? "disabled" : ""}>Look again</button>
+      <input type="text" id="adddir" placeholder="Another folder to look in" style="min-width:240px" aria-label="Another folder to look in"><button class="btn sm quiet" data-a="adddir">Add folder</button></div>
+    ${(S.main.modelDirs || []).length ? `<p class="small muted" style="margin-top:6px">Also looking in: ${S.main.modelDirs.map(x => `${esc(x)} <button class="link" data-a="deldir" data-dir="${esc(x)}">remove</button>`).join(", ")}</p>` : ""}
+    ${eng ? `<details style="margin-top:8px"><summary class="small muted">AI engines found on this computer</summary><ul class="small" style="margin:6px 0 0 18px">${eng}</ul></details>` : ""}`;
+}
+
+function localSettings() {
+  const m = S.main, engines = (found.data && found.data.engines) || [];
+  const opt = (v, label, on) => `<option value="${esc(v)}" ${on ? "selected" : ""}>${esc(label)}</option>`;
+  const engSel = opt("", "Automatic: one already on this computer if it is new enough, else Potluck's own", !m.enginePath) + opt("potluck", "Always Potluck's own", m.enginePath === "potluck") +
+    engines.filter(e => e.build).map(e => opt(e.path, `${e.path} (version ${e.build})`, m.enginePath === e.path)).join("");
+  return `<h2>On this computer</h2><div class="card">
+    <label class="sw"><input type="checkbox" data-local="single" ${m.single ? "checked" : ""}> Use this computer by itself: run models here, with all the memory it can spare</label>
+    <p class="small" style="margin-top:10px"><label>Free the memory when a model has not been used for
+      <select data-local="idle">${[[0, "never"], [10, "10 minutes"], [30, "30 minutes"], [60, "an hour"], [180, "3 hours"]].map(([v, t]) => opt(v, t, (m.idleUnload || 0) === v)).join("")}</select></label>
+      <span class="muted">It loads again by itself with your next message.</span></p>
+    <p class="small" style="margin-top:10px"><label>AI engine when a model runs here alone <select data-local="engine" style="max-width:100%">${engSel}</select></label></p>
+    <p class="small" style="margin-top:10px"><label>Agent mode in the chat starts commands in <input type="text" data-local="agentdir" value="${esc(m.agentDir || "")}" style="min-width:300px"></label> <button class="btn sm quiet" data-a="agentdir">Save</button></p>
+  </div>`;
 }
 
 async function searchStore() {
@@ -293,14 +352,14 @@ function viewSheet() {
   const p = sheet.plan, solo = sheet.solo, stream = sheet.stream, m = sheet.model, info = sheet.info;
   const isLocal = m.source === "local";
   const go = isLocal ? "Run it" : "Download and run";
-  const ctx = `<label class="small">Conversation memory <select id="ctx"><option value="4096">Normal (4,096 tokens)</option><option value="8192">Long (8,192)</option><option value="16384">Very long (16,384)</option></select></label>`;
+  const ctx = `<label class="small">Conversation memory <select id="ctx"><option value="4096">Short (4,096 tokens)</option><option value="8192" selected>Normal (8,192)</option><option value="16384">Very long (16,384)</option></select></label>`;
   let body;
   if (p.fits) {
     const verdict = p.needsPool ? `<div class="banner" style="border-color:var(--ok);background:var(--ok-soft)"><b>Too big for the memory of any one of your computers. Runs across ${p.machines} of them together.</b></div>`
       : `<div class="note">Fits in ${esc(p.shares[0].name)}'s memory, so it runs there${p.machines > 1 ? " with help from the others" : ""}.</div>`;
     body = `${verdict}${planBar(p)}
       <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start">${go}</button></div>
-      <p class="muted small">${isLocal ? "The file is already on " + esc(p.shares[0].name) + ". Helpers receive their share from it over your network, which is slower the first time than a download."
+      <p class="muted small">${isLocal ? "The file is already on " + esc(p.shares[0].name) + (p.machines > 1 ? ". Helpers receive their share from it over your network, which is slower the first time than a download." : ", so nothing is downloaded.")
         : "Each computer downloads its own share. The first start takes as long as the download; later starts take a few minutes."}</p>`;
     if (p.needsPool && solo && solo.fits) {
       body += `<h2 style="font-size:16px">Or: ${esc(solo.shares[0].name)} alone, with help from its disk</h2>
@@ -310,8 +369,8 @@ function viewSheet() {
     }
   } else if (solo && solo.fits) {
     body = `<div class="note"><b>Does not fit in your computers' pooled memory.</b> ${esc(p.reason)}</div>
-      <h2 style="font-size:16px">It can still run on ${esc(solo.shares[0].name)}, with help from its disk</h2>
-      <p class="muted small">About ${gb(solo.overflow)} of it will not fit in memory and is read from disk as needed. Fine with an SSD, slow with a hard disk.</p>${planBar(solo)}
+      <h2 style="font-size:16px">It can still run on ${esc(solo.shares[0].name)}${solo.overflow > 0 ? ", with help from its disk" : ""}</h2>
+      <p class="muted small">${solo.overflow > 0 ? `About ${gb(solo.overflow)} of it will not fit in memory and is read from disk as needed. Fine with an SSD, slow with a hard disk.` : "It needs nearly all the memory this computer has; close big apps first if it is slow."}</p>${planBar(solo)}
       <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start" data-solo="${esc(solo.head)}">${go} on ${esc(solo.shares[0].name)}</button></div>`;
   } else if (stream && stream.fits) {
     body = `<div class="note"><b>Too big for your computers' memory, pooled or alone.</b> ${esc(p.reason)}</div>`;
@@ -349,6 +408,9 @@ function viewRun() {
   if (c.phase === "idle") {
     if (m.pauseWhy) return `<h1>Waiting for your computers</h1><div class="note">${esc(m.pauseWhy)}</div>
       <p style="margin-top:14px"><button class="btn ghost" data-a="stop">Do not restart it</button></p>`;
+    if (m.asleep) return `<h1>${esc(m.asleep.title || m.asleep.file)} is resting</h1>
+      <p class="muted">It was let go after ${m.idleUnload} minutes without use, so its memory is free for other apps. It loads again by itself with your next chat message.</p>
+      <p style="margin-top:14px"><a class="btn" href="${esc(m.chatURL)}" target="_blank" rel="noopener">Open chat</a> <button class="btn ghost" data-a="again">Load it now</button></p>`;
     return `<h1>Nothing is running</h1><p class="muted">Pick a model and Potluck spreads it over your computers.</p>
       <p style="margin-top:14px"><button class="btn" data-a="tab" data-tab="models">Choose a model</button>
       ${m.lastModel ? ` <button class="btn ghost" data-a="again">Run ${esc(m.lastModel.title || m.lastModel.file)} again</button>` : ""}</p>`;
@@ -475,11 +537,25 @@ const actions = {
   },
   again() {
     const c = S.main.cluster, m = c.model || S.main.lastModel;
-    if (m) { logText = ""; act(() => api("/api/start", { ...m, ctx: 4096, solo: c.plan && c.plan.stream ? "stream:" + c.plan.head : c.plan && c.plan.solo ? c.plan.head : "" })); }
+    if (m) { logText = ""; act(() => api("/api/start", { ...m, ctx: S.main.lastCtx || 8192, solo: c.plan && c.plan.stream ? "stream:" + c.plan.head : c.plan && c.plan.solo ? c.plan.head : "" })); }
   },
   stop() { logText = ""; act(() => api("/api/stop", {})); },
   test() { act(() => api("/api/test", {})); },
   planlocal(t) { openPlan({ source: "local", node: t.dataset.node, file: t.dataset.file }); },
+  async usefound(t) {
+    try {
+      const r = await api("/api/use_found", { path: t.dataset.path });
+      disk.data = null;
+      ((found.data && found.data.models) || []).forEach(f => { if (f.path === t.dataset.path) f.inUse = true; });
+      openPlan({ source: "local", node: S.id, file: r.file });
+    } catch (e) { toast(e.message); }
+  },
+  forget(t) { api("/api/storage", { node: t.dataset.node, action: "delete_model", file: t.dataset.file }).then(() => { loadDisk(); found.data = null; }).catch(e => toast(e.message)); },
+  founddeep() { loadFound(true); },
+  foundagain() { loadFound(false); },
+  adddir() { const v = $("#adddir").value.trim(); if (v) act(() => api("/api/local", { modelDirs: [...(S.main.modelDirs || []), v] }).then(() => loadFound(false))); },
+  deldir(t) { act(() => api("/api/local", { modelDirs: (S.main.modelDirs || []).filter(x => x !== t.dataset.dir) }).then(() => loadFound(false))); },
+  agentdir() { const v = $("[data-local=agentdir]").value.trim(); act(() => api("/api/local", { agentDir: v }).then(() => toast("Saved"))); },
   checksum(t) {
     const k = t.dataset.node + "/" + t.dataset.file;
     disk.sums[k] = "…"; draw(true); toast("Reading the whole file. A big model takes a few minutes.");
@@ -505,6 +581,10 @@ document.addEventListener("input", e => {
 document.addEventListener("change", e => {
   if (e.target.matches("[data-share]")) { const on = e.target.checked; holdUntil = 0; return act(() => api("/api/share", { on })); }
   if (e.target.matches("[data-head]")) { const id = e.target.value; holdUntil = 0; return act(() => api("/api/head", { id })); }
+  const loc = e.target.dataset.local;
+  if (loc === "single") { holdUntil = 0; return act(() => api("/api/local", { single: e.target.checked })); }
+  if (loc === "idle") { holdUntil = 0; return act(() => api("/api/local", { idleUnload: +e.target.value })); }
+  if (loc === "engine") { holdUntil = 0; return act(() => api("/api/local", { enginePath: e.target.value })); }
   const box = e.target.closest(".limits");
   if (!box) return;
   const id = box.dataset.id, limits = readLimits(box);

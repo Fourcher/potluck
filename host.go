@@ -20,13 +20,22 @@ import (
 	"time"
 )
 
-const (
-	portUI    = 7716 // this computer only: the control panel
-	portLink  = 7717 // helpers connect here (encrypted), and discovery (UDP)
-	portJoin  = 7715 // "add a computer" web page for the local network
-	portChat  = 7720 // this computer only: chat page and OpenAI-compatible API of the running model
-	engineTag = "b12608"
+var (
+	portUI   = 7716 // this computer only: the control panel
+	portLink = 7717 // helpers connect here (encrypted), and discovery (UDP)
+	portJoin = 7715 // "add a computer" web page for the local network
+	portChat = 7720 // this computer only: chat page and OpenAI-compatible API of the running model
 )
+
+const engineTag = "b12608"
+
+// For trying a build next to a Potluck that is already running: POTLUCK_PORT_OFFSET=100
+// moves every port up by 100. Computers only find each other with the same offset.
+func init() {
+	if n, err := strconv.Atoi(os.Getenv("POTLUCK_PORT_OFFSET")); err == nil && n > 0 && n < 20000 {
+		portUI, portLink, portJoin, portChat = portUI+n, portLink+n, portJoin+n, portChat+n
+	}
+}
 
 // Node is one computer as the main computer sees it.
 type Node struct {
@@ -101,6 +110,11 @@ type Host struct {
 	paused   *ModelRef // a model waiting for enough computers to be available again
 	pauseWhy string
 	stale    bool // limits changed on a computer that is part of the running model
+
+	lastUse    time.Time // the last request to the model
+	asleep     *ModelRef // let go after being unused for a while; the next request loads it
+	asleepCtx  int
+	asleepSolo string
 }
 
 func newHost(a *Agent, id *Identity, cfg *ConfigStore) *Host {
@@ -153,6 +167,7 @@ func (h *Host) Run() error {
 	go h.inventoryLoop()
 	go h.serveJoinPage()
 	go h.watchLoop()
+	go h.idleLoop()
 	h.applyShare()
 	return nil
 }
@@ -820,12 +835,24 @@ func offer(info NodeInfo, held int64) (cpu, gpu int64, unified bool) {
 	return cpu, gpu, false
 }
 
+// roomForOne: on a computer used by itself, count the memory other apps can give up, not
+// only what is idle this second. A Mac in use shows little free memory, yet makes room by
+// compressing what other apps hold: measured on a 16 GB Mac mini with about 6% free, the
+// 8.7 GB Inkling 2 Mini loaded and ran at 15 words/s.
+func roomForOne(info NodeInfo) NodeInfo {
+	if room := info.RAMTotal * 80 / 100; info.RAMAvail < room {
+		info.RAMAvail = room
+	}
+	return info
+}
+
 // planNodes lists the computers that may work right now, with what each offers.
 func (h *Host) planNodes() []PlanNode {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := time.Now()
 	loaded := h.cluster.Phase == "running"
+	single := h.cfg != nil && h.cfg.Get().Single
 	var out []PlanNode
 	for id, n := range h.nodes {
 		n.Active = n.Online && n.Info.Limits.ActiveNow(now)
@@ -833,7 +860,11 @@ func (h *Host) planNodes() []PlanNode {
 		if !loaded {
 			held = 0 // nothing is in memory yet while a model is still starting
 		}
-		cpu, gpu, uni := offer(n.Info, held)
+		info := n.Info
+		if single && id == h.id.FP {
+			info = roomForOne(info)
+		}
+		cpu, gpu, uni := offer(info, held)
 		n.Offer = cpu + gpu
 		if !n.Active {
 			n.Offer = 0
@@ -960,6 +991,7 @@ func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 	h.cancel = cancel
 	h.cluster = ClusterState{Phase: "starting", Model: &model, Since: time.Now()}
 	h.lastCtx, h.lastSolo, h.stale = ctxSize, solo, false
+	h.asleep, h.lastUse = nil, time.Now()
 	h.mu.Unlock()
 	h.cfg.Update(func(c *Config) { c.LastModel = &model })
 	go func() {
@@ -1085,6 +1117,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			if err != nil {
 				return err
 			}
+			spec.Solo = p.isHead && len(plan.WorkerOrder) == 0
 			var res struct {
 				GPUDevice string `json:"gpuDevice"`
 			}

@@ -4,7 +4,7 @@ Run one large AI model across the spare computers you already own.
 
 A laptop with 16 GB, an old gaming PC, a Linux box in the closet: none of them can hold a big model alone, but together they can. Potluck pools their memory, splits the model between them, and gives you one chat page and one OpenAI-compatible API on your main computer.
 
-Version 1.6.0. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second (3.2 on 21 November with the newer engine in 1.6.0).
+Version 1.7.0. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second (3.2 on 21 November with the newer engine in 1.6.0).
 
 **Recommended model to start with: Inkling 2 Mini** (`AtomicChat/Inkling-2-Mini-Uncensored-GGUF`), starred in the Models tab. Its 8.7 GB IQ2_M size ran on one Windows PC with 30 GB and a 4 GB GTX 1050 Ti at 2.5 to 3 words per second on 21 November 2026. This version has had its refusals removed: it answers what it is asked. It always thinks briefly before answering; switching Think off in the chat page keeps that as short as the model allows.
 
@@ -21,6 +21,17 @@ Version 1.6.0. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter mo
 
 Too big for one computer's memory does not always mean you need several. When a model is only somewhat bigger than one computer's memory, the plan also offers **that computer alone, with its disk covering the difference**. See "Pooling or disk?" below.
 
+## Just one computer
+
+Potluck works on a single computer too, with nothing else to set up. On first start choose **Just this computer**. That computer then runs models itself with all the memory it can spare, and:
+
+- **Finds the models you already have.** Under Models, "Already on this computer" lists the GGUF models that LM Studio, Ollama, Hugging Face downloads, llama.cpp, Jan or GPT4All keep, plus `~/models`, your Downloads folder and any folder you add. "Search the whole computer" asks macOS's file index for every model on every drive in about a second (on Windows and Linux it walks the drives, skipping system folders). Each one shows its type, compression, size, how long a conversation it can remember, and whether it fits this computer's memory. "Use it" runs it from where it is: nothing is copied, moved or downloaded again, and "Remove from list" never deletes the other app's file.
+- **Uses an AI engine you already have** when it is new enough. A llama.cpp server found on the computer (Homebrew, your own build) is used for models that run here alone if its version is at least Potluck's own; otherwise Potluck installs its own. You can pick one in "On this computer".
+- **Lets go of the memory** when the model has not been used for a while (30 minutes by default; choose 10 minutes to 3 hours, or never). The next chat message loads it again by itself. Potluck itself idles at about 13 MB of memory and next to no processor time.
+- On a Mac, counts the memory other apps can give up, not only what is idle this second: macOS makes room by compressing them.
+
+You can add other computers later; nothing changes for the ones you have.
+
 Each computer has a **pedal**: a slider from parked to flat out that sets how much of its memory and how many of its processor cores it lends, an on/off switch, and optional hours ("only between 22:00 and 07:00"). The main computer coordinates by default and only lends its own muscle if you switch that on.
 
 ## The chat page
@@ -31,6 +42,8 @@ Open `http://127.0.0.1:7720` on the main computer (or "Open chat" in the control
 - **Speak or type.** The microphone button takes dictation; say "send message" to send. Replies can be read aloud.
 - **Attach files** (their text is included with your message): plain text, PDF, Word, Excel and PowerPoint. Long pasted text becomes an attachment too. **Or attach a folder**. A folder becomes the chat's working folder: the model can list, read and search it, and write files in it.
 - **Permission levels** for that folder: chat only, ask every time, read freely (ask before changes), or edit freely. Each request shows what the model wants to do, and for a file it wants to write, the content.
+- **Agent mode** (on the computer running Potluck): the model may run commands and scripts and drive apps. "Ask first" shows each command, the folder it runs in and a warning before you say yes; "run freely" skips the question; off is the default. On a Mac it can also run AppleScript to control apps (macOS asks once per app). Commands start in a folder you choose in the control panel, stop after two minutes unless the model asks for longer (at most 15), and stop when you press Stop. Only Potluck's own chat page on this computer can ask for a command: never another computer, even with sharing on, and never another website.
+- **Drag and drop** files or a folder anywhere on the page.
 - **Models:** see which model is running, switch to another one that is on your computers, or reload with a longer conversation memory. Only the main computer can switch.
 - **Usage:** a ring shows how full the conversation's memory is. Click it for tokens read and written, speed, time spent, and which computers are working.
 - **Commands:** type `/` in the message box, or press Ctrl/Cmd+K anywhere. `/help` lists what there is.

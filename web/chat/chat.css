@@ -238,3 +238,7 @@ body:not(.side-closed) #side-open{display:none}
   .hello{margin-top:6vh}.hello h2{font-size:24px}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+/* agent mode */
+.pillbtn.warn { color: var(--bad, #c0392b); }
+.tool pre.cmd { white-space: pre-wrap; word-break: break-word; background: var(--code-bg, rgba(127,127,127,.12)); padding: 8px 10px; border-radius: 6px; margin: 8px 0 6px; font-size: 13px; max-height: 320px; overflow: auto; }

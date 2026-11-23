@@ -42,6 +42,8 @@ type ModelInfo struct {
 	// are read for each word, while the rest of the layer (the "trunk") is read every time.
 	ExpertBytes []int64  `json:"expertBytes,omitempty"`
 	OutputBytes int64    `json:"outputBytes,omitempty"` // the output head alone
+	FileType    int      `json:"fileType,omitempty"`    // general.file_type: how it is compressed
+	Params      uint64   `json:"params,omitempty"`      // number of weights
 	Tensors     []Tensor `json:"-"`
 }
 
@@ -277,6 +279,12 @@ func parseGGUFPart(buf []byte, fileSize int64, layersHint int) (*ModelInfo, erro
 	}
 	if v, ok := kv[m.Arch+".context_length"].(uint64); ok {
 		m.CtxTrain = int(v)
+	}
+	if v, ok := kv["general.file_type"].(uint64); ok {
+		m.FileType = int(v)
+	}
+	for _, t := range raws {
+		m.Params += t.n
 	}
 	if m.Layers <= 0 {
 		m.Layers = layersHint
@@ -886,6 +894,7 @@ func mergeParts(parts []*ModelInfo) *ModelInfo {
 		m.OtherBytes += p.OtherBytes
 		m.OutputBytes += p.OutputBytes
 		m.FileSize += p.FileSize
+		m.Params += p.Params
 		for _, t := range p.Tensors {
 			t.Part = i + 1
 			m.Tensors = append(m.Tensors, t)

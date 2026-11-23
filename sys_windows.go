@@ -75,3 +75,6 @@ func killTree(pid int) {
 	hideWindow(c)
 	_ = c.Run()
 }
+
+// ownGroup: on Windows killTree follows the program's children by itself.
+func ownGroup(cmd *exec.Cmd) { hideWindow(cmd) }

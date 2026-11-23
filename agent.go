@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +42,19 @@ type Config struct {
 	// runs, newest first.
 	Profiles map[string]*Profile `json:"profiles,omitempty"`
 	Measured []Measured          `json:"measured,omitempty"`
+	// Found: model files other apps keep on this computer that Potluck may use, by the name
+	// Potluck knows them by. Potluck reads them where they are and never changes them.
+	Found     map[string]string `json:"found,omitempty"`
+	ModelDirs []string          `json:"modelDirs,omitempty"` // more folders to look in for models
+	// EnginePath: "" = use an engine found on this computer when it is new enough and the
+	// model runs here alone; "potluck" = always Potluck's own; else that llama-server.
+	EnginePath string `json:"enginePath,omitempty"`
+	Single     bool   `json:"single,omitempty"` // set up for one computer
+	// IdleUnload: minutes without a request after which the model is let go to free the
+	// memory (0 = keep it loaded). It loads again with the next message.
+	IdleUnload int `json:"idleUnload,omitempty"`
+	// AgentDir: the folder commands from the chat page's agent mode start in.
+	AgentDir string `json:"agentDir,omitempty"`
 }
 
 // ConfigStore saves Config to disk on every change.
@@ -108,6 +122,11 @@ type Agent struct {
 	// streamNoGPU: InferSSD runs without the graphics card (too small for the model).
 	streamNoGPU bool
 	links       map[string]string // how each helper of the model running here is reached: direct | relay
+
+	lastFound      []FoundModel // the last search for models on this computer
+	engineChoice   string       // the engine found on this computer that a model alone uses
+	engineChoiceAt time.Time
+	localRT        bool // the engine in use is one found on this computer
 
 	// set by whoever owns the agent
 	dialTunnel func(to, target string) (net.Conn, error)
@@ -330,17 +349,55 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		if err := json.Unmarshal(raw, &spec); err != nil {
 			return nil, err
 		}
+		if spec.Solo {
+			if le := a.localEngine(); le != "" {
+				dir := filepath.Dir(le)
+				dev := a.gpuDeviceName(dir)
+				a.mu.Lock()
+				a.rtDir, a.gpuDev, a.localRT = dir, dev, true
+				a.mu.Unlock()
+				a.note(fmt.Sprintf("Using the AI engine already on this computer (version %d)", engineBuild(le)), 0, 0)
+				return map[string]string{"dir": dir, "gpuDevice": dev, "local": le}, nil
+			}
+		}
 		dir, err := a.ensureRuntime(a.jobCtx(), spec, func(s string) { a.note(s, 0, 0) })
 		if err != nil {
 			return nil, err
 		}
 		dev := a.gpuDeviceName(dir)
 		a.mu.Lock()
-		a.rtDir, a.gpuDev = dir, dev
+		a.rtDir, a.gpuDev, a.localRT = dir, dev, false
 		a.mu.Unlock()
 		a.pruneEngines(dir)
 		a.note("AI engine ready", 0, 0)
 		return map[string]string{"dir": dir, "gpuDevice": dev}, nil
+
+	case "discover":
+		// Look for models and engines that other apps put on this computer.
+		var in struct {
+			Deep bool `json:"deep"`
+		}
+		_ = json.Unmarshal(raw, &in)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		models := a.discoverModels(ctx, in.Deep)
+		a.mu.Lock()
+		a.lastFound, a.engineChoiceAt = models, time.Time{}
+		a.mu.Unlock()
+		return map[string]any{"models": models, "engines": a.discoverEngines(ctx), "dirs": a.cfg.Get().ModelDirs}, nil
+
+	case "use_found":
+		var in struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, err
+		}
+		name, err := a.useFound(in.Path)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"file": name}, nil
 
 	case "ensure_stream":
 		var p StreamPackage
@@ -438,7 +495,7 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		if err := json.Unmarshal(raw, &in); err != nil {
 			return nil, err
 		}
-		sum, err := sha256File(filepath.Join(a.dir, "models", filepath.Base(in.File)))
+		sum, err := sha256File(a.modelPath(in.File))
 		if err != nil {
 			return nil, err
 		}
@@ -456,6 +513,10 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		a.mu.Unlock()
 		if busy {
 			return nil, errors.New("stop the running model first")
+		}
+		if a.isFound(in.File) {
+			a.forgetFound(in.File) // another app's file: only take it off the list
+			return a.Storage(), nil
 		}
 		base := filepath.Join(a.dir, "models", filepath.Base(in.File))
 		for _, suffix := range []string{"", ".ok", ".part", ".progress"} {
@@ -556,7 +617,7 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	for _, l := range oldL {
 		l.Close()
 	}
-	model := filepath.Join(a.dir, "models", filepath.Base(in.File))
+	model := a.modelPath(in.File)
 	if _, err := os.Stat(model); err != nil {
 		return nil, errors.New("the model file is not on this computer")
 	}
@@ -665,7 +726,7 @@ func (a *Agent) startStream(in StartHeadReq) (any, error) {
 	for _, l := range oldL {
 		l.Close()
 	}
-	model := filepath.Join(a.dir, "models", filepath.Base(in.File))
+	model := a.modelPath(in.File)
 	if _, err := os.Stat(model); err != nil {
 		return nil, errors.New("the model file is not on this computer")
 	}
@@ -772,11 +833,12 @@ type StorageReport struct {
 	Free   int64       `json:"free"`
 }
 
-// ModelFile is one downloaded model.
+// ModelFile is one downloaded model, or one found on this computer (Found: where it is).
 type ModelFile struct {
 	File     string `json:"file"`
 	Size     int64  `json:"size"`
 	Complete bool   `json:"complete"`
+	Found    string `json:"found,omitempty"`
 }
 
 func dirSize(dir string) int64 {
@@ -810,6 +872,29 @@ func (a *Agent) Storage() StorageReport {
 			r.Models = append(r.Models, ModelFile{File: strings.TrimSuffix(name, ".part"), Size: info.Size()})
 		}
 	}
+	// Models other apps keep: listed, not counted as Potluck's own disk use.
+	found := a.cfg.Get().Found
+	for name, path := range found {
+		if otherPart.MatchString(name) && !firstPart.MatchString(name) {
+			continue
+		}
+		var size int64
+		if m := firstPart.FindStringSubmatch(name); m != nil {
+			for n, p := range found {
+				if otherPart.ReplaceAllString(n, "") == otherPart.ReplaceAllString(name, "") {
+					if st, err := os.Stat(p); err == nil {
+						size += st.Size()
+					}
+				}
+			}
+		} else if st, err := os.Stat(path); err == nil {
+			size = st.Size()
+		} else {
+			continue // gone: the other app removed it
+		}
+		r.Models = append(r.Models, ModelFile{File: name, Size: size, Complete: true, Found: path})
+	}
+	sort.Slice(r.Models, func(i, j int) bool { return r.Models[i].File < r.Models[j].File })
 	return r
 }
 
@@ -841,6 +926,9 @@ func (a *Agent) localHeader(file string) (*ModelInfo, error) {
 	var infos []*ModelInfo
 	for i, name := range names {
 		path := filepath.Join(dir, name)
+		if a.isFound(name) {
+			path = a.modelPath(name)
+		}
 		st, err := os.Stat(path)
 		if err != nil {
 			return nil, fmt.Errorf("%s is missing from the models folder", name)

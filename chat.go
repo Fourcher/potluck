@@ -16,9 +16,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // chatOwner says whether a request comes from this computer itself (not from the local
@@ -96,9 +98,21 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 				return
 			}
 			writeJSON(w, map[string]bool{"ok": true})
+		case r.URL.Path == "/potluck/run" && r.Method == http.MethodPost:
+			handleRun(w, r, h.agentDir())
 		case strings.HasPrefix(r.URL.Path, "/potluck/"):
 			http.NotFound(w, r)
 		default:
+			if r.Method == http.MethodPost && isModelRequest(r) {
+				h.touch()
+				// The model was let go after a while unused: load it again, then answer.
+				if err := h.wake(15 * time.Minute); err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "Potluck: " + err.Error()}})
+					return
+				}
+			}
 			api.ServeHTTP(w, r)
 		}
 	})
@@ -109,11 +123,16 @@ func (h *Host) chatState(owner bool) map[string]any {
 	defer h.mu.Unlock()
 	c := h.cluster
 	out := map[string]any{"version": version, "phase": c.Phase, "error": c.Error, "steps": c.Steps, "owner": owner, "ctx": h.lastCtx, "pauseWhy": h.pauseWhy}
+	if c.Phase == "idle" && h.asleep != nil {
+		// Let go after a while unused; the next message loads it again.
+		out["phase"], c.Model = "resting", h.asleep
+	}
 	if c.Model != nil {
 		out["model"] = map[string]any{"title": c.Model.Title, "file": c.Model.File, "size": c.Model.Size}
 	}
 	if owner {
 		out["panel"] = "http://127.0.0.1:" + strconv.Itoa(portUI)
+		out["os"], out["agentDir"] = runtime.GOOS, agentDirOf(h.cfg) // for agent mode
 	}
 	var nodes []chatNode
 	for _, n := range h.nodes {

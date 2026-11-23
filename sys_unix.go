@@ -30,3 +30,7 @@ func killTree(pid int) {
 	}
 	_ = exec.Command("pkill", "-KILL", "-P", strconv.Itoa(pid)).Run()
 }
+
+// ownGroup starts a program in a process group of its own, so killTree stops everything it
+// started too.
+func ownGroup(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} }

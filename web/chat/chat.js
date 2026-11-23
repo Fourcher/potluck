@@ -22,7 +22,7 @@ const ICONS = {
   file: "M7 3h7l4 4v14H7zM14 3v4h4", shield: "M12 3l7 3v5c0 4.5-3 8.3-7 9.5C8 19.3 5 15.5 5 11V6z",
   bulb: "M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.7.7 1 1.5 1 2.5h6c0-1 .3-1.8 1-2.5A6 6 0 0 0 12 3z",
   chip: "M8 8h8v8H8zM4 10h4M4 14h4M16 10h4M16 14h4M10 4v4M14 4v4M10 16v4M14 16v4", check: "M5 12.5l4.5 4.5L19 7.5",
-  trash: "M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13", down: "M6 9l6 6 6-6", tool: "M14 6a4 4 0 0 0 5 5l-8.5 8.5a2.1 2.1 0 0 1-3-3L16 8",
+  trash: "M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13", term: "M4 5h16v14H4zM7 9l3 3-3 3M12 15h5", down: "M6 9l6 6 6-6", tool: "M14 6a4 4 0 0 0 5 5l-8.5 8.5a2.1 2.1 0 0 1-3-3L16 8",
 };
 const icon = n => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[n]}"/></svg>`;
 const ic = n => `<span class="ic">${icon(n)}</span>`;
@@ -39,7 +39,13 @@ const PERMS = {
   read: { name: "Read freely", d: "Read my folder without asking. Ask before changing anything." },
   edit: { name: "Edit freely", d: "Read and change files in my folder without asking." },
 };
-const DEFAULTS = { theme: "auto", style: "normal", instructions: "", perm: "read", thinking: false, enterSends: true, speak: false, autoSend: false, temperature: "", maxTokens: "", sideClosed: false };
+// Agent mode: the model may run commands and scripts on the computer running Potluck.
+const AGENT = {
+  off: { name: "Agent off", d: "The model cannot run anything on this computer." },
+  ask: { name: "Agent: ask first", d: "The model may run commands and drive apps. You see each one and say yes or no first." },
+  auto: { name: "Agent: run freely", d: "The model runs commands and drives apps without asking. It can change or delete anything you can. Only for tasks you trust it with." },
+};
+const DEFAULTS = { agent: "off", theme: "auto", style: "normal", instructions: "", perm: "read", thinking: false, enterSends: true, speak: false, autoSend: false, temperature: "", maxTokens: "", sideClosed: false };
 
 const S = {
   settings: { ...DEFAULTS }, chats: [], cur: null, server: null, props: null, models: null,
@@ -72,7 +78,7 @@ async function api(path, body) {
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
-const running = () => S.server && S.server.phase === "running";
+const running = () => S.server && (S.server.phase === "running" || S.server.phase === "resting"); // resting: loads again with the next message
 const ctxSize = () => (S.props && S.props.default_generation_settings && S.props.default_generation_settings.n_ctx) || (S.server && S.server.ctx) || 4096;
 const modelTitle = () => (S.server && S.server.model && (S.server.model.title || S.server.model.file)) || "";
 
@@ -93,6 +99,7 @@ function drawStatus() {
   const helpers = (s.nodes || []).filter(n => n.role === "worker").length;
   let dot = "", line = "", sub = "";
   if (s.phase === "running") { dot = "ok"; line = modelTitle(); sub = helpers ? `Running on ${helpers + 1} computers` : "Running on one computer"; }
+  else if (s.phase === "resting") { dot = "ok"; line = modelTitle(); sub = "Resting to free memory · wakes with your message"; }
   else if (s.phase === "starting") { dot = "busy"; line = modelTitle() || "Starting"; sub = "Getting ready…"; }
   else if (s.phase === "error") { dot = "bad"; line = "Could not start"; sub = "See the note above the chat"; }
   else if (s.phase === "offline") { dot = "bad"; line = "Not connected"; sub = "Potluck is not answering"; }
@@ -101,7 +108,7 @@ function drawStatus() {
   $("#panel-link").hidden = !s.owner; if (s.owner) $("#panel-link").href = s.panel;
   // banner above the thread when the model is not ready
   if (S.compacting) { b.hidden = false; b.className = ""; b.innerHTML = `<span class="waiting"><span class="spin"></span><span>Summarizing this chat so it can continue in a fresh one. This takes a minute.</span></span>`; }
-  else if (s.phase === "running") b.hidden = true;
+  else if (s.phase === "running" || s.phase === "resting") b.hidden = true;
   else {
     b.hidden = false; b.className = s.phase === "error" || s.phase === "offline" ? "bad" : "";
     if (s.phase === "starting") {
@@ -175,12 +182,15 @@ function toolLabel(c, res) {
     read_file: [`Reading ${p}`, `Read ${p}`, `Asked to read ${p}`],
     search_files: [`Searching your folder for ${q}`, `Searched your folder for ${q}`, `Asked to search your folder for ${q}`],
     write_file: [`Writing ${p}`, `Wrote ${p}`, `Asked to write ${p}`],
+    run_command: [`Running <span class="path">${esc(shortCmd(a.command))}</span>`, `Ran <span class="path">${esc(shortCmd(a.command))}</span>`, `Asked to run <span class="path">${esc(shortCmd(a.command))}</span>`],
+    run_applescript: [`Driving an app: <span class="path">${esc(shortCmd(a.script))}</span>`, `Drove an app: <span class="path">${esc(shortCmd(a.script))}</span>`, `Asked to drive an app: <span class="path">${esc(shortCmd(a.script))}</span>`],
   }[c.name] || [`Using ${esc(c.name)}`, `Used ${esc(c.name)}`, `Asked to use ${esc(c.name)}`];
   return forms[!res ? 0 : res.state === "ok" ? 1 : 2];
 }
+function shortCmd(s) { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > 70 ? s.slice(0, 68) + "…" : s; }
 function toolCard(c, res) {
   const state = !res ? `<span class="state"><span class="spin"></span></span>` : res.state === "denied" ? `<span class="state no">Not allowed</span>` : res.state === "error" ? `<span class="state no">Did not work</span>` : `<span class="state ok">Done</span>`;
-  return `<details class="tool" data-call="${esc(c.id)}"><summary>${ic(c.name === "write_file" ? "edit" : "tool")}<span>${toolLabel(c, res)}</span>${state}</summary><div class="out">${esc(res ? res.content : "Working…")}</div></details>`;
+  return `<details class="tool" data-call="${esc(c.id)}"><summary>${ic(c.name === "write_file" ? "edit" : c.name.startsWith("run_") ? "term" : "tool")}<span>${toolLabel(c, res)}</span>${state}</summary><div class="out">${esc(res ? res.content : "Working…")}</div></details>`;
 }
 function assistantHTML(m, live) {
   let h = "";
@@ -252,6 +262,9 @@ function drawTools() {
   const s = S.settings, g = !!S.gen;
   $("#perm").innerHTML = `${ic("shield")}<span>${PERMS[s.perm].name}</span>`;
   $("#perm").hidden = !S.folder;
+  const ag = $("#agent"), canAgent = S.server && S.server.owner;
+  ag.hidden = !canAgent; ag.innerHTML = `${ic("term")}<span>${AGENT[s.agent] ? AGENT[s.agent].name : AGENT.off.name}</span>`;
+  ag.classList.toggle("on", canAgent && s.agent !== "off"); ag.classList.toggle("warn", canAgent && s.agent === "auto");
   $("#think").innerHTML = `${ic("bulb")}<span>Think</span>`; $("#think").classList.toggle("on", s.thinking);
   $("#model").innerHTML = `<span>${esc(modelTitle() || "No model")}</span>${ic("down")}`;
   $("#mic").classList.toggle("rec", !!S.rec);
@@ -347,7 +360,18 @@ async function folderFile(path) {
   if (f.kind === "snapshot") { const file = f.files.get(parts.join("/")); if (!file) throw new Error("There is no file " + parts.join("/")); return file; }
   return (await (await dirAt(parts.slice(0, -1), false)).getFileHandle(parts[parts.length - 1])).getFile();
 }
+// agentOn: the model may run things on this computer (only from the computer running Potluck).
+const agentOn = () => S.settings.agent !== "off" && S.server && S.server.owner;
+async function runOnComputer(kind, command, dir, timeout) {
+  const r = await fetch("/potluck/run", { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify({ kind, command, dir: dir || "", timeout: +timeout || 0 }), signal: S.gen && S.gen.abort.signal });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || "Could not run it.");
+  const head = `Exit code ${j.exit}${j.timedOut ? " (stopped: it ran out of time)" : ""}, ${j.seconds.toFixed(1)} s, in ${j.dir}`;
+  return head + "\n" + (j.output.trim() ? j.output : "(no output)");
+}
 const TOOLS = {
+  async run_command(a) { return runOnComputer("shell", a.command, a.folder, a.timeout_seconds); },
+  async run_applescript(a) { return runOnComputer("applescript", a.script, "", a.timeout_seconds); },
   async list_files(a) {
     const list = await folderWalk(a.path || "");
     if (!list.length) return "(no files here)";
@@ -384,9 +408,17 @@ const TOOLS = {
   },
 };
 function toolSpecs() {
-  if (!S.folder || S.folder.needsAccess || S.settings.perm === "none") return null;
   const fn = (name, description, properties, required = []) => ({ type: "function", function: { name, description, parameters: { type: "object", properties, required } } });
-  const t = [
+  const agent = [];
+  if (agentOn()) {
+    const mac = (S.server.os || "") === "darwin", win = (S.server.os || "") === "windows";
+    agent.push(fn("run_command", `Run a command in ${win ? "PowerShell" : mac ? "the zsh shell" : "the shell"} on the user's computer and get back what it printed and its exit code. Use it to look around, run scripts and programs, install or build things, and open apps${mac ? " (open -a AppName, open URL)" : ""}. It cannot answer questions a command asks, so use options that do not ask.`,
+      { command: { type: "string", description: "The command line" }, folder: { type: "string", description: "Folder to run it in. Leave out for the agent folder." }, timeout_seconds: { type: "integer", description: "Give up after this many seconds (default 120, at most 900)" } }, ["command"]));
+    if (mac) agent.push(fn("run_applescript", "Run an AppleScript on the user's Mac to control apps: open documents, read or change what an app shows (Finder, Safari, Mail, Notes, Music, System Events for clicks and keystrokes). macOS asks the user once per app before allowing it.",
+      { script: { type: "string", description: "The AppleScript source" }, timeout_seconds: { type: "integer" } }, ["script"]));
+  }
+  if (!S.folder || S.folder.needsAccess || S.settings.perm === "none") return agent.length ? agent : null;
+  const t = [...agent,
     fn("list_files", "List the files in the user's folder, or in a subfolder of it.", { path: { type: "string", description: "Subfolder, relative to the folder. Leave out for everything." } }),
     fn("read_file", "Read a text file from the user's folder.", { path: { type: "string", description: "File path relative to the folder" }, start_line: { type: "integer" }, max_lines: { type: "integer" } }, ["path"]),
     fn("search_files", "Find lines containing some text in the files of the user's folder.", { query: { type: "string" } }, ["query"]),
@@ -409,8 +441,36 @@ function askPermission(call, kind) {
     S.gen.cancelAsk = () => { row.remove(); resolve("deny"); };
   });
 }
+// askRun shows what the model wants to run and waits for the user's answer.
+function askRun(call) {
+  return new Promise(resolve => {
+    let a = {}; try { a = JSON.parse(call.args || "{}"); } catch { }
+    const el = $(`.tool[data-call="${CSS.escape(call.id)}"]`); if (!el) return resolve("deny");
+    el.classList.add("ask"); el.open = true;
+    const script = call.name === "run_applescript", text = String((script ? a.script : a.command) || "");
+    const where = script ? "" : `<div class="small muted">In ${esc(a.folder || (S.server && S.server.agentDir) || "the agent folder")}${a.timeout_seconds ? `, for at most ${esc(a.timeout_seconds)} s` : ""}</div>`;
+    $(".out", el).innerHTML = `<b>The model wants to ${script ? "run this AppleScript to control an app" : "run this command"} on this computer:</b><pre class="cmd">${esc(text)}</pre>${where}` +
+      `<div class="small muted">It runs with your permissions: it can read, change and delete what you can. Check it before you say yes.</div>`;
+    const row = document.createElement("div"); row.className = "ask-row";
+    row.innerHTML = `<button class="btn small" data-v="allow">Run it</button><button class="btn small ghost" data-v="always">Run commands without asking in this chat</button><button class="btn small ghost" data-v="deny">Don't run</button>`;
+    el.appendChild(row); scrollDown(true);
+    row.addEventListener("click", e => { const v = e.target.dataset.v; if (!v) return; row.remove(); el.classList.remove("ask"); resolve(v); });
+    S.gen.cancelAsk = () => { row.remove(); resolve("deny"); };
+  });
+}
 async function runTool(call) {
-  const kind = call.name === "write_file" ? "write" : "read", level = S.settings.perm, c = S.cur;
+  const c = S.cur;
+  if (call.name.startsWith("run_")) {
+    if (!TOOLS[call.name] || !agentOn()) return { state: "denied", content: "Agent mode is off, so nothing can be run." };
+    if (S.settings.agent !== "auto" && !c.grants.run) {
+      const v = await askRun(call);
+      if (v === "deny") return { state: "denied", content: "The user did not allow this command. Do not try it another way; ask what they would like instead." };
+      if (v === "always") c.grants.run = true;
+    }
+    try { let a = {}; try { a = JSON.parse(call.args || "{}"); } catch { throw new Error("The tool request was not valid."); } return { state: "ok", content: await TOOLS[call.name](a) }; }
+    catch (e) { return { state: "error", content: "Could not do that: " + (e.message || e) }; }
+  }
+  const kind = call.name === "write_file" ? "write" : "read", level = S.settings.perm;
   const needAsk = level === "ask" ? !c.grants[kind] : level === "read" ? kind === "write" && !c.grants.write : false;
   if (!TOOLS[call.name]) return { state: "error", content: "There is no tool called " + call.name + "." };
   if (needAsk) {
@@ -428,7 +488,13 @@ function systemPrompt() {
   if (STYLES[s.style].text) p.push(STYLES[s.style].text);
   if (s.instructions.trim()) p.push("The user's standing instructions:\n" + s.instructions.trim());
   if (S.cur.summary) p.push("This conversation continues an earlier one. Summary of the earlier part:\n" + S.cur.summary);
-  if (toolSpecs()) p.push(`The user has shared a folder named "${S.folder.name}". Use the tools to look at${S.folder.kind === "handle" ? " or change" : ""} files in it when that helps. Paths are relative to that folder. Do not guess what a file contains: read it.`);
+  if (agentOn()) {
+    const os = { darwin: "macOS", windows: "Windows", linux: "Linux" }[S.server.os] || S.server.os || "the computer";
+    p.push(`Agent mode is on. You can act on the user's ${os} computer with run_command${S.server.os === "darwin" ? " and run_applescript" : ""}. Commands start in ${S.server.agentDir || "the agent folder"} unless you give a folder. ` +
+      `Work in small steps: run something, read the result, then decide the next step. Prefer commands that only look before ones that change things. ` +
+      `Before anything that deletes, overwrites, sends, buys or cannot be undone, stop and ask the user in your reply instead of running it. When you are done, say plainly what you did and what you found.`);
+  }
+  if (S.folder && toolSpecs() && toolSpecs().some(t => t.function.name === "list_files")) p.push(`The user has shared a folder named "${S.folder.name}". Use the tools to look at${S.folder.kind === "handle" ? " or change" : ""} files in it when that helps. Paths are relative to that folder. Do not guess what a file contains: read it.`);
   return p.join("\n\n");
 }
 // thinkingKwargs tells the model's chat template whether to think first. Qwen-style
@@ -580,7 +646,8 @@ async function generate() {
   S.gen = { abort, chatId: c.id, msg: null, note: "" };
   drawTools();
   try {
-    for (let round = 0; round < 12; round++) {
+    const rounds = agentOn() ? 30 : 12;
+    for (let round = 0; round < rounds; round++) {
       const msg = { id: uid(), role: "assistant", content: "", reasoning: "", t: Date.now() };
       c.messages.push(msg); S.gen.msg = msg; S.gen.note = round ? "Reading what it found…" : (c.messages.length > 2 || !toolSpecs() ? "Reading your message…" : "Reading your message and how to use your folder…");
       drawThread(); scrollDown(true);
@@ -599,7 +666,7 @@ async function generate() {
         drawThread(); scrollDown(true);
       }
       if (abort.signal.aborted) break;
-      if (round === 11) c.messages.push({ id: uid(), role: "assistant", content: "", error: "Stopped after many steps in a row. Say \"continue\" if it should carry on." });
+      if (round === rounds - 1) c.messages.push({ id: uid(), role: "assistant", content: "", error: "Stopped after many steps in a row. Say \"continue\" if it should carry on." });
     }
   } finally {
     const last = c.messages[c.messages.length - 1];
@@ -733,6 +800,11 @@ function permMenu(a) {
       drawTools(); drawFine(); toast(PERMS[v].name + ": " + PERMS[v].d);
     });
 }
+function agentMenu(a) {
+  showPop(a, `<h5>Agent mode: may the model run things on this computer?</h5>` + Object.entries(AGENT).map(([k, p]) => mi(k, p.name, { on: S.settings.agent === k, check: 1, d: p.d })).join("") +
+    `<div class="note">Commands start in ${esc((S.server && S.server.agentDir) || "your home folder")}. Change that in Potluck's control panel, under Models, "On this computer". Only works on the computer running Potluck.</div>`,
+    v => { S.settings.agent = v; saveSettings(); drawTools(); toast(AGENT[v].name + ": " + AGENT[v].d); });
+}
 async function modelMenu(a) {
   try { S.models = await api("/potluck/models"); } catch (e) { S.models = { models: [], canSwitch: false, error: e.message }; }
   const m = S.models, cur = S.server && S.server.model && S.server.model.file;
@@ -844,6 +916,7 @@ const COMMANDS = [
   ["model", "Choose a model, or change its memory", () => modelMenu($("#model"))],
   ["attach", "Attach files", () => $("#file-input").click()],
   ["folder", "Attach a folder for the model to work in", () => pickFolder()],
+  ["agent", "Let the model run commands and drive apps on this computer", () => agentMenu($("#agent"))],
   ["permissions", "Choose what the model may do with your folder", () => S.folder ? permMenu($("#perm")) : toast("Attach a folder first; permissions apply to it.")],
   ["think", "Turn thinking before answering on or off", () => { S.settings.thinking = !S.settings.thinking; saveSettings(); drawTools(); toast(S.settings.thinking ? "The model will think first. Slower, sometimes better." : "Thinking is off."); }],
   ["usage", "See memory and usage", () => usageSheet()],
@@ -937,6 +1010,7 @@ function wire() {
   $("#chat-menu").onclick = e => chatMenu(e.currentTarget);
   $("#attach").onclick = e => attachMenu(e.currentTarget);
   $("#perm").onclick = e => permMenu(e.currentTarget);
+  $("#agent").onclick = e => agentMenu(e.currentTarget);
   $("#think").onclick = () => COMMANDS.find(c => c[0] === "think")[2]();
   $("#model").onclick = e => modelMenu(e.currentTarget);
   $("#usage").onclick = () => usageSheet();
@@ -989,14 +1063,21 @@ function wire() {
   window.addEventListener("dragover", e => e.preventDefault());
   window.addEventListener("drop", async e => {
     e.preventDefault(); depth = 0; $("#drop-hint").hidden = true;
-    const items = [...(e.dataTransfer.items || [])], files = [];
-    for (const it of items) {
-      if (it.kind !== "file") continue;
-      let h = null; try { h = it.getAsFileSystemHandle ? await it.getAsFileSystemHandle() : null; } catch { }
-      if (h && h.kind === "directory") { await setFolder({ name: h.name, kind: "handle", handle: h }); continue; }
-      const entry = it.webkitGetAsEntry && it.webkitGetAsEntry();
-      if (entry && entry.isDirectory) { toast("To attach a folder in this browser, use the paperclip button."); continue; }
-      const f = it.getAsFile(); f && files.push(f);
+    // Take everything out of the drop before waiting for anything: the browser empties the
+    // list at the first wait, which used to lose every file after the first.
+    const taken = [...(e.dataTransfer.items || [])].filter(it => it.kind === "file").map(it => ({
+      file: it.getAsFile(), entry: it.webkitGetAsEntry ? it.webkitGetAsEntry() : null,
+      handle: it.getAsFileSystemHandle ? it.getAsFileSystemHandle().catch(() => null) : Promise.resolve(null),
+    }));
+    const files = [];
+    for (const it of taken) {
+      if (it.entry && it.entry.isDirectory) {
+        const h = await it.handle;
+        if (h && h.kind === "directory") await setFolder({ name: h.name, kind: "handle", handle: h });
+        else toast("To attach a folder in this browser, use the paperclip button.");
+        continue;
+      }
+      if (it.file) files.push(it.file);
     }
     if (files.length) addFiles(files);
   });

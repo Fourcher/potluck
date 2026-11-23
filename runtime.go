@@ -41,6 +41,9 @@ type RuntimeSpec struct {
 	Tag     string  `json:"tag"`
 	Variant string  `json:"variant"`
 	Assets  []Asset `json:"assets"`
+	// Solo: the model runs on this computer alone, so an engine already installed here may
+	// be used instead (helpers need Potluck's own build on every computer).
+	Solo bool `json:"solo,omitempty"`
 }
 
 func safeJoin(root, name string) (string, error) {

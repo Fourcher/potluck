@@ -40,6 +40,19 @@ func (app *App) setRole(role string) error {
 		return errors.New("this computer already has a role; restart Potluck to change it")
 	}
 	switch role {
+	case "single":
+		// One computer does everything: it runs the models itself, with all it can spare,
+		// and lets go of a model's memory after half an hour unused.
+		app.cfg.Update(func(c *Config) {
+			c.Limits = defaultLimits(true)
+			c.Limits.Enabled, c.Limits.Pedal = true, 100
+			c.Single = true
+			if c.IdleUnload == 0 {
+				c.IdleUnload = 30
+			}
+		})
+		role = "main"
+		fallthrough
 	case "main":
 		if app.cfg.Get().Limits == (Limits{}) {
 			app.cfg.Update(func(c *Config) { c.Limits = defaultLimits(true) })
@@ -300,6 +313,90 @@ func (app *App) serveUI() error {
 		return nil, h.Start(in.ModelRef, in.Ctx, in.Solo)
 	})
 
+	api("/api/discover", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		var in struct {
+			Deep bool `json:"deep"`
+		}
+		_ = body(r, &in)
+		return h.Discover(in.Deep)
+	})
+
+	api("/api/use_found", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		var in struct {
+			Path string `json:"path"`
+			Run  bool   `json:"run"`
+			Ctx  int    `json:"ctx"`
+		}
+		if err := body(r, &in); err != nil {
+			return nil, err
+		}
+		file, err := h.UseFound(in.Path, in.Run, in.Ctx)
+		return map[string]string{"file": file}, err
+	})
+
+	api("/api/local", func(r *http.Request) (any, error) {
+		// Settings for using Potluck on this computer: engine, model folders, idle unload,
+		// one-computer mode, and where agent commands start.
+		var in struct {
+			EnginePath *string   `json:"enginePath"`
+			ModelDirs  *[]string `json:"modelDirs"`
+			IdleUnload *int      `json:"idleUnload"`
+			Single     *bool     `json:"single"`
+			AgentDir   *string   `json:"agentDir"`
+		}
+		if err := body(r, &in); err != nil {
+			return nil, err
+		}
+		if in.EnginePath != nil && *in.EnginePath != "" && *in.EnginePath != "potluck" {
+			if st, err := os.Stat(*in.EnginePath); err != nil || st.IsDir() {
+				return nil, errors.New("there is no program at " + *in.EnginePath)
+			}
+		}
+		if in.AgentDir != nil && *in.AgentDir != "" {
+			if st, err := os.Stat(*in.AgentDir); err != nil || !st.IsDir() {
+				return nil, errors.New("there is no folder at " + *in.AgentDir)
+			}
+		}
+		app.cfg.Update(func(c *Config) {
+			if in.EnginePath != nil {
+				c.EnginePath = *in.EnginePath
+			}
+			if in.ModelDirs != nil {
+				c.ModelDirs = *in.ModelDirs
+			}
+			if in.IdleUnload != nil && *in.IdleUnload >= 0 {
+				c.IdleUnload = *in.IdleUnload
+			}
+			if in.AgentDir != nil {
+				c.AgentDir = *in.AgentDir
+			}
+			if in.Single != nil {
+				c.Single = *in.Single
+				if c.Single {
+					c.Limits.Enabled = true
+					if c.Limits.Pedal < 50 {
+						c.Limits.Pedal = 100
+					}
+				}
+			}
+		})
+		if app.host != nil && in.Single != nil {
+			app.host.refreshNode(app.id.FP)
+		}
+		app.agent.mu.Lock()
+		app.agent.engineChoiceAt = time.Time{}
+		app.agent.mu.Unlock()
+		return nil, nil
+	})
+
 	api("/api/stop", func(r *http.Request) (any, error) {
 		h, err := needMain()
 		if err != nil {
@@ -467,6 +564,7 @@ func (app *App) state() map[string]any {
 		}
 		cl := h.cluster
 		pauseWhy, stale := h.pauseWhy, h.stale && h.cluster.Phase == "running"
+		asleep, lastCtx := h.asleep, h.lastCtx
 		h.mu.Unlock()
 		sort.Slice(nodes, func(i, j int) bool {
 			if nodes[i].IsMain != nodes[j].IsMain {
@@ -492,6 +590,7 @@ func (app *App) state() map[string]any {
 			"headChoice": c.HeadChoice, "chatURL": "http://127.0.0.1:" + strconv.Itoa(portChat),
 			"totalOffer": total, "biggestOffer": biggest, "lastModel": c.LastModel, "firewall": app.firewall(), "profiles": c.Profiles, "measured": c.Measured,
 			"shareChat": c.ShareChat, "sharedURL": shared, "dataDir": app.dir, "pauseWhy": pauseWhy, "stale": stale,
+			"lastCtx": lastCtx, "single": c.Single, "idleUnload": c.IdleUnload, "asleep": asleep, "enginePath": c.EnginePath, "modelDirs": c.ModelDirs, "agentDir": app.agentDir(),
 		}
 	}
 	if app.helper != nil {
