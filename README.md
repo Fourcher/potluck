@@ -4,13 +4,21 @@ Run one large AI model across the spare computers you already own.
 
 A laptop with 16 GB, an old gaming PC, a Linux box in the closet: none of them can hold a big model alone, but together they can. Potluck pools their memory, splits the model between them, and gives you one chat page and one OpenAI-compatible API on your main computer.
 
-Version 1.9.0. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second (3.2 on 21 November with the newer engine in 1.6.0).
+Version 1.10.0. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second (3.2 on 21 November with the newer engine in 1.6.0).
 
 **Recommended model to start with: Inkling 2 Mini** (`AtomicChat/Inkling-2-Mini-Uncensored-GGUF`), starred in the Models tab. Its 8.7 GB IQ2_M size ran on one Windows PC with 30 GB and a 4 GB GTX 1050 Ti at 2.5 to 3 words per second on 21 November 2026. This version has had its refusals removed: it answers what it is asked. It always thinks briefly before answering; switching Think off in the chat page keeps that as short as the model allows.
 
+## Install
+
+- **Mac** (Apple Silicon and Intel, macOS 14 or later): download [Potluck-mac.dmg](https://github.com/Fourcher/potluck/releases/latest/download/Potluck-mac.dmg), open it, drag Potluck to Applications, open it. Signed and notarized by Apple. A welcome window asks what the computer is for and starts a model with one button. Potluck then lives in the menu bar.
+- **Windows** (10 and 11): download [Potluck-windows.exe](https://github.com/Fourcher/potluck/releases/latest/download/Potluck-windows.exe) and open it. It installs itself for you (no administrator needed), adds Start menu and desktop shortcuts, and opens its own window, with an icon by the clock. Remove it in Settings > Apps. Not yet signed for Windows, so the first time Windows says "Windows protected your PC": click "More info", then "Run anyway".
+- **Linux**: `curl -fsSL https://github.com/Fourcher/potluck/releases/latest/download/install.sh | sh` installs it for your user in `~/.local/bin`, checks it against the release checksums, adds it to the applications menu and starts it.
+
+No account, nothing to pay, nothing sent anywhere but your own computers (and Hugging Face, for downloads).
+
 ## How you use it
 
-1. **On your main computer**, open Potluck and choose "This is my main computer". A control panel opens in your browser.
+1. **On your main computer**, open Potluck and choose "This is my main computer". Its control panel opens (in its own window, with the Mac and Windows apps).
 2. **Add your other computers.** Three ways, none of which needs an account, a password or a long link:
    - *Same network:* on the other computer, open a browser and type the short address the control panel shows (for example `192.168.1.20:7715`). One download, one double-click.
    - *USB stick:* click "Make setup kit", plug the stick into the other computer, double-click "Join".
@@ -53,6 +61,15 @@ Open `http://127.0.0.1:7720` on the main computer (or "Open chat" in the control
 - **Also:** thinking on or off, writing styles, your own standing instructions, stop, a preview panel for HTML and SVG the model writes, light and dark, keyboard shortcuts, and a phone-sized layout.
 
 Two things make it quick on slow hardware. Follow-up messages read only what is new: for Qwen-style models the page sends the conversation back exactly as it was written, where the standard route made the engine read every earlier token again on every turn (measured: 23 new tokens instead of 78). And there are no hidden extra requests, such as asking the model for a title.
+
+## Models: always current
+
+The Models page starts with **Our picks** (chosen for quality and how well they run at home, each with links to check), then **Trending**, **New this month** and **Most downloaded** on Hugging Face, refreshed every day (`tools/catalog.py`, run daily in this repository; Potluck fetches the newest list once a day). Every number shown is Hugging Face's own; every size is checked against your computers, and once a model has run here Potluck shows the speed it measured.
+
+## Your other AI setups, and other apps
+
+- **Potluck uses your other setups:** under Models, "Your other AI setups" adds LM Studio, Ollama, Jan, a router such as LiteLLM or OpenRouter, or any OpenAI-compatible server (with its key, if it needs one). LM Studio and Ollama running on the same computer are found by themselves. Their models appear in the chat's model menu next to Potluck's own, and in Potluck's `/v1/models`; chats for them go straight to that server.
+- **Other apps use Potluck:** under Running, "Let my other devices and apps use it" gives an address and a key. Put them in Apollo, Open WebUI, Msty or any app with a custom OpenAI-compatible server. It answers only on your home-network and Tailscale addresses, and only with the key; "Make a new key" locks out every device using the old one. In a browser on another device, open the address with `?key=…` once.
 
 ## With your own AI
 
@@ -148,10 +165,10 @@ What made the difference between 1.0 and 1.1, each measured on the cluster above
 
 ## Build
 
-    ./build.sh            # needs Go 1.23+; writes dist/potluck-<os>-<arch>
+    ./build.sh 1.10.0     # needs Go 1.26+; writes dist/potluck-<os>-<arch>, the Windows app, install.sh
     go test ./...
 
-Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs in `dist/` next to it: the USB kit and the join page hand them out. On a Mac the script also signs the Mac programs and builds `dist/Potluck.app` (set `POTLUCK_SIGN_ID` to a Developer ID to sign for distribution).
+Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs in `dist/` next to it: the USB kit and the join page hand them out. On a Mac the script also builds the Mac app (`macos/`, needs Xcode and xcodegen) into `dist/Potluck.app`, `dist/Potluck-mac.dmg` and the updater's zip, and writes `dist/SHA256SUMS.txt`. Set `POTLUCK_SIGN_ID` to a Developer ID and `POTLUCK_NOTARY_PROFILE` to a stored notarytool profile to sign and notarize.
 
 ## Tested so far
 
@@ -170,18 +187,18 @@ Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs 
 
 - Inkling 2 Mini cannot be stopped from thinking entirely: with Think off it still writes a short line of reasoning (shown folded under "Thought about it") before its answer.
 
-- Not signed with a paid developer certificate or notarized. Windows shows a SmartScreen warning; on macOS use `Potluck.app` (right-click, Open the first time), the USB kit, or the terminal one-liner on the join page. `build.sh` signs and notarizes when given a Developer ID and stored notary credentials.
+- The Mac app is signed and notarized. The Windows app is not signed yet, so Windows shows "Windows protected your PC" the first time (More info, Run anyway).
 - When a direct link cannot be made, traffic between the running computer and that helper is relayed through the main computer, which is slower.
 - With helpers in use, a follow-up message that does not continue exactly where the last answer ended (an edited message, or a model that hides its reasoning from the history) is read again from the start of the conversation.
 - The planner knows each helper's connection but not how fast its processor is.
 - A model file that is already on disk cannot be fetched by the helpers themselves: the head sends them their share over your network, which is slow the first time.
 - PirateFace is list-only: Potluck does not contain a torrent client. Copy the link into your own torrent app, then put the file in a models folder.
-- The chat page and API are for this computer only unless you switch on sharing with your network. Sharing has no password.
-- Pictures, scanned PDFs and PDFs whose fonts use their own private encoding cannot be read; the page says so instead of sending garbage. Older Office formats (.doc, .xls, .ppt) are not read.
+- The chat page and API are for this computer only unless you switch on sharing, which needs its key and answers only on home-network and Tailscale addresses.
+- Pictures are read only by models that can see (Potluck fetches a model's image add-on with it when there is one). Scanned PDFs and PDFs whose fonts use their own private encoding cannot be read as text; the page says so instead of sending garbage. Older Office formats (.doc, .xls, .ppt) are not read.
 - Working in a folder with write access needs a Chromium browser (Chrome, Edge). Safari and Firefox attach a read-only copy.
 - Dictation depends on the browser: some recognise speech on the computer, others send audio to the browser maker's service. The page says which. It needs a microphone and only works on the main computer itself or over a secure address.
 - Chats live in one browser on one computer. Use export and import in Settings to move them.
-- No start-at-login option, by design.
+- Nothing starts at login unless you switch on "Open Potluck when I log in" in the Mac app's settings (off by default).
 
 ## License
 
