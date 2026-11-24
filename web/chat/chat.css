@@ -244,3 +244,11 @@ body:not(.side-closed) #side-open{display:none}
 /* agent mode */
 .pillbtn.warn { color: var(--bad, #c0392b); }
 .tool pre.cmd { white-space: pre-wrap; word-break: break-word; background: var(--code-bg, rgba(127,127,127,.12)); padding: 8px 10px; border-radius: 6px; margin: 8px 0 6px; font-size: 13px; max-height: 320px; overflow: auto; }
+
+/* A task's question: Yes / No / your own words */
+.qcard{border:1px solid var(--accent);border-radius:14px;padding:14px 16px;margin:10px 0;background:color-mix(in srgb,var(--accent) 7%,transparent)}
+.qcard .qhead{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.qcard pre.cmd{max-height:260px;overflow:auto;white-space:pre-wrap}
+.qcard .qrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0 6px}
+.qcard .btn kbd{font-size:11px;opacity:.75;margin-left:6px;border:1px solid currentColor;border-radius:4px;padding:0 4px}
+.qcard .btn.no{background:var(--surface-2,#3a3a3a);color:var(--text);border:1px solid var(--line,#555)}

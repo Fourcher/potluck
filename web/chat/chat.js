@@ -179,6 +179,96 @@ function askConnector(call, tool) {
   });
 }
 
+// ---------- tasks: project chats run inside Potluck (sessions.go) ----------
+// The task keeps going with this page closed. The page follows it through a live event stream
+// and answers its questions: Yes (Enter), No (Backspace or Delete), or your own words typed in
+// the message box.
+const isTask = () => !!(S.cur && S.cur.project);
+function taskPolicy() {
+  return { files: S.settings.perm === "none" ? "ask" : S.settings.perm, commands: S.settings.agent === "auto" ? "auto" : "ask",
+    connectors: { ...(S.settings.connectors || {}) }, all: !!(S.cur && S.cur.approveAll), thinking: !!S.settings.thinking };
+}
+async function taskApi(path, body) {
+  const r = await fetch("/potluck/" + path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || "Potluck could not do that.");
+  return j;
+}
+const fromSMsg = m => m.role === "tool" ? { id: uid(), role: "tool", callId: m.callId, content: m.content, state: m.state } :
+  { id: uid(), role: m.role, content: m.content || "", reasoning: m.reasoning || "", calls: (m.calls || []).map(c => ({ id: c.id, name: c.name, args: c.args })), t: Date.parse(m.at) || Date.now() };
+async function taskLoad() {
+  closeTask();
+  if (!isTask() || !S.cur.session) return;
+  try {
+    const ss = await taskApi("sessions/" + S.cur.session);
+    S.cur.messages = (ss.messages || []).map(fromSMsg); S.task = { status: ss.status, error: ss.error, q: ss.question, live: null };
+    drawThread(); scrollDown(true);
+  } catch (e) { S.task = { status: "error", error: "This task is gone from Potluck: " + e.message }; }
+  taskFollow();
+}
+function closeTask() { if (S.es) { S.es.close(); S.es = null; } S.task = S.task && isTask() ? S.task : null; }
+function taskFollow() {
+  if (!S.cur.session || S.es) return;
+  const id = S.cur.session, chat = S.cur;
+  S.es = new EventSource("/potluck/sessions/" + id + "/events");
+  S.es.onmessage = e => {
+    if (S.cur !== chat) return;
+    const ev = JSON.parse(e.data), t = S.task = S.task || {};
+    if (ev.type === "delta") {
+      if (!t.live) { t.live = { id: uid(), role: "assistant", content: "", reasoning: "", calls: [], t: Date.now() }; chat.messages.push(t.live); drawThread(); }
+      t.live.content += ev.text || ""; t.live.reasoning += ev.reasoning || "";
+      const i = chat.messages.indexOf(t.live), el = $(`.msg[data-i="${i}"] .body`);
+      if (el) el.innerHTML = assistantHTML(t.live, true); scrollDown();
+    } else if (ev.type === "message") {
+      const m = fromSMsg(ev.msg);
+      if (ev.msg.role === "assistant" && t.live) chat.messages[chat.messages.indexOf(t.live)] = m; else if (ev.msg.role !== "user") chat.messages.push(m);
+      t.live = null; drawThread(); scrollDown(); saveChat(chat);
+    } else if (ev.type === "question") {
+      t.q = ev.question && !ev.question.answer ? ev.question : null; drawThread(); drawTools(); scrollDown(true);
+      if (t.q) { $("#input").focus(); notifyQuestion(t.q); }
+    } else if (ev.type === "status") {
+      t.status = ev.status; t.error = ev.error; drawTools(); drawThread();
+    }
+  };
+}
+async function taskSend(text) {
+  const c = S.cur;
+  if (S.task && S.task.q) return taskAnswer(text);
+  c.messages.push({ id: uid(), role: "user", content: text, t: Date.now() });
+  if (!c.title || c.title === c.project.name) c.title = c.project.name + ": " + titleFrom(text);
+  $("#input").value = ""; autosize(); drawHeader(); drawThread(); scrollDown(true);
+  try {
+    if (!c.session) { const ss = await taskApi("sessions", { project: c.project, policy: taskPolicy(), text }); c.session = ss.id; }
+    else await taskApi("sessions/" + c.session + "/message", { text });
+    S.task = { status: "working" }; await saveChat(c); taskFollow(); drawTools(); drawThread();
+  } catch (e) { toast(e.message); }
+}
+async function taskAnswer(answer) {
+  const q = S.task && S.task.q; if (!q) return;
+  try { await taskApi("sessions/" + S.cur.session + "/answer", { question: q.id, answer }); S.task.q = null; $("#input").value = ""; autosize(); drawThread(); drawTools(); }
+  catch (e) { toast(e.message); }
+}
+async function taskStop() { if (S.cur.session) { try { await taskApi("sessions/" + S.cur.session + "/stop", {}); } catch (e) { toast(e.message); } } }
+async function taskPolicySync() { if (isTask() && S.cur.session) { try { await taskApi("sessions/" + S.cur.session + "/policy", { policy: taskPolicy() }); } catch { } } }
+function questionCard(q) {
+  const kinds = { run: "term", write: "edit", read: "file", connector: "tool", ask: "bulb", plan: "shield" };
+  return `<div class="wrap"><div class="qcard" role="alertdialog" aria-label="${esc(q.title)}"><div class="qhead">${ic(kinds[q.kind] || "bulb")}<b>${esc(q.title)}</b></div>` +
+    (q.detail ? `<pre class="cmd">${esc(q.detail)}</pre>` : "") +
+    `<div class="qrow"><button class="btn" data-a="q-yes">Yes <kbd>Enter</kbd></button><button class="btn no" data-a="q-no">No <kbd>⌫</kbd></button>` +
+    (q.kind !== "ask" && q.kind !== "plan" ? `<button class="btn ghost small" data-a="q-always">Yes, and don't ask again in this task</button>` : "") +
+    `</div><div class="small muted">Or type your own answer in the message box and press Enter.</div></div></div>`;
+}
+// A question while the page is in the background: a desktop notification (phones get theirs from Potluck).
+function notifyQuestion(q) {
+  if (document.visibilityState === "visible" || !("Notification" in window)) return;
+  const show = () => { try { const n = new Notification("Potluck needs you", { body: q.title, tag: q.id }); n.onclick = () => { window.focus(); n.close(); }; } catch { } };
+  if (Notification.permission === "granted") show(); else if (Notification.permission !== "denied") Notification.requestPermission().then(p => p === "granted" && show());
+}
+function approveAllSheet() {
+  sheet(`<h3>Approve everything in this task?</h3><p>The model will run commands, change and delete files, use your connectors and control apps <b>without asking you anything</b>, until you switch this off. It can do anything you can do on this computer, and mistakes or a misunderstanding can't be taken back.</p><p class="muted small">This is meant for tasks you would leave running unattended and trust the model with. It is experimental.</p><div class="foot"><button class="btn ghost" data-a="close">Cancel</button><button class="btn danger" data-a="yes">I understand, approve everything</button></div>`,
+    { yes: () => { S.cur.approveAll = true; saveChat(S.cur); taskPolicySync(); closeSheet(); drawTools(); toast("Approve everything is on for this task."); } });
+}
+
 // ---------- projects: chats that work inside a code project on this computer ----------
 async function fsCall(body) {
   const r = await fetch("/potluck/fs", { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify(body), signal: S.gen && S.gen.abort.signal });
@@ -196,6 +286,7 @@ async function openProject(root, name) {
   S.cur = newChat(); S.cur.project = { root, name: name || root.split(/[\\/]/).pop() }; S.cur.title = S.cur.project.name;
   S.pending = []; S.folder = null;
   await loadProject();
+  closeTask(); S.task = null;
   drawAll(); $("#input").focus();
   if (window.innerWidth <= 820) document.body.classList.add("side-closed");
 }
@@ -229,6 +320,7 @@ async function openChat(id) {
   S.pending = []; S.folder = null;
   await restoreFolder();
   await loadProject();
+  S.task = null; await taskLoad();
   drawAll();
   $("#input").focus();
   if (window.innerWidth <= 820) document.body.classList.add("side-closed");
@@ -317,6 +409,11 @@ function drawThread() {
           endOfTurn ? `<div class="acts"><button class="icon" data-a="copy-msg" title="Copy" aria-label="Copy">${ic("copy")}</button><button class="icon" data-a="retry" title="Try again" aria-label="Try again">${ic("retry")}</button><button class="icon" data-a="speak" title="Read aloud" aria-label="Read aloud">${ic("speak")}</button><span class="stat">${esc(statLine(m.stats))}</span></div>` : "") + `</div>`;
     }
   });
+  if (isTask() && S.task) {
+    if (S.task.q) h += questionCard(S.task.q);
+    else if (S.task.status === "working" && !S.task.live) h += `<div class="wrap"><div class="waiting"><span class="spin"></span><span>${esc(S.task.error || "Working on it. You can close this page; the task keeps going in Potluck.")}</span></div></div>`;
+    else if (S.task.status === "error" || S.task.status === "stopped") h += `<div class="wrap"><div class="err">${esc(S.task.error || (S.task.status === "stopped" ? "Stopped." : "Something went wrong."))}</div></div>`;
+  }
   el.innerHTML = h;
 }
 function scrollDown(force) { const el = $("#thread"); if (force || el.scrollHeight - el.scrollTop - el.clientHeight < 160) el.scrollTop = el.scrollHeight; }
@@ -366,8 +463,11 @@ function drawTools() {
   $("#think").innerHTML = `${ic("bulb")}<span>Think</span>`; $("#think").classList.toggle("on", s.thinking);
   $("#model").innerHTML = `<span>${esc(modelTitle() || "No model")}</span>${ic("down")}`;
   $("#mic").classList.toggle("rec", !!S.rec);
-  const send = $("#send"); send.classList.toggle("stop", g); send.innerHTML = ic(g ? "stop" : "send"); send.title = g ? "Stop" : "Send";
-  send.disabled = !g && !$("#input").value.trim() && !S.pending.some(f => !f.skipped);
+  const tw = isTask() && S.task && S.task.status === "working" && !S.task.q && !$("#input").value.trim();
+  const send = $("#send"); send.classList.toggle("stop", g || tw); send.innerHTML = ic(g || tw ? "stop" : "send"); send.title = g || tw ? "Stop" : "Send";
+  send.disabled = !g && !tw && !$("#input").value.trim() && !S.pending.some(f => !f.skipped);
+  $("#input").placeholder = isTask() && S.task && S.task.q ? "Enter = Yes · Backspace = No · or type your own answer" : isTask() ? "Give the task to Potluck; it keeps going if you close this page" : "Message Potluck";
+  if (isTask() && S.cur.approveAll) { ag.innerHTML = `${ic("term")}<span>Approving everything</span>`; ag.classList.add("warn"); }
   const used = S.cur ? S.cur.used : 0, frac = Math.min(1, used / ctxSize()), C = 2 * Math.PI * 9;
   const ring = $("#usage"); ring.className = "ring" + (frac > 0.92 ? " full" : frac > 0.75 ? " warn" : "");
   ring.innerHTML = `<svg viewBox="0 0 24 24"><circle class="bg" cx="12" cy="12" r="9"/><circle class="fg" cx="12" cy="12" r="9" stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - frac)}"/></svg>`;
@@ -859,6 +959,7 @@ async function send(text) {
   if (!t && !files.some(f => !f.skipped)) return;
   if (t.startsWith("/") && !files.length && runSlash(t)) { $("#input").value = ""; autosize(); hideSlash(); drawTools(); return; }
   stopDictation();
+  if (isTask()) { S.pending = []; drawChips(); return taskSend(t); }
   const c = S.cur;
   c.messages.push({ id: uid(), role: "user", content: t, files: files.length ? files : undefined, t: Date.now() });
   if (!c.title) c.title = titleFrom(t || files[0].name);
@@ -979,8 +1080,12 @@ function permMenu(a) {
 }
 function agentMenu(a) {
   showPop(a, `<h5>Agent mode: may the model run things on this computer?</h5>` + Object.entries(AGENT).map(([k, p]) => mi(k, p.name, { on: S.settings.agent === k, check: 1, d: p.d })).join("") +
+    (isTask() ? `<hr>` + mi("all", S.cur.approveAll ? "Stop approving everything" : "Approve everything in this task…", { icon: "shield", d: "Nothing asks: commands, file changes, connectors, apps. Experimental; for tasks you leave running unattended.", danger: !S.cur.approveAll }) : "") +
     `<div class="note">Commands start in ${esc((S.server && S.server.agentDir) || "your home folder")}. Change that in Potluck's control panel, under Models, "On this computer". Only works on the computer running Potluck.</div>`,
-    v => { S.settings.agent = v; saveSettings(); drawTools(); toast(AGENT[v].name + ": " + AGENT[v].d); });
+    v => {
+      if (v === "all") return S.cur.approveAll ? (S.cur.approveAll = false, saveChat(S.cur), taskPolicySync(), drawTools(), toast("Approve everything is off.")) : approveAllSheet();
+      S.settings.agent = v; saveSettings(); taskPolicySync(); drawTools(); toast(AGENT[v].name + ": " + AGENT[v].d);
+    });
 }
 async function modelMenu(a) {
   try { S.models = await api("/potluck/models"); } catch (e) { S.models = { models: [], canSwitch: false, error: e.message }; }
@@ -1202,13 +1307,23 @@ function wire() {
     for (const f of files) { const p = f.webkitRelativePath.split("/").slice(1); if (!p.some(x => SKIP_DIRS.has(x) || x.startsWith("."))) map.set(p.join("/"), f); }
     setFolder({ name: root, kind: "snapshot", files: map });
   };
-  $("#composer").onsubmit = e => { e.preventDefault(); S.gen ? stop() : send(); };
+  $("#composer").onsubmit = e => { e.preventDefault(); if (isTask() && S.task && S.task.status === "working" && !S.task.q && !$("#input").value.trim()) return taskStop(); S.gen ? stop() : send(); };
+  $("#thread").addEventListener("click", e => {
+    const b = e.target.closest("[data-a^=q-]"); if (!b) return;
+    taskAnswer({ "q-yes": "yes", "q-no": "no", "q-always": "always" }[b.dataset.a]);
+  });
   input.oninput = () => { autosize(); S.slashSel = 0; drawSlash(); drawTools(); };
   input.onkeydown = e => {
     const slashOpen = !$("#slash").hidden;
     if (slashOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) { const n = $$("#slash .mi").length; S.slashSel = (S.slashSel + (e.key === "ArrowDown" ? 1 : n - 1)) % n; drawSlash(); return e.preventDefault(); }
     if (slashOpen && (e.key === "Tab" || e.key === "Enter")) { const b = $("#slash .sel"); if (b) { e.preventDefault(); input.value = ""; autosize(); hideSlash(); drawTools(); runSlash("/" + b.dataset.cmd); return; } }
     if (e.key === "Escape" && slashOpen) { hideSlash(); return e.preventDefault(); }
+    // A task's question is open: Enter on an empty box says yes, Backspace or Delete says no,
+    // anything typed is the answer in your own words.
+    if (isTask() && S.task && S.task.q && !input.value && !e.isComposing) {
+      if (e.key === "Enter") { e.preventDefault(); return taskAnswer("yes"); }
+      if (e.key === "Backspace" || e.key === "Delete") { e.preventDefault(); return taskAnswer("no"); }
+    }
     if (e.key === "Enter" && !e.isComposing) {
       const mod = e.metaKey || e.ctrlKey;
       if (S.settings.enterSends ? !e.shiftKey && !e.altKey : mod) { e.preventDefault(); if (!S.gen) send(); }
