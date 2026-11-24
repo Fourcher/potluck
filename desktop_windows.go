@@ -7,8 +7,13 @@
 package main
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -149,11 +154,23 @@ func winRun(ui string) {
 			systray.SetIcon(trayIcon)
 			systray.SetTooltip("Potluck")
 			open := systray.AddMenuItem("Open Potluck", "Show the Potluck window")
+			upd := systray.AddMenuItem("Check for updates", "Look for a newer Potluck")
 			systray.AddSeparator()
 			quit := systray.AddMenuItem("Quit Potluck", "Stop Potluck on this computer")
+			go func() { // once soon after starting, then daily
+				time.Sleep(30 * time.Second)
+				for {
+					if v, _, err := winLatest(); err == nil && newerVersion(v, version) {
+						upd.SetTitle("Update to Potluck " + v)
+					}
+					time.Sleep(24 * time.Hour)
+				}
+			}()
 			go func() {
 				for {
 					select {
+					case <-upd.ClickedCh:
+						go winUpdate(upd)
 					case <-open.ClickedCh:
 						winShow(ui)
 					case <-quit.ClickedCh:
@@ -196,6 +213,112 @@ func winShow(ui string) {
 		w.Navigate(ui)
 		w.Run()
 	}()
+}
+
+// winLatest finds the newest release's version and its Windows app.
+func winLatest() (string, string, error) {
+	var rel struct {
+		Tag    string `json:"tag_name"`
+		Assets []struct {
+			Name string `json:"name"`
+			URL  string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if err := httpGetJSON("https://api.github.com/repos/Fourcher/potluck/releases/latest", &rel); err != nil {
+		return "", "", err
+	}
+	want := "Potluck-windows.exe"
+	if runtime.GOARCH == "arm64" {
+		want = "Potluck-windows-arm64.exe"
+	}
+	for _, a := range rel.Assets {
+		if a.Name == want {
+			return strings.TrimPrefix(rel.Tag, "v"), a.URL, nil
+		}
+	}
+	return strings.TrimPrefix(rel.Tag, "v"), "", errors.New("this release has no Windows app")
+}
+
+// newerVersion compares dotted versions (1.10.0 > 1.9.2); anything after a dash is ignored.
+func newerVersion(a, b string) bool {
+	num := func(v string) []int {
+		v, _, _ = strings.Cut(v, "-")
+		var out []int
+		for _, p := range strings.Split(v, ".") {
+			n := 0
+			fmt.Sscanf(p, "%d", &n)
+			out = append(out, n)
+		}
+		return out
+	}
+	x, y := num(a), num(b)
+	for i := 0; i < len(x) || i < len(y); i++ {
+		p, q := 0, 0
+		if i < len(x) {
+			p = x[i]
+		}
+		if i < len(y) {
+			q = y[i]
+		}
+		if p != q {
+			return p > q
+		}
+	}
+	return false
+}
+
+// winUpdate downloads the newest Windows app, checks it against the release's checksums and
+// starts it; it installs itself over this one and opens again.
+func winUpdate(item *systray.MenuItem) {
+	item.SetTitle("Checking for updates…")
+	v, u, err := winLatest()
+	if err != nil {
+		item.SetTitle("Check for updates")
+		winMessage("Potluck", "Could not check for updates: "+err.Error())
+		return
+	}
+	if !newerVersion(v, version) {
+		item.SetTitle("Check for updates")
+		winMessage("Potluck", "You have the newest Potluck ("+version+").")
+		return
+	}
+	item.SetTitle("Downloading Potluck " + v + "…")
+	res, err := http.Get(u)
+	if err != nil {
+		item.SetTitle("Update to Potluck " + v)
+		winMessage("Potluck", "The download failed: "+err.Error())
+		return
+	}
+	data, _ := io.ReadAll(io.LimitReader(res.Body, 500<<20))
+	res.Body.Close()
+	sums := strings.TrimSuffix(u, filepath.Base(u)) + "SHA256SUMS.txt"
+	sres, err := http.Get(sums)
+	ok := false
+	if err == nil {
+		b, _ := io.ReadAll(io.LimitReader(sres.Body, 1<<20))
+		sres.Body.Close()
+		got := sha256.Sum256(data)
+		for _, line := range strings.Split(string(b), "\n") {
+			f := strings.Fields(line)
+			if len(f) == 2 && f[1] == filepath.Base(u) && f[0] == hex.EncodeToString(got[:]) {
+				ok = true
+			}
+		}
+	}
+	if !ok {
+		item.SetTitle("Update to Potluck " + v)
+		winMessage("Potluck", "The download did not match its checksum, so it was not installed.")
+		return
+	}
+	tmp := filepath.Join(os.TempDir(), "Potluck-update-"+v+".exe")
+	if err := os.WriteFile(tmp, data, 0o755); err != nil {
+		winMessage("Potluck", "Could not save the update: "+err.Error())
+		return
+	}
+	// The new program installs itself over this one (taskkill in winInstall ends this process).
+	if err := exec.Command(tmp).Start(); err != nil {
+		winMessage("Potluck", "Could not start the update: "+err.Error())
+	}
 }
 
 var (
