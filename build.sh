@@ -42,7 +42,11 @@ if [ "$(uname -s)" = Darwin ] && command -v codesign >/dev/null 2>&1; then
   rm -rf "$APP"
   DD="${POTLUCK_MAC_BUILD:-$PWD/dist/mac-build}"
   (cd macos && xcodegen generate >/dev/null && xcodebuild build -project PotluckMac.xcodeproj -scheme Potluck -configuration Release \
-     -derivedDataPath "$DD" MARKETING_VERSION="$VERSION" CODE_SIGNING_ALLOWED=NO -quiet)
+     -derivedDataPath "$DD" -destination "generic/platform=macOS" ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO MARKETING_VERSION="$VERSION" CODE_SIGNING_ALLOWED=NO -quiet)
+  case "$(lipo -archs "$DD/Build/Products/Release/Potluck.app/Contents/MacOS/Potluck")" in
+    *arm64*x86_64* | *x86_64*arm64*) ;;
+    *) echo "the app is not built for both Apple Silicon and Intel Macs"; exit 1 ;;
+  esac
   cp -R "$DD/Build/Products/Release/Potluck.app" "$APP"
   lipo -create -output "$APP/Contents/Resources/potluck" dist/potluck-darwin-arm64 dist/potluck-darwin-amd64
   # The other platforms' programs travel inside the app so it can hand them to helpers.
