@@ -422,13 +422,28 @@ func (app *App) serveUI() error {
 			return map[string]any{"phones": h.Phones()}, nil
 		}
 		var in struct {
-			Action string `json:"action"` // pair | stop | forget
+			Action string `json:"action"` // pair | stop | forget | push
 			ID     string `json:"id"`
+			PushConfig
 		}
 		if err := body(r, &in); err != nil {
 			return nil, err
 		}
 		switch in.Action {
+		case "push": // the developer account's push key, for alerts with answer buttons
+			pc := in.PushConfig
+			if pc.KeyPath == "" {
+				h.cfg.Update(func(c *Config) { c.Push = nil })
+				return map[string]bool{"ok": true}, nil
+			}
+			if pc.Topic == "" {
+				pc.Topic = "io.github.fourcher.potluck"
+			}
+			if _, err := apnsToken(pc); err != nil {
+				return nil, err
+			}
+			h.cfg.Update(func(c *Config) { c.Push = &pc })
+			return map[string]bool{"ok": true}, nil
 		case "pair":
 			return h.PairingCode()
 		case "stop":

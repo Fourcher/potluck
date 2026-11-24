@@ -36,9 +36,11 @@ import (
 
 // PhoneKey is a paired phone. Only a hash of its key is kept.
 type PhoneKey struct {
-	Name  string    `json:"name"`
-	Hash  string    `json:"hash"`
-	Added time.Time `json:"added"`
+	Name      string    `json:"name"`
+	Hash      string    `json:"hash"`
+	Added     time.Time `json:"added"`
+	PushToken string    `json:"pushToken,omitempty"` // Apple push token, when the app allowed notifications
+	PushEnv   string    `json:"pushEnv,omitempty"`
 }
 
 // phoneAPI: the only paths a phone may use besides /phone/*. Everything else on the chat
@@ -165,6 +167,61 @@ func (h *Host) phoneHandler() http.Handler {
 				fail(w, err)
 				return
 			}
+			writeJSON(w, map[string]bool{"ok": true})
+		case r.URL.Path == "/phone/questions" && r.Method == http.MethodGet:
+			// What the person's tasks are waiting on, to answer from the phone (sessions.go).
+			type item struct {
+				*Question
+				Task string `json:"task"`
+			}
+			var out []item
+			st := h.sessionStore()
+			for _, q := range st.questions() {
+				title := ""
+				if s := st.get(q.Session); s != nil {
+					s.mu.Lock()
+					title = s.Title
+					s.mu.Unlock()
+				}
+				out = append(out, item{q, title})
+			}
+			writeJSON(w, map[string]any{"questions": out})
+		case r.URL.Path == "/phone/answer" && r.Method == http.MethodPost:
+			var in struct {
+				Session  string `json:"session"`
+				Question string `json:"question"`
+				Answer   string `json:"answer"`
+			}
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&in); err != nil {
+				fail(w, err)
+				return
+			}
+			st := h.sessionStore()
+			s := st.get(in.Session)
+			if s == nil {
+				fail(w, errors.New("that task is gone"))
+				return
+			}
+			if err := st.answer(s, in.Question, in.Answer); err != nil {
+				fail(w, err)
+				return
+			}
+			writeJSON(w, map[string]bool{"ok": true})
+		case r.URL.Path == "/phone/push" && r.Method == http.MethodPost:
+			// The phone's push token, so Potluck can alert it when a task needs an answer.
+			var in struct {
+				Token string `json:"token"`
+				Env   string `json:"env"` // "development" (built from Xcode) or "production"
+			}
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&in); err != nil {
+				fail(w, err)
+				return
+			}
+			h.cfg.Update(func(c *Config) {
+				p := c.Phones[id]
+				p.PushToken, p.PushEnv = in.Token, in.Env
+				c.Phones[id] = p
+			})
 			writeJSON(w, map[string]bool{"ok": true})
 		case phoneAPI[r.URL.Path] && chat != nil:
 			chat.ServeHTTP(w, r)

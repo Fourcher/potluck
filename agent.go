@@ -57,6 +57,7 @@ type Config struct {
 	AgentDir string `json:"agentDir,omitempty"`
 	// Phones: paired iPhones, by id. Each holds a key; only its hash is kept here.
 	Phones map[string]PhoneKey `json:"phones,omitempty"`
+	Push   *PushConfig         `json:"push,omitempty"` // Apple push key for phone alerts (apns.go)
 }
 
 // ConfigStore saves Config to disk on every change.

@@ -412,7 +412,10 @@ func (st *sessionStore) keepGrants(root string, g *Grants) {
 }
 
 func (h *Host) sessionStore() *sessionStore {
-	h.sessOnce.Do(func() { h.sess = newSessionStore(h, h.a.dir) })
+	h.sessOnce.Do(func() {
+		h.sess = newSessionStore(h, h.a.dir)
+		h.sess.notify = h.pushQuestion // paired phones hear about every question (apns.go)
+	})
 	return h.sess
 }
 
