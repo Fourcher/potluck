@@ -46,6 +46,8 @@ final class AppModel {
 
     // What the computer is doing
     var state: ServerState?
+    /// Questions tasks are waiting on (Potluck's sessions), refreshed with the status.
+    var questions: [TaskQuestion] = []
     var models: [ModelEntry] = []
 
     // Chats, kept on this phone only
@@ -118,6 +120,7 @@ final class AppModel {
                     }
                     let s = try await client.state()
                     if s != self.state { self.state = s }
+                    if let q = try? await client.questions(), q != self.questions { self.questions = q }
                     self.link = .connected
                 } catch PotluckError.notPaired {
                     self.notPaired = true
@@ -136,6 +139,33 @@ final class AppModel {
     }
 
     func stopPolling() { pollTask?.cancel() }
+
+    /// Answers a task's question: "yes", "no", or the person's own words.
+    func answer(_ q: TaskQuestion, _ text: String) async throws {
+        guard let client else { return }
+        try await client.answer(session: q.session, question: q.id, answer: text)
+        questions.removeAll { $0.id == q.id }
+    }
+
+    /// Answers from a notification button, when the app may not even be open.
+    func answer(session: String, question: String, text: String) async {
+        if client == nil { return }
+        if client?.addr == nil { _ = try? await client?.connect() }
+        try? await client?.answer(session: session, question: question, answer: text)
+        questions.removeAll { $0.id == question }
+    }
+
+    func registerPush(token: String) {
+        #if DEBUG
+        let dev = true
+        #else
+        let dev = false
+        #endif
+        Task {
+            if client?.addr == nil { _ = try? await client?.connect() }
+            try? await client?.registerPush(token: token, development: dev)
+        }
+    }
 
     func refreshNow() {
         startPolling()

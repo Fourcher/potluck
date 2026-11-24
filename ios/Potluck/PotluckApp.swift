@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct PotluckApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var phase
 
@@ -18,7 +19,8 @@ struct PotluckApp: App {
                 }
         }
         .onChange(of: phase) { _, p in
-            if p == .active, model.computer != nil { model.startPolling() }
+            delegate.model = model
+            if p == .active, model.computer != nil { model.startPolling(); delegate.enableAlerts() }
             if p == .background { model.stopPolling(); model.scheduleSave() }
         }
     }

@@ -16,6 +16,7 @@ struct ChatView: View {
         let chat = model.current
         VStack(spacing: 0) {
             StatusBar(showModels: $showModels)
+            QuestionsBanner()
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 18) {

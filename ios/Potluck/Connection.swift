@@ -260,6 +260,32 @@ final class PotluckClient: @unchecked Sendable {
         }
     }
 
+    // MARK: tasks waiting on the person (Potluck's sessions)
+
+    func questions() async throws -> [TaskQuestion] {
+        struct R: Decodable { let questions: [TaskQuestion]? }
+        let r: R = try await get("/phone/questions")
+        return r.questions ?? []
+    }
+
+    func answer(session: String, question: String, answer: String) async throws {
+        try await post("/phone/answer", ["session": session, "question": question, "answer": answer])
+    }
+
+    func registerPush(token: String, development: Bool) async throws {
+        try await post("/phone/push", ["token": token, "env": development ? "development" : "production"])
+    }
+
+    private func post(_ path: String, _ body: [String: String]) async throws {
+        var req = try request(path)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 20
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, resp) = try await session.data(for: req)
+        try Self.check(data, resp)
+    }
+
     func close() { session.invalidateAndCancel() }
 
     // MARK: - plumbing
@@ -344,4 +370,15 @@ enum Keychain {
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
         SecItemDelete(q as CFDictionary)
     }
+}
+
+
+/// Something a task running in Potluck is waiting on: yes, no, or an answer in your own words.
+struct TaskQuestion: Codable, Identifiable, Equatable {
+    let id: String
+    let session: String
+    let title: String
+    let detail: String?
+    let kind: String
+    let task: String?
 }

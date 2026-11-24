@@ -10,7 +10,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.8.0"
+    MARKETING_VERSION: "1.10.0"
     CURRENT_PROJECT_VERSION: "1"
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
@@ -32,6 +32,10 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
         INFOPLIST_KEY_NSCameraUsageDescription: Potluck uses the camera to scan the pairing code shown on your computer.
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: Potluck connects to your own computer on your home network to chat with the AI model running there.
+    entitlements:
+      path: Potluck/Potluck.entitlements
+      properties:
+        aps-environment: development # Apple push alerts for questions from tasks (apns.go)
     info:
       path: Potluck/Info.plist
       properties:
