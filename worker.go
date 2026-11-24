@@ -72,6 +72,21 @@ func (w *Helper) SetManual(addr string) {
 	if addr != "" && !strings.Contains(addr, ":") {
 		addr += ":" + strconv.Itoa(portLink)
 	}
+	// Typing a different main computer's address means "join that one instead": drop the old
+	// pairing, or the helper would keep refusing the new main as "not the one I'm paired with".
+	if addr != "" {
+		c := w.cfg.Get()
+		host, _, _ := net.SplitHostPort(addr)
+		known := c.MainFP == ""
+		for _, a := range append([]string{c.MainAddr}, c.MainAlts...) {
+			if h, _, err := net.SplitHostPort(a); (err == nil && h == host) || a == host {
+				known = true
+			}
+		}
+		if !known {
+			w.cfg.Update(func(c *Config) { c.MainFP, c.MainAddr, c.MainName, c.MainAlts = "", "", "", nil })
+		}
+	}
 	w.mu.Lock()
 	w.manual = addr
 	w.mu.Unlock()
