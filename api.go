@@ -377,6 +377,81 @@ func (app *App) serveUI() error {
 		return nil, errors.New("unknown action")
 	})
 
+	// The Potluck helper's own model: where it runs and whether it is ready; start or stop it.
+	api("/api/helper", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		if r.Method == http.MethodPost {
+			var in struct{ Action string }
+			if err := body(r, &in); err != nil {
+				return nil, err
+			}
+			switch in.Action {
+			case "start":
+				h.EnsureHelper()
+			case "stop":
+				h.StopHelper()
+			}
+		}
+		return h.HelperStatus(), nil
+	})
+
+	// "Ask Potluck" in the control panel (the Windows and Linux apps): a helper conversation.
+	// GET ?id= reads it; POST {text, id?} sends a message (a new conversation without id);
+	// POST {id, question, answer} answers its question; POST {id, stop: true} ends it.
+	api("/api/ask", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		st := h.sessionStore()
+		if r.Method == http.MethodGet {
+			s := st.get(r.URL.Query().Get("id"))
+			if s == nil || s.Kind != "helper" {
+				return nil, errors.New("no such conversation")
+			}
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			return map[string]any{"id": s.ID, "status": s.Status, "error": s.Error, "messages": s.Messages, "question": s.Question, "helper": h.HelperStatus()}, nil
+		}
+		var in struct {
+			ID, Text, Question, Answer string
+			Stop                       bool
+		}
+		if err := body(r, &in); err != nil {
+			return nil, err
+		}
+		var s *Session
+		if in.ID != "" {
+			if s = st.get(in.ID); s == nil || s.Kind != "helper" {
+				return nil, errors.New("no such conversation")
+			}
+		}
+		switch {
+		case s != nil && in.Stop:
+			st.stop(s)
+		case s != nil && in.Question != "":
+			err = st.answer(s, in.Question, in.Answer)
+		case strings.TrimSpace(in.Text) != "":
+			if s == nil {
+				h.EnsureHelper()
+				s = st.create(nil, Policy{})
+				s.mu.Lock()
+				s.Kind, s.Title = "helper", "Potluck helper"
+				s.mu.Unlock()
+			}
+			err = st.send(s, in.Text)
+		default:
+			return nil, errors.New("nothing to send")
+		}
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"id": s.ID}, nil
+	})
+
 	api("/api/discover", func(r *http.Request) (any, error) {
 		h, err := needMain()
 		if err != nil {

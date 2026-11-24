@@ -68,6 +68,7 @@ func (st *sessionStore) handle(w http.ResponseWriter, r *http.Request, mutate bo
 			Project *ProjectRef `json:"project"`
 			Policy  Policy      `json:"policy"`
 			Text    string      `json:"text"`
+			Kind    string      `json:"kind"` // "helper": the Potluck helper
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&in); err != nil {
 			fail(w, err)
@@ -79,7 +80,16 @@ func (st *sessionStore) handle(w http.ResponseWriter, r *http.Request, mutate bo
 				return
 			}
 		}
+		if in.Kind == "helper" {
+			in.Project = nil
+			st.host.EnsureHelper()
+		}
 		s := st.create(in.Project, in.Policy)
+		if in.Kind == "helper" {
+			s.mu.Lock()
+			s.Kind, s.Title = "helper", "Potluck helper"
+			s.mu.Unlock()
+		}
 		if strings.TrimSpace(in.Text) != "" {
 			if err := st.send(s, in.Text); err != nil {
 				fail(w, err)

@@ -21,6 +21,9 @@ import (
 // calling a tool.
 
 func (st *sessionStore) maxSteps(s *Session) int {
+	if s.Kind == "helper" {
+		return 16
+	}
 	if s.Project != nil {
 		return 300 // a coding task takes many steps
 	}
@@ -96,6 +99,10 @@ func (st *sessionStore) addMsg(s *Session, m SMsg) {
 // ---------- what the model is told ----------
 
 func (st *sessionStore) systemPrompt(s *Session) string {
+	if s.Kind == "helper" {
+		osName := map[string]string{"darwin": "Mac", "windows": "Windows PC", "linux": "Linux computer"}[runtime.GOOS]
+		return helperSystem + "\n\nThe person is at their " + osName + ", the main computer of their Potluck."
+	}
 	h := st.host
 	data := h.a.dir
 	ctxTok := h.lastCtx
@@ -181,6 +188,9 @@ func spec(name, desc, params string) toolSpec {
 }
 
 func (st *sessionStore) tools(ctx context.Context, s *Session) []toolSpec {
+	if s.Kind == "helper" {
+		return helperTools()
+	}
 	s.mu.Lock()
 	proj, pol := s.Project, s.Policy
 	s.mu.Unlock()
@@ -348,8 +358,24 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 	s.mu.Lock()
 	thinking := s.Policy.Thinking
 	s.mu.Unlock()
+	model := "potluck"
+	if s.Kind == "helper" {
+		model, thinking = "potluck-helper", false // the helper's own small model, answering at once
+		// Its model may still be downloading the first time: wait for it rather than fail.
+		st.host.EnsureHelper()
+		for st.host.HelperStatus().Phase != "ready" {
+			if p := st.host.HelperStatus(); p.Phase == "error" {
+				return SMsg{}, errors.New("the Potluck helper could not start: " + p.Note)
+			}
+			select {
+			case <-ctx.Done():
+				return SMsg{}, ctx.Err()
+			case <-time.After(2 * time.Second):
+			}
+		}
+	}
 	body := map[string]any{
-		"model": "potluck", "stream": true, "messages": st.apiMessages(s), "tools": st.tools(ctx, s),
+		"model": model, "stream": true, "messages": st.apiMessages(s), "tools": st.tools(ctx, s),
 		"stream_options":       map[string]bool{"include_usage": true},
 		"chat_template_kwargs": map[string]any{"enable_thinking": thinking, "reasoning_effort": map[bool]string{true: "high", false: "none"}[thinking]},
 	}
@@ -475,7 +501,7 @@ func (st *sessionStore) compactIfNeeded(ctx context.Context, s *Session) error {
 	body, _ := json.Marshal(map[string]any{"model": "potluck", "messages": []map[string]string{
 		{"role": "system", "content": "Summarise this work log for the assistant that continues it: the task, what was done, what was found, files changed, decisions, and what is left. Be complete and specific; it replaces the log."},
 		{"role": "user", "content": trimTo(b.String(), ctxTok*2)},
-	}, "chat_template_kwargs": map[string]any{"enable_thinking": false, "reasoning_effort": "none"}, "reasoning_budget_tokens": 0})
+	}, "chat_template_kwargs": map[string]any{"enable_thinking": false, "reasoning_effort": "none"}, "reasoning_budget_tokens": 1})
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://127.0.0.1:"+strconv.Itoa(portChat)+"/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	res, err := sessionHTTP.Do(req)
@@ -537,6 +563,9 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 		root = proj.Root
 	}
 	out, err := func() (string, error) {
+		if s.Kind == "helper" && call.Name != "ask_user" {
+			return st.runHelperTool(ctx, s, call.Name, args)
+		}
 		switch call.Name {
 		case "run_command", "run_applescript":
 			kind, cmd := "shell", str("command")
@@ -574,6 +603,13 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 			}
 			return text, err
 		case "ask_user":
+			if s.Kind == "helper" {
+				ans, err := st.ask(ctx, s, "ask", str("question"), "")
+				if err != nil {
+					return "", err
+				}
+				return "The person answered: " + ans, nil
+			}
 			ans, err := st.ask(ctx, s, "ask", str("question"), "")
 			if err != nil {
 				return "", err
@@ -719,6 +755,8 @@ func thinkBudget(body map[string]any, on bool) {
 		body["reasoning_budget_tokens"] = 4096
 		body["reasoning_budget_message"] = "Time to stop thinking and give the answer."
 	} else {
-		body["reasoning_budget_tokens"] = 0
+		// 1, not 0: a budget of exactly 0 makes some model files (Inkling 2 Mini IQ2_M,
+		// measured on 2026-11-24) repeat their own markers instead of answering. 1 is as fast.
+		body["reasoning_budget_tokens"] = 1
 	}
 }

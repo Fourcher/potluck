@@ -182,7 +182,6 @@ func (h *Host) mergedModels(w http.ResponseWriter, r *http.Request, api http.Han
 	writeJSON(w, list)
 }
 
-
 // connChatModels lists the connections' models for the chat's model menu.
 func (h *Host) connChatModels() []chatModel {
 	var out []chatModel

@@ -813,3 +813,77 @@ window.addEventListener("hashchange", () => { const h = location.hash.slice(1); 
 
 refresh();
 setInterval(refresh, 1500);
+
+// ---------- Ask Potluck: the built-in helper (helper.go) ----------
+// A small model of Potluck's own sets Potluck up and answers questions, using Potluck's own
+// controls. The Mac app has its own window for this; here it is a drawer in the corner.
+(function askPotluck() {
+  const ACTIONS = { get_status: "Looked at your computers", list_drives: "Looked at your drives", set_data_folder: "Moving Potluck's folder",
+    recommend_model: "Compared models for your computers", install_model: "Starting a model", stop_model: "Stopping the model",
+    add_computer_steps: "Looked up how to add a computer", pair_phone: "Made a phone pairing code", add_ai_connection: "Connecting your other AI app" };
+  const EXAMPLES = ["Install the best model my computers can run", "Help me add my other computers", "Put Potluck on another drive", "Connect my iPhone"];
+  let id = null, timer = null, last = null;
+  // Bold, code and list bullets; everything escaped first.
+  const lightMd = t => esc(t).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>").replace(/^\s*[-*] /gm, "• ");
+  const css = document.createElement("style");
+  css.textContent = `.ask-btn{position:fixed;right:20px;bottom:20px;z-index:20;border:0;border-radius:999px;padding:12px 18px;background:var(--accent);color:var(--accent-ink);font:600 15px system-ui;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
+  .ask{position:fixed;right:20px;bottom:76px;z-index:21;width:min(420px,calc(100vw - 40px));height:min(560px,calc(100vh - 120px));display:none;flex-direction:column;background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.25);overflow:hidden}
+  .ask.open{display:flex}.ask-log{flex:1;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:8px}
+  .ask-me{align-self:flex-end;background:var(--soft);padding:8px 11px;border-radius:10px;max-width:85%;white-space:pre-wrap}
+  .ask-it{background:var(--bg);padding:8px 11px;border-radius:10px;max-width:92%;white-space:pre-wrap}
+  .ask-act{color:var(--muted);font-size:13px}.ask-q{padding:12px;background:var(--soft);border-top:1px solid var(--line)}
+  .ask-in{display:flex;gap:8px;padding:10px;border-top:1px solid var(--line)}.ask-in textarea{flex:1;resize:none;font:inherit;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--bg);color:var(--ink)}`;
+  document.head.appendChild(css);
+  const btn = document.createElement("button");
+  btn.className = "ask-btn"; btn.textContent = "Ask Potluck"; btn.setAttribute("aria-expanded", "false");
+  const box = document.createElement("div");
+  box.className = "ask"; box.setAttribute("role", "dialog"); box.setAttribute("aria-label", "Ask Potluck");
+  box.innerHTML = `<div class="row spread" style="padding:10px 14px;border-bottom:1px solid var(--line)"><b>Ask Potluck</b><span><button class="link" data-x="new">New</button> · <button class="link" data-x="close">Close</button></span></div>
+    <div class="ask-log" aria-live="polite"></div><div class="ask-q" hidden></div>
+    <div class="ask-in"><textarea rows="2" placeholder="Ask anything, like &quot;install the best model I can run&quot;" aria-label="Ask Potluck"></textarea><button class="btn" data-x="send">Send</button></div>`;
+  document.body.append(btn, box);
+  const log = box.querySelector(".ask-log"), qbox = box.querySelector(".ask-q"), ta = box.querySelector("textarea");
+  const intro = () => { log.innerHTML = `<p class="muted small">Potluck's own helper sets things up for you and answers questions. It asks before anything big.</p>` + EXAMPLES.map(e => `<button class="link" data-ex="${esc(e)}" style="text-align:left">${esc(e)}</button>`).join(""); };
+  intro();
+  btn.onclick = () => { const o = box.classList.toggle("open"); btn.setAttribute("aria-expanded", String(o)); if (o) ta.focus(); };
+  const send = async text => {
+    text = (text || "").trim(); if (!text) return;
+    if (!id) log.innerHTML = "";
+    log.insertAdjacentHTML("beforeend", `<div class="ask-me">${esc(text)}</div><div class="ask-act" data-wait>Working…</div>`);
+    try { const r = await api("/api/ask", { id, text }); id = r.id; poll(); } catch (e) { log.insertAdjacentHTML("beforeend", `<div class="err">${esc(e.message)}</div>`); }
+  };
+  const poll = () => { clearTimeout(timer); timer = setTimeout(tick, 900); };
+  async function tick() {
+    if (!id) return;
+    let s; try { s = await api("/api/ask?id=" + encodeURIComponent(id)); } catch (e) { return poll(); }
+    const key = JSON.stringify([s.messages.length, s.status, s.question && s.question.id, s.helper && s.helper.note]);
+    if (key !== last) {
+      last = key;
+      log.innerHTML = s.messages.map(m => m.role === "user" ? `<div class="ask-me">${esc(m.content)}</div>`
+        : m.role === "assistant" ? (m.content && m.content.trim() ? `<div class="ask-it">${lightMd(m.content.trim())}</div>` : "")
+        : m.name && m.name !== "ask_user" ? `<div class="ask-act">✓ ${esc(ACTIONS[m.name] || m.name)}${m.state === "error" ? " (didn't work)" : ""}</div>` : "").join("")
+        + (s.status === "working" ? `<div class="ask-act">${s.helper && s.helper.phase !== "ready" ? "Getting the helper ready" + (s.helper.note ? ": " + esc(s.helper.note) : "…") : "Working…"}</div>` : "")
+        + (s.error ? `<div class="err">${esc(s.error)}</div>` : "");
+      log.scrollTop = log.scrollHeight;
+      if (s.question) {
+        qbox.hidden = false;
+        qbox.innerHTML = `<b>${esc(s.question.title)}</b>${s.question.detail ? `<p class="small muted">${esc(s.question.detail)}</p>` : ""}
+          <div class="row" style="gap:8px;margin-top:6px"><button class="btn sm" data-ans="yes">Yes</button><button class="btn sm ghost" data-ans="no">No</button>
+          <input type="text" placeholder="Or type your answer" style="flex:1" aria-label="Your answer"></div>`;
+        qbox.dataset.q = s.question.id;
+      } else { qbox.hidden = true; }
+    }
+    if (s.status === "working" || s.status === "waiting") poll();
+  }
+  const answer = async a => { const q = qbox.dataset.q; qbox.hidden = true; try { await api("/api/ask", { id, question: q, answer: a }); } catch (e) {} last = null; poll(); };
+  box.addEventListener("click", e => {
+    const t = e.target.closest("button"); if (!t) return;
+    if (t.dataset.ex) return send(t.dataset.ex);
+    if (t.dataset.ans) return answer(t.dataset.ans);
+    if (t.dataset.x === "send") { const v = ta.value; ta.value = ""; return send(v); }
+    if (t.dataset.x === "close") { box.classList.remove("open"); btn.setAttribute("aria-expanded", "false"); return; }
+    if (t.dataset.x === "new") { if (id) api("/api/ask", { id, stop: true }).catch(() => {}); id = null; last = null; clearTimeout(timer); qbox.hidden = true; intro(); }
+  });
+  ta.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); const v = ta.value; ta.value = ""; send(v); } });
+  qbox.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.matches("input") && e.target.value.trim()) answer(e.target.value.trim()); });
+})();

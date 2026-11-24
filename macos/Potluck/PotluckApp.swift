@@ -17,9 +17,14 @@ struct PotluckApp: App {
         .menuBarExtraStyle(.window)
 
         Window("Welcome to Potluck", id: "welcome") {
-            WelcomeView().environment(delegate.engine)
+            WelcomeView().environment(delegate.engine).environment(delegate.helper)
         }
         .windowResizability(.contentSize)
+
+        Window("Ask Potluck", id: "helper") {
+            HelperView().environment(delegate.helper)
+        }
+        .defaultSize(width: 560, height: 640)
 
         Window("Potluck", id: "chat") {
             WebView(url: PotluckEngine.chatURL).frame(minWidth: 720, minHeight: 520)
@@ -42,6 +47,7 @@ struct PotluckApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     let engine = PotluckEngine()
     let updater = Updater()
+    let helper = HelperChat()
 
     func applicationDidFinishLaunching(_ n: Notification) {
         MoveToApplications.offerIfNeeded()
@@ -176,6 +182,7 @@ struct MenuContent: View {
             }
 
             Divider()
+            Button { open("helper") } label: { Label("Ask Potluck…", systemImage: "sparkles") }
             Button { open("chat") } label: { Label("Open chat", systemImage: "bubble.left.and.bubble.right") }
             Button { open("panel") } label: { Label("Control panel", systemImage: "slider.horizontal.3") }
             if engine.running {

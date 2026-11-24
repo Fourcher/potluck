@@ -342,5 +342,5 @@ func winAsk(title, text string) bool {
 	t, _ := syscall.UTF16PtrFromString(title)
 	m, _ := syscall.UTF16PtrFromString(text)
 	r, _, _ := messageBox.Call(0, uintptr(unsafe.Pointer(m)), uintptr(unsafe.Pointer(t)), 0x24) // yes/no, question
-	return r == 6                                                                              // IDYES
+	return r == 6                                                                               // IDYES
 }

@@ -10,6 +10,8 @@ struct WelcomeView: View {
     @State private var busy = false
     @State private var error = ""
     @State private var started = ""
+    @State private var ask = ""
+    @Environment(HelperChat.self) private var helper
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -33,6 +35,15 @@ struct WelcomeView: View {
             }
             if !error.isEmpty { Text(error).foregroundStyle(.red).font(.callout) }
             Spacer(minLength: 0)
+            if engine.checked, !engine.role.isEmpty {
+                Divider()
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles").foregroundStyle(Color.accentColor)
+                    TextField("Or just ask Potluck: \"set up my other computers\", \"use my D drive\"…", text: $ask)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { let t = ask; ask = ""; helper.send(t); openWindow(id: "helper") }
+                }
+            }
         }
         .padding(28)
         .frame(width: 640, height: 470)

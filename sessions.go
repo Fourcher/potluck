@@ -73,6 +73,7 @@ type Question struct {
 type Session struct {
 	ID       string      `json:"id"`
 	Title    string      `json:"title"`
+	Kind     string      `json:"kind,omitempty"` // "" for a task, "helper" for the Potluck helper
 	Project  *ProjectRef `json:"project,omitempty"`
 	Created  time.Time   `json:"created"`
 	Updated  time.Time   `json:"updated"`

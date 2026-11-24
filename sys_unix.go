@@ -3,6 +3,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"strconv"
 	"syscall"
@@ -34,3 +35,9 @@ func killTree(pid int) {
 // ownGroup starts a program in a process group of its own, so killTree stops everything it
 // started too.
 func ownGroup(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} }
+
+// execSelf replaces this process with a new run of Potluck (same process, so the Mac app
+// keeps watching it).
+func execSelf(exe string, args []string) {
+	_ = syscall.Exec(exe, append([]string{exe}, args...), os.Environ())
+}

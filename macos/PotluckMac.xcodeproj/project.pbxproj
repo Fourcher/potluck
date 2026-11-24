@@ -11,6 +11,7 @@
 		18F65D48D180CE7150EB1D10 /* PotluckEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2F1B5BB421E3D7A9408E372 /* PotluckEngine.swift */; };
 		3615502D0E59E62693688095 /* PotluckApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D9A6B8ED2D497A2E9F0DDA5 /* PotluckApp.swift */; };
 		36DBB93F01617101F2AFD781 /* Welcome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 070946A44B787FFC6D2A7232 /* Welcome.swift */; };
+		BD6A55837058A511A4FC33B5 /* HelperView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DA60A61E54B0D7B0D1EE32A /* HelperView.swift */; };
 		F457199AB684514B941FA7C8 /* Updater.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0095C3C4D36BA29F2D81342A /* Updater.swift */; };
 /* End PBXBuildFile section */
 
@@ -18,6 +19,7 @@
 		0095C3C4D36BA29F2D81342A /* Updater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Updater.swift; sourceTree = "<group>"; };
 		070946A44B787FFC6D2A7232 /* Welcome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Welcome.swift; sourceTree = "<group>"; };
 		2D9A6B8ED2D497A2E9F0DDA5 /* PotluckApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PotluckApp.swift; sourceTree = "<group>"; };
+		5DA60A61E54B0D7B0D1EE32A /* HelperView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelperView.swift; sourceTree = "<group>"; };
 		96886E9277DCDE21082C6A3D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		E4FD522218FCA79A9039D871 /* Potluck.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Potluck.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F2F1B5BB421E3D7A9408E372 /* PotluckEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PotluckEngine.swift; sourceTree = "<group>"; };
@@ -28,6 +30,7 @@
 			isa = PBXGroup;
 			children = (
 				96886E9277DCDE21082C6A3D /* Assets.xcassets */,
+				5DA60A61E54B0D7B0D1EE32A /* HelperView.swift */,
 				2D9A6B8ED2D497A2E9F0DDA5 /* PotluckApp.swift */,
 				F2F1B5BB421E3D7A9408E372 /* PotluckEngine.swift */,
 				0095C3C4D36BA29F2D81342A /* Updater.swift */,
@@ -123,6 +126,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				BD6A55837058A511A4FC33B5 /* HelperView.swift in Sources */,
 				3615502D0E59E62693688095 /* PotluckApp.swift in Sources */,
 				18F65D48D180CE7150EB1D10 /* PotluckEngine.swift in Sources */,
 				F457199AB684514B941FA7C8 /* Updater.swift in Sources */,

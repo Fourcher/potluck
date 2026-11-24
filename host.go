@@ -131,6 +131,8 @@ type Host struct {
 	phoneSeen  map[string]time.Time
 	phoneMu    sync.Mutex
 	phoneSrvs  []*http.Server
+	helperMu   sync.Mutex
+	helper     helperState // the Potluck helper (helper.go)
 	shareMu    sync.Mutex
 	shareSrvs  []*http.Server
 	shareOn    string // the addresses the share server listens on now
@@ -192,6 +194,7 @@ func (h *Host) Run() error {
 	h.applyShare()
 	go h.phoneLoop()
 	go h.shareLoop()
+	go h.helperLoop()
 	return nil
 }
 
@@ -890,6 +893,9 @@ func (h *Host) planNodes() []PlanNode {
 		}
 		cpu, gpu, uni := offer(info, held)
 		cpu, gpu = h.capByCeiling(id, cpu, gpu)
+		if r := h.helperReserveLocked(id); r > 0 { // the helper's memory is not on offer
+			cpu = max(0, cpu-r)
+		}
 		n.Offer = cpu + gpu
 		if !n.Active {
 			n.Offer = 0

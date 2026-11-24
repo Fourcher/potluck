@@ -813,7 +813,7 @@ function systemPrompt() {
 // A budget is the only reliable stop for models that think whatever they are told (Inkling 2):
 // none when thinking is off, a few thousand tokens when on, then the engine asks for the answer.
 function thinkBudget(on = !!S.settings.thinking) {
-  return on ? { reasoning_budget_tokens: 4096, reasoning_budget_message: "Time to stop thinking and give the answer." } : { reasoning_budget_tokens: 0 };
+  return on ? { reasoning_budget_tokens: 4096, reasoning_budget_message: "Time to stop thinking and give the answer." } : { reasoning_budget_tokens: 1 }; // not 0: some model files loop on their markers with 0
 }
 function thinkingKwargs(on = !!S.settings.thinking) {
   return { enable_thinking: on, reasoning_effort: on ? "high" : "none" };

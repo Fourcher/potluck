@@ -167,6 +167,10 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 		case strings.HasPrefix(r.URL.Path, "/potluck/"):
 			http.NotFound(w, r)
 		default:
+			// The Potluck helper's own small model, on this computer only.
+			if !isShared(r) && h.helperRoute(w, r) {
+				return
+			}
 			// A model from one of the person's other AI setups goes to that server.
 			if h.connRoute(w, r) {
 				return

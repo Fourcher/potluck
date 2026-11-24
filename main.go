@@ -72,6 +72,8 @@ func main() {
 	tokenFile := fs.String("token-file", "", "join file from a USB kit")
 	mainAddr := fs.String("main", "", "address of the main computer, when it is not found automatically")
 	_ = fs.Parse(args)
+	// Potluck's folder may have been moved (the helper's set_data_folder): follow the pointer.
+	*dataDir = followMoved(*dataDir)
 
 	switch role {
 	case "version":

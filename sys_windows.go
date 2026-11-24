@@ -3,6 +3,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"strconv"
 	"syscall"
@@ -78,3 +79,11 @@ func killTree(pid int) {
 
 // ownGroup: on Windows killTree follows the program's children by itself.
 func ownGroup(cmd *exec.Cmd) { hideWindow(cmd) }
+
+// execSelf starts a new run of Potluck and ends this one.
+func execSelf(exe string, args []string) {
+	c := exec.Command(exe, args...)
+	if c.Start() == nil {
+		os.Exit(0)
+	}
+}

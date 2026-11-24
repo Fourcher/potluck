@@ -35,6 +35,7 @@ type Config struct {
 	ShareChat   bool              `json:"shareChat,omitempty"`   // chat page and API reachable from home network and Tailscale, with ShareKey
 	ShareKey    string            `json:"shareKey,omitempty"`    // the key other devices and apps use
 	Connections []AIConnection    `json:"connections,omitempty"` // the person's other AI setups (connections.go)
+	HelperOff   bool              `json:"helperOff,omitempty"`   // do not run the Potluck helper's model
 	HeadChoice  string            `json:"headChoice,omitempty"`  // "" = automatic
 	LastModel   *ModelRef         `json:"lastModel,omitempty"`
 	// Known remembers where each model that Potluck downloaded came from, by file name, so
@@ -124,6 +125,9 @@ type Agent struct {
 	vision    bool        // the model running here was loaded with its image add-on
 	rpcPort   int
 	apiPort   int
+	aux       *proc // the Potluck helper's own small engine (aux.go)
+	auxPort   int
+	auxFile   string
 	listeners []net.Listener
 	jobCancel context.CancelFunc
 	status    string
@@ -310,6 +314,9 @@ type (
 
 // Handle runs one request.
 func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
+	if r, ok, err := a.handleAux(method, raw); ok {
+		return r, err
+	}
 	switch method {
 	case "inventory":
 		return a.Info(), nil
@@ -883,6 +890,10 @@ func (a *Agent) localPort(target string) (int, error) {
 	case "api":
 		if a.head.Running() {
 			return a.apiPort, nil
+		}
+	case "aux":
+		if a.aux.Running() {
+			return a.auxPort, nil
 		}
 	}
 	return 0, fmt.Errorf("nothing is running for %q here", target)
