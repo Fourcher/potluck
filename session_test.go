@@ -172,3 +172,25 @@ func TestSessionStopWhileWaiting(t *testing.T) {
 		t.Fatal("a stopped task still has an open question")
 	}
 }
+
+// Running commands freely does not approve the browser, the screen or connectors.
+func TestPermissionScopes(t *testing.T) {
+	_, st := withFakeModel(t)
+	s := st.create(nil, Policy{Commands: "auto"})
+	for _, name := range []string{"browser_click", "screen_click", "mcp__files__write"} {
+		done := make(chan string, 1)
+		go func() {
+			no, _ := st.allowed(t.Context(), s, SToolCall{Name: name, Args: "{}"}, map[string]any{})
+			done <- no
+		}()
+		waitStatus(t, s, "waiting")
+		q := st.questions()[0]
+		_ = st.answer(s, q.ID, "no")
+		if no := <-done; no == "" {
+			t.Fatalf("%s ran without asking under commands=auto", name)
+		}
+	}
+	if no, _ := st.allowed(t.Context(), s, SToolCall{Name: "run_command", Args: "{}"}, map[string]any{"command": "ls"}); no != "" {
+		t.Fatal("commands=auto should run commands without asking")
+	}
+}

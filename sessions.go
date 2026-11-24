@@ -346,7 +346,9 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 		}
 		kind, title, detail = "read", "Look at the project's files?", call.Name+" "+call.Args
 	case strings.HasPrefix(call.Name, "browser_"):
-		if pol.Commands == "auto" || g.Browser || call.Name == "browser_read" || call.Name == "browser_screenshot" {
+		// Each kind of access has its own yes: running commands freely does not include the
+		// browser, the screen or connectors (found by the self-review on the pool).
+		if g.Browser || call.Name == "browser_read" || call.Name == "browser_screenshot" {
 			return "", nil
 		}
 		kind = "browser"
@@ -361,7 +363,7 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 			title, detail = "Use the browser?", call.Name
 		}
 	case strings.HasPrefix(call.Name, "screen_"):
-		if pol.Commands == "auto" || g.Screen {
+		if g.Screen {
 			return "", nil
 		}
 		kind = "screen"
@@ -379,7 +381,7 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 		}
 	case strings.HasPrefix(call.Name, "mcp__"):
 		server := strings.SplitN(strings.TrimPrefix(call.Name, "mcp__"), "__", 2)[0]
-		if g.Connectors[server] || pol.Commands == "auto" {
+		if g.Connectors[server] {
 			return "", nil
 		}
 		kind, title, detail = "connector", "Use "+strings.Replace(strings.TrimPrefix(call.Name, "mcp__"), "__", ": ", 1)+"?", trimTo(call.Args, 3000)
