@@ -96,19 +96,20 @@ type Host struct {
 	id  *Identity
 	cfg *ConfigStore
 
-	mu       sync.Mutex
-	nodes    map[string]*Node
-	memCeil  map[string]memCeiling // per computer, after its guard stepped in (hostguard.go)
-	sessOnce sync.Once
-	sess     *sessionStore // agent sessions (sessions.go)
-	pushErr  string        // the last problem sending a phone alert
-	vision   bool          // the running model can see images
-	guardWhy string        // why the guard stopped the model, shown instead of "stopped"
-	pending  map[string]*Pending
-	tunnels  map[string]chan net.Conn
-	cluster  ClusterState
-	cancel   context.CancelFunc
-	release  map[string]Asset // engine release assets by name
+	mu             sync.Mutex
+	nodes          map[string]*Node
+	memCeil        map[string]memCeiling // per computer, after its guard stepped in (hostguard.go)
+	sessOnce       sync.Once
+	sess           *sessionStore // agent sessions (sessions.go)
+	pushErr        string        // the last problem sending a phone alert
+	pushTestAnswer string        // what the phone answered to the last test alert
+	vision         bool          // the running model can see images
+	guardWhy       string        // why the guard stopped the model, shown instead of "stopped"
+	pending        map[string]*Pending
+	tunnels        map[string]chan net.Conn
+	cluster        ClusterState
+	cancel         context.CancelFunc
+	release        map[string]Asset // engine release assets by name
 
 	chatSrv  *http.Server
 	lastCtx  int

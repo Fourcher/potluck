@@ -156,15 +156,23 @@ final class AppModel {
     }
 
     func registerPush(token: String) {
-        #if DEBUG
-        let dev = true
-        #else
-        let dev = false
-        #endif
+        let dev = Self.pushIsDevelopment
         Task {
             if client?.addr == nil { _ = try? await client?.connect() }
             try? await client?.registerPush(token: token, development: dev)
         }
+    }
+
+    /// Which Apple push server this copy of the app talks to. It follows how the app was signed
+    /// (Xcode/development profile = sandbox, App Store/TestFlight = production), not Debug/Release.
+    static var pushIsDevelopment: Bool {
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = try? Data(contentsOf: url) else { return false } // App Store builds have none
+        let text = String(decoding: data, as: UTF8.self)
+        guard let a = text.range(of: "<key>aps-environment</key>"),
+              let b = text.range(of: "<string>", range: a.upperBound..<text.endIndex),
+              let c = text.range(of: "</string>", range: b.upperBound..<text.endIndex) else { return true }
+        return text[b.upperBound..<c.lowerBound] == "development"
     }
 
     func refreshNow() {

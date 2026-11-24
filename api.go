@@ -425,16 +425,16 @@ func (app *App) serveUI() error {
 		if r.Method == http.MethodGet {
 			c := h.cfg.Get()
 			h.mu.Lock()
-			perr := h.pushErr
+			perr, testAns := h.pushErr, h.pushTestAnswer
 			h.mu.Unlock()
-			push := map[string]any{"set": c.Push != nil && c.Push.KeyPath != "", "error": perr}
+			push := map[string]any{"set": c.Push != nil && c.Push.KeyPath != "", "error": perr, "testAnswer": testAns}
 			if c.Push != nil {
 				push["keyID"], push["teamID"], push["keyPath"] = c.Push.KeyID, c.Push.TeamID, c.Push.KeyPath
 			}
 			return map[string]any{"phones": h.Phones(), "push": push}, nil
 		}
 		var in struct {
-			Action string `json:"action"` // pair | stop | forget | push
+			Action string `json:"action"` // pair | stop | forget | push | test
 			ID     string `json:"id"`
 			PushConfig
 		}
@@ -455,6 +455,11 @@ func (app *App) serveUI() error {
 				return nil, err
 			}
 			h.cfg.Update(func(c *Config) { c.Push = &pc })
+			return map[string]bool{"ok": true}, nil
+		case "test": // a Yes/No/Reply alert to every phone, answered back to the panel
+			if err := h.PushTest(); err != nil {
+				return nil, err
+			}
 			return map[string]bool{"ok": true}, nil
 		case "pair":
 			return h.PairingCode()

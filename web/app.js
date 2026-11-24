@@ -253,7 +253,7 @@ function pushView() {
   return `<h3 style="margin-top:16px">Alerts on your phone</h3>
     <p class="muted small">When a task needs an answer, Potluck alerts your phone, and you can answer Yes, No or reply from the alert itself. Apple only delivers alerts signed with a push key from the developer account the app was built with: in your Apple developer account, open Certificates, Identifiers &amp; Profiles, then Keys, make a key with "Apple Push Notifications service", and download its .p8 file.</p>
     ${p.error ? `<div class="err">${esc(p.error)}</div>` : ""}
-    ${p.set ? `<p class="small" style="margin-top:6px">Alerts are on (key ${esc(p.keyID)}, team ${esc(p.teamID)}). <button class="link" data-a="pushoff">Turn alerts off</button></p>` : `
+    ${p.set ? `<p class="small" style="margin-top:6px">Alerts are on (key ${esc(p.keyID)}, team ${esc(p.teamID)}). <button class="link" data-a="pushtest">Send a test alert</button> · <button class="link" data-a="pushoff">Turn alerts off</button>${p.testAnswer ? `<br>Your phone answered the test: <b>${esc(p.testAnswer)}</b>` : ""}${p.error ? `<br><span style="color:var(--warn)">${esc(p.error)}</span>` : ""}</p>` : `
     <div class="row small" style="margin-top:8px;gap:8px;flex-wrap:wrap">
       <input data-push="keyPath" placeholder="Full path of the .p8 file" style="flex:2;min-width:240px">
       <input data-push="keyID" placeholder="Key ID (10 letters)" style="flex:1;min-width:120px">
@@ -649,6 +649,7 @@ const actions = {
     const v = k => (document.querySelector(`[data-push=${k}]`) || {}).value || "";
     api("/api/phones", { action: "push", keyPath: v("keyPath").trim(), keyID: v("keyID").trim(), teamID: v("teamID").trim() }).then(() => { toast("Alerts are on. Your phone hears about every question from now on."); loadPhones(); }).catch(e => toast(e.message));
   },
+  pushtest() { api("/api/phones", { action: "test" }).then(() => { toast("Test alert sent. Answer it on your phone."); setTimeout(loadPhones, 8000); setTimeout(loadPhones, 30000); }).catch(e => toast(e.message)); },
   pushoff() { api("/api/phones", { action: "push", keyPath: "" }).then(loadPhones).catch(e => toast(e.message)); },
   phoneforget(t) { if (confirm("Remove this phone? It will need to be paired again to connect.")) api("/api/phones", { action: "forget", id: t.dataset.id }).then(loadPhones).catch(e => toast(e.message)); },
   async usefound(t) {

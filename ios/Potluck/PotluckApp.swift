@@ -23,6 +23,11 @@ struct PotluckApp: App {
             if p == .active, model.computer != nil { model.startPolling(); delegate.enableAlerts() }
             if p == .background { model.stopPolling(); model.scheduleSave() }
         }
+        // Right after pairing the app is already in the foreground, so ask for alerts then too.
+        .onChange(of: model.computer != nil) { _, paired in
+            delegate.model = model
+            if paired { delegate.enableAlerts() }
+        }
     }
 }
 

@@ -196,6 +196,13 @@ func (h *Host) phoneHandler() http.Handler {
 				fail(w, err)
 				return
 			}
+			if in.Session == testSession {
+				h.mu.Lock()
+				h.pushTestAnswer = trimTo(in.Answer, 200)
+				h.mu.Unlock()
+				writeJSON(w, map[string]bool{"ok": true})
+				return
+			}
 			st := h.sessionStore()
 			s := st.get(in.Session)
 			if s == nil {
