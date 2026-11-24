@@ -3,6 +3,8 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -116,5 +118,47 @@ func TestInklingHeader(t *testing.T) {
 	if m.ContextTotal(32768) != want.ContextTotal(32768) || m.Vocab != want.Vocab {
 		t.Fatalf("read %d bytes of context cache and vocab %d; want %d and %d (heads %v, swa %v, loop %d-%d x%d)",
 			m.ContextTotal(32768), m.Vocab, want.ContextTotal(32768), want.Vocab, m.KVHeads, m.SWALayers, m.LoopStart, m.LoopEnd, m.LoopCount)
+	}
+}
+
+// A pooled looped model: with the split given in the engine's slots, every file layer's weights
+// land on the device the plan chose (the engine places them with the slot of the same number),
+// and the repeat slots and the output go with the last device.
+func TestLoopSplit(t *testing.T) {
+	m := inkling()
+	m.LayerBytes = make([]int64, 24)
+	for i := range m.LayerBytes {
+		m.LayerBytes[i] = 1100 << 20
+	}
+	m.OtherBytes = 1 << 30
+	m.PlanCtx = 8192
+	nodes := []PlanNode{{ID: "big", Name: "Big", CPUBytes: 22 << 30}, {ID: "small", Name: "Small", CPUBytes: 12 << 30}}
+	p := planLayout(m, nodes, "big")
+	if !p.Fits || len(p.DevLayers) < 1 {
+		t.Fatalf("plan: fits=%v %s devs=%v", p.Fits, p.Reason, p.DevLayers)
+	}
+	var split []float64
+	for _, s := range strings.Split(p.TensorSplit, ",") {
+		v, _ := strconv.ParseFloat(s, 64)
+		split = append(split, v)
+	}
+	// Which device the plan meant for each file layer, in device order.
+	cpu := m.Layers + 1 + m.loopSlots() - p.NGL
+	want := []int{}
+	for d, n := range p.DevLayers {
+		for i := 0; i < n; i++ {
+			want = append(want, d)
+		}
+	}
+	for l := cpu; l < m.Layers; l++ {
+		if got := deviceOfLayer(l, m.EngineLayers(), p.NGL, split); got != want[l-cpu] {
+			t.Fatalf("file layer %d: engine puts it on device %d, plan says %d (split %s, ngl %d)", l, got, want[l-cpu], p.TensorSplit, p.NGL)
+		}
+	}
+	last := len(p.DevLayers) - 1
+	for slot := m.Layers; slot <= m.EngineLayers(); slot++ {
+		if got := deviceOfLayer(slot, m.EngineLayers(), p.NGL, split); got != last {
+			t.Fatalf("repeat/output slot %d on device %d, want the last (%d)", slot, got, last)
+		}
 	}
 }

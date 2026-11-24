@@ -1209,12 +1209,12 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 				if t.Name != "output.weight" {
 					continue
 				}
-				layer = info.Layers
+				layer = info.EngineLayers()
 			}
 			if !t.OK || t.Size <= rpcHashThreshold {
 				continue
 			}
-			if dev := deviceOfLayer(layer, info.Layers, plan.NGL, split); dev >= 0 && dev < len(plan.DevOwner) && plan.DevOwner[dev] == p.id {
+			if dev := deviceOfLayer(layer, info.EngineLayers(), plan.NGL, split); dev >= 0 && dev < len(plan.DevOwner) && plan.DevOwner[dev] == p.id {
 				it := SeedItem{Off: t.Off, Size: t.Size}
 				if t.Part < len(model.Parts) {
 					it.URL = model.Parts[t.Part].URL
@@ -1251,7 +1251,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		}
 	}
 	ngl := plan.NGL
-	if ngl > info.Layers {
+	if ngl > info.EngineLayers() {
 		// Every layer on graphics chips: say "all" rather than a count. Some models run part
 		// of their layers more than once (Inkling 2 repeats 12 of its 24 three times), and the
 		// engine counts each pass as a layer, so a count from the file left half of Inkling

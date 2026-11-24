@@ -742,14 +742,20 @@ func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 					lastDev = i
 				}
 			}
-			p.NGL = offloaded + 1
+			// Looped models (Inkling 2): the engine gives every pass of the loop a slot of its own
+			// (layers 6-17 three times: 48 slots plus the output, for 24 layers in the file), places
+			// a file layer's weights with the slot of the same number, and splits all the slots by
+			// the ratio. So the ratio and the count are given in slots: the file layers land on the
+			// devices planned, and the repeat slots (their context cache only) go with the last one.
+			extra := m.loopSlots()
+			p.NGL = offloaded + 1 + extra
 			// Split values are layer counts, nudged by half a layer at the two ends so that every
 			// boundary falls halfway between two layers and rounding can never move a layer.
 			parts := make([]string, len(devs))
 			for i, d := range devs {
 				v := float64(d.layers)
 				if i == lastDev {
-					v++ // the output layer
+					v += 1 + float64(extra) // the output layer, and a looped model's repeat slots
 				}
 				if firstDev != lastDev {
 					if i == firstDev {
@@ -965,6 +971,17 @@ func planSolo(m *ModelInfo, n PlanNode) *Plan {
 
 // deviceOfLayer mirrors llama.cpp: which device index (in --tensor-split order) holds layer il,
 // or -1 for the head's CPU.
+// loopSlots is how many slots a looped model adds beyond its file layers (0 for others).
+func (m *ModelInfo) loopSlots() int {
+	if m.LoopCount > 1 && m.LoopEnd > m.LoopStart {
+		return (m.LoopCount - 1) * (m.LoopEnd - m.LoopStart)
+	}
+	return 0
+}
+
+// EngineLayers is how many layers the engine counts: the file's, plus a looped model's repeat slots.
+func (m *ModelInfo) EngineLayers() int { return m.Layers + m.loopSlots() }
+
 func deviceOfLayer(il, nLayers, ngl int, split []float64) int {
 	start := nLayers + 1 - ngl
 	if start < 0 {
