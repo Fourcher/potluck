@@ -12,8 +12,8 @@ import (
 
 // memCeiling is the most a computer should be given for a while after it ran out of memory.
 type memCeiling struct {
-	Bytes int64
-	Until time.Time
+	Bytes int64     `json:"bytes"`
+	Until time.Time `json:"until"`
 }
 
 // guardWatch asks the computers holding part of the model, every few seconds while it starts
@@ -63,7 +63,14 @@ func (h *Host) guardTripped(id string, ev *GuardEvent, plan *Plan) {
 			h.memCeil = map[string]memCeiling{}
 		}
 		ceil := held - plan.LayerBytes // one layer less than what it could not hold
-		h.memCeil[id] = memCeiling{Bytes: ceil, Until: time.Now().Add(6 * time.Hour)}
+		c := memCeiling{Bytes: ceil, Until: time.Now().Add(6 * time.Hour)}
+		h.memCeil[id] = c
+		go h.cfg.Update(func(cf *Config) {
+			if cf.Ceilings == nil {
+				cf.Ceilings = map[string]memCeiling{}
+			}
+			cf.Ceilings[id] = c
+		})
 		next = fmt.Sprintf(" Next time Potluck gives %s at most %s (it ran out holding %s); start the model again to try.", name, humanBytes(ceil), humanBytes(held))
 	}
 	h.guardWhy = fmt.Sprintf("%s: %s. Potluck stopped the model so %s would not freeze.%s", name, ev.Why, name, next)
@@ -77,6 +84,9 @@ func (h *Host) guardTripped(id string, ev *GuardEvent, plan *Plan) {
 // capByCeiling trims a computer's offer to what it held without running out (see above).
 func (h *Host) capByCeiling(id string, cpu, gpu int64) (int64, int64) {
 	c, ok := h.memCeil[id]
+	if !ok && h.cfg != nil {
+		c, ok = h.cfg.Get().Ceilings[id] // from before a restart
+	}
 	if !ok || time.Now().After(c.Until) || cpu+gpu <= c.Bytes {
 		return cpu, gpu
 	}

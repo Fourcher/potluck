@@ -684,7 +684,7 @@ func (st *sessionStore) requestPermissions(ctx context.Context, s *Session, args
 	}
 	// Ask macOS's own questions now, while the person is here, instead of in the middle of the night.
 	if scr && runtime.GOOS == "darwin" {
-		_, _, _, _ = screenshot(ctx, filepath.Join(st.host.a.dir, "screen-shots"))                                   // Screen Recording
+		_, _, _, _ = screenshot(ctx, filepath.Join(st.host.a.dir, "screen-shots"))                                // Screen Recording
 		_, _ = screenRun(ctx, "osascript", "-e", `tell application "System Events" to get name of first process`) // Accessibility / Automation
 	}
 	var primed []string
