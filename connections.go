@@ -217,6 +217,12 @@ func (h *Host) connRoute(w http.ResponseWriter, r *http.Request) bool {
 	if !ok {
 		return false
 	}
+	if isShared(r) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"message":"Models from your other AI setups can only be used on the computer running Potluck."}}`))
+		return true
+	}
 	id, model, _ := strings.Cut(rest, ":")
 	var conn *AIConnection
 	for _, c := range h.cfg.Get().Connections {

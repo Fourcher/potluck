@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -19,6 +20,11 @@ import (
 // link with ?key=…, which leaves a cookie so the page keeps working.
 
 const shareCookie = "potluck_key"
+
+// sharedReq marks a request that came in through the share address.
+type sharedReq struct{}
+
+func isShared(r *http.Request) bool { v, _ := r.Context().Value(sharedReq{}).(bool); return v }
 
 // shareKey returns the key, making one the first time.
 func (h *Host) shareKey() string {
@@ -127,7 +133,8 @@ func (h *Host) shareHandler() http.Handler {
 			return
 		}
 		// The chat handler still applies its own this-computer-only rules (running commands,
-		// the control panel's actions) by the request's real address.
-		chat.ServeHTTP(w, r)
+		// the control panel's actions) by the request's real address. Shared requests reach
+		// Potluck's own models only, never the person's other setups (whose keys may cost money).
+		chat.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sharedReq{}, true)))
 	})
 }

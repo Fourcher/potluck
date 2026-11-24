@@ -78,7 +78,17 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 		case r.URL.Path == "/potluck/state" && r.Method == http.MethodGet:
 			writeJSON(w, h.chatState(chatOwner(r)))
 		case r.URL.Path == "/potluck/models" && r.Method == http.MethodGet:
-			writeJSON(w, map[string]any{"models": h.chatModels(), "canSwitch": chatOwner(r)})
+			ms := h.chatModels()
+			if isShared(r) {
+				own := ms[:0:0]
+				for _, m := range ms {
+					if !strings.HasPrefix(m.File, "ext:") {
+						own = append(own, m)
+					}
+				}
+				ms = own
+			}
+			writeJSON(w, map[string]any{"models": ms, "canSwitch": chatOwner(r)})
 		case r.URL.Path == "/potluck/switch" && r.Method == http.MethodPost:
 			if !chatOwner(r) || r.Header.Get("X-Potluck") != "1" {
 				w.WriteHeader(http.StatusForbidden)
@@ -161,7 +171,7 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 			if h.connRoute(w, r) {
 				return
 			}
-			if r.Method == http.MethodGet && r.URL.Path == "/v1/models" && len(h.cfg.Get().Connections) > 0 {
+			if r.Method == http.MethodGet && r.URL.Path == "/v1/models" && len(h.cfg.Get().Connections) > 0 && !isShared(r) {
 				h.mergedModels(w, r, api)
 				return
 			}
