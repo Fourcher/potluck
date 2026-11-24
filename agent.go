@@ -661,7 +661,9 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 		in.Ctx = 4096
 	}
 	args := []string{"-m", model, "-c", strconv.Itoa(in.Ctx), "-np", "1", "-t", strconv.Itoa(threads),
-		"--host", "127.0.0.1", "--port", strconv.Itoa(api), "-fit", "off", "-ngl", strconv.Itoa(in.NGL), "-lv", "4"}
+		"--host", "127.0.0.1", "--port", strconv.Itoa(api), "-fit", "off", "-ngl", strconv.Itoa(in.NGL), "-lv", "4",
+		// Name the model in API answers by its file name, not the full path on this disk.
+		"--alias", strings.TrimSuffix(filepath.Base(model), ".gguf")}
 	if in.Split != "" && in.NGL > 0 {
 		args = append(args, "-ts", in.Split)
 	}

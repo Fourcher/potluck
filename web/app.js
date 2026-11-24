@@ -427,7 +427,9 @@ async function openPlan(model) {
 
 // ---------- main computer: running ----------
 
-function viewRun() {
+function viewRun() { return viewRunMain() + aiCard(); }
+
+function viewRunMain() {
   const m = S.main, c = m.cluster;
   if (c.phase === "idle") {
     if (m.pauseWhy) return `<h1>Waiting for your computers</h1><div class="note">${esc(m.pauseWhy)}</div>
@@ -471,6 +473,23 @@ function viewRun() {
         ${m.shareChat ? `<p class="muted small" style="margin-top:6px">Open this on any device on your network. There is no password, so only switch this on at home.</p><p class="addr" style="font-size:17px">${esc(m.sharedURL)}</p>` : ""}</div>
     </div>
     <div class="grid" style="margin-top:16px">${nodes}</div>`;
+}
+
+// ---------- the prompt for the user's own AI ----------
+
+let ai = { text: "", guide: "", at: 0, open: false, copied: false };
+function loadAI() { return api("/api/aiprompt").then(r => { ai.text = r.text; ai.guide = r.guide; ai.at = Date.now(); draw(); }).catch(() => {}); }
+
+function aiCard() {
+  if (!ai.text || Date.now() - ai.at > 15000) { ai.at = Date.now(); loadAI(); }
+  return `<h2 style="margin-top:28px">Use Potluck from your own AI</h2><div class="card">
+    <p class="small">Teach the AI you already use, such as Claude, ChatGPT, Codex or Cursor, about Potluck. Copy this note and paste it into a chat with it. It saves the note to its memory, so later you can just say <b>"use Potluck to…"</b> or <b>"run this on the local AI"</b> and it knows what to do.</p>
+    <p class="muted small" style="margin-top:6px">Your AI must run on this computer and be able to make web requests or run commands, as desktop apps with tools and coding agents can. A chat website can't reach your computer. When it needs details, your AI reads them from Potluck itself: the model loaded now, how to send it work and the ground rules.</p>
+    <div class="row" style="margin-top:10px"><button class="btn sm" data-a="aicopy">${ai.copied ? "Copied ✓" : "Copy the note for your AI"}</button>
+      <button class="btn sm ghost" data-a="aishow">${ai.open ? "Hide it" : "Show it"}</button>
+      <a class="btn sm ghost" href="${esc(S.main.chatURL)}/potluck/ai" target="_blank" rel="noopener">What your AI reads</a></div>
+    ${ai.open ? `<textarea readonly rows="14" aria-label="Note for your AI" onclick="this.select()" style="margin-top:10px;width:100%;font:12px/1.45 ui-monospace,Menlo,monospace">${esc(ai.text || "Loading…")}</textarea>` : ""}
+  </div>`;
 }
 
 // ---------- drawing ----------
@@ -593,6 +612,23 @@ const actions = {
   clearcache(t) { if (confirm(`Clear ${t.dataset.name}'s share of the model? It is downloaded again the next time it is needed.`)) api("/api/storage", { node: t.dataset.node, action: "clear_cache" }).then(loadDisk).catch(e => toast(e.message)); },
   quit() { if (confirm("Quit Potluck on this computer? Any running model stops.")) api("/api/quit", {}).then(() => { $("#app").innerHTML = `<p class="muted center">Potluck has quit. You can close this tab.</p>`; S = null; }); },
   magnet(t) { navigator.clipboard.writeText(t.dataset.magnet).then(() => toast("Torrent link copied. Paste it into your torrent app."), () => toast("Could not copy. Your browser blocked it.")); },
+  async aicopy() {
+    if (!ai.text) await loadAI();
+    // Copy right away, inside the click, from the text already here (it is at most 15 s old).
+    let ok = false;
+    try { await navigator.clipboard.writeText(ai.text); ok = true; } catch (e) {
+      const t = document.createElement("textarea");
+      t.value = ai.text; t.setAttribute("readonly", ""); t.style.cssText = "position:fixed;top:-1000px";
+      document.body.appendChild(t); t.select();
+      try { ok = document.execCommand("copy"); } catch (e2) { ok = false; }
+      t.remove();
+    }
+    if (!ok) { ai.open = true; draw(true); toast("Your browser blocked copying. Select the text below and copy it."); return; }
+    ai.copied = true; draw(true); toast("Copied. Paste it into your AI.");
+    setTimeout(() => { ai.copied = false; draw(true); }, 3000);
+    loadAI();
+  },
+  aishow() { ai.open = !ai.open; draw(true); },
   tohf(t) { store.source = "hf"; store.q = t.dataset.repo.split("/").pop(); store.results = null; draw(true); },
 };
 

@@ -11,6 +11,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -98,6 +99,11 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 				return
 			}
 			writeJSON(w, map[string]bool{"ok": true})
+		case r.URL.Path == "/potluck/ai" && r.Method == http.MethodGet:
+			// How another AI can use Potluck: the same text the control panel copies.
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = io.WriteString(w, h.aiGuide())
 		case r.URL.Path == "/potluck/run" && r.Method == http.MethodPost:
 			handleRun(w, r, h.agentDir())
 		case strings.HasPrefix(r.URL.Path, "/potluck/"):

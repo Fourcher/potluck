@@ -91,7 +91,12 @@ func fail(w http.ResponseWriter, err error) {
 func (app *App) serveUI() error {
 	mux := http.NewServeMux()
 	sub, _ := fs.Sub(webFS, "web")
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	static := http.FileServer(http.FS(sub))
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check for a newer page each time, so an upgrade is never mixed with old scripts.
+		w.Header().Set("Cache-Control", "no-cache")
+		static.ServeHTTP(w, r)
+	}))
 
 	api := func(path string, fn func(r *http.Request) (any, error)) {
 		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
@@ -340,6 +345,14 @@ func (app *App) serveUI() error {
 		}
 		file, err := h.UseFound(in.Path, in.Run, in.Ctx)
 		return map[string]string{"file": file}, err
+	})
+
+	api("/api/aiprompt", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"text": aiMemory(), "guide": h.aiGuide()}, nil
 	})
 
 	api("/api/phones", func(r *http.Request) (any, error) {

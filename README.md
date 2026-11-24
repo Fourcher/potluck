@@ -4,7 +4,7 @@ Run one large AI model across the spare computers you already own.
 
 A laptop with 16 GB, an old gaming PC, a Linux box in the closet: none of them can hold a big model alone, but together they can. Potluck pools their memory, splits the model between them, and gives you one chat page and one OpenAI-compatible API on your main computer.
 
-Version 1.8.0. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second (3.2 on 21 November with the newer engine in 1.6.0).
+Version 1.9.0. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second (3.2 on 21 November with the newer engine in 1.6.0).
 
 **Recommended model to start with: Inkling 2 Mini** (`AtomicChat/Inkling-2-Mini-Uncensored-GGUF`), starred in the Models tab. Its 8.7 GB IQ2_M size ran on one Windows PC with 30 GB and a 4 GB GTX 1050 Ti at 2.5 to 3 words per second on 21 November 2026. This version has had its refusals removed: it answers what it is asked. It always thinks briefly before answering; switching Think off in the chat page keeps that as short as the model allows.
 
@@ -53,6 +53,10 @@ Open `http://127.0.0.1:7720` on the main computer (or "Open chat" in the control
 - **Also:** thinking on or off, writing styles, your own standing instructions, stop, a preview panel for HTML and SVG the model writes, light and dark, keyboard shortcuts, and a phone-sized layout.
 
 Two things make it quick on slow hardware. Follow-up messages read only what is new: for Qwen-style models the page sends the conversation back exactly as it was written, where the standard route made the engine read every earlier token again on every turn (measured: 23 new tokens instead of 78). And there are no hidden extra requests, such as asking the model for a title.
+
+## With your own AI
+
+Potluck can be the private model your usual AI hands work to. Under **Running**, **Use Potluck from your own AI** has a short note to copy into Claude, ChatGPT, Codex, Cursor or any AI on this computer that can make web requests or run commands. The AI saves the note to its memory, or as a skill. After that, "use Potluck to…" or "run this on the local AI" is enough: it reads Potluck's live instructions from `http://127.0.0.1:7720/potluck/ai` (which model is loaded, how to send it work through the OpenAI-compatible API, and the ground rules), sends the work and says the answer came from Potluck. It asks before switching models, and if Potluck isn't running it asks you to open it rather than using an online model.
 
 ## On your iPhone
 
