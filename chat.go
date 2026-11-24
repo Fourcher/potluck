@@ -141,6 +141,8 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = io.WriteString(w, h.aiGuide())
+		case r.URL.Path == "/potluck/fs" && r.Method == http.MethodPost:
+			handleFS(w, r, h.a.dir)
 		case r.URL.Path == "/potluck/run" && r.Method == http.MethodPost:
 			handleRun(w, r, h.agentDir())
 		case strings.HasPrefix(r.URL.Path, "/potluck/"):

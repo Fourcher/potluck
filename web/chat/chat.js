@@ -91,7 +91,7 @@ async function poll() {
   if (!running()) S.props = null;
   // The setup the user brought over from their earlier AI (Computers > Bring your AI setup
   // over). Only this computer's own browser gets it.
-  if (S.server.owner && (!S.ctxAt || Date.now() - S.ctxAt > 60000)) { S.ctxAt = Date.now(); try { S.ctx = await api("/potluck/context"); } catch { S.ctx = null; } }
+  if (S.server.owner && (!S.ctxAt || Date.now() - S.ctxAt > 60000)) { S.ctxAt = Date.now(); try { S.ctx = await api("/potluck/context"); } catch { S.ctx = null; } drawProjects(); }
   drawStatus();
   if (was !== S.server.phase && S.cur && !S.cur.messages.length && !S.gen) drawThread(); // the greeting says whether a model is ready
   pollTimer = setTimeout(poll, running() ? 12000 : 3000);
@@ -136,12 +136,56 @@ async function saveChat(c = S.cur) {
   if (i >= 0) S.chats[i] = meta; else S.chats.unshift(meta);
   drawList();
 }
+// ---------- projects: chats that work inside a code project on this computer ----------
+async function fsCall(body) {
+  const r = await fetch("/potluck/fs", { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify(body), signal: S.gen && S.gen.abort.signal });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || "Potluck could not do that.");
+  return j;
+}
+async function loadProject() {
+  S.proj = null;
+  if (!S.cur || !S.cur.project) return;
+  try { S.proj = await fsCall({ op: "project", root: S.cur.project.root }); } catch (e) { S.proj = { root: S.cur.project.root, name: S.cur.project.name, error: e.message }; }
+}
+async function openProject(root, name) {
+  if (S.gen) return toast("Wait for the reply to finish, or stop it first.");
+  S.cur = newChat(); S.cur.project = { root, name: name || root.split(/[\\/]/).pop() }; S.cur.title = S.cur.project.name;
+  S.pending = []; S.folder = null;
+  await loadProject();
+  drawAll(); $("#input").focus();
+  if (window.innerWidth <= 820) document.body.classList.add("side-closed");
+}
+function drawProjects() {
+  const el = $("#project-list"); if (!el) return;
+  const ps = ((S.ctx && S.ctx.projects) || []).filter(p => p.path);
+  if (!S.server || !S.server.owner) { el.innerHTML = ""; return; }
+  el.innerHTML = `<h4>Projects</h4>` + ps.slice(0, 6).map(p => `<div class="chat-item proj ${S.cur && S.cur.project && S.cur.project.root === p.path ? "on" : ""}" data-proj="${esc(p.path)}" data-name="${esc(p.name)}" tabindex="0" role="button" title="${esc(p.path)}"><span class="ic">${icon("folder")}</span><span class="t">${esc(p.name)}</span></div>`).join("") +
+    `<div class="chat-item proj" data-a="all-projects" tabindex="0" role="button"><span class="t muted">${ps.length > 6 ? `All ${ps.length} projects…` : "Open a project…"}</span></div>`;
+}
+function projectsSheet() {
+  const ps = ((S.ctx && S.ctx.projects) || []).filter(p => p.path);
+  sheet(`<h3>Work on a project</h3><p class="muted small">The agent works inside the project's folder: it reads and edits files, runs its commands and tests, and follows its CLAUDE.md or AGENTS.md.${ps.length ? "" : " Bring your projects over in the control panel (Computers, then Bring your AI setup over), or type a folder below."}</p>
+    <input id="proj-q" type="search" placeholder="Search projects, or type a folder path" style="width:100%;margin:8px 0">
+    <div id="proj-all" style="max-height:50vh;overflow:auto"></div>
+    <div class="foot"><button class="btn ghost" data-a="close">Cancel</button><button class="btn" data-a="path">Open this folder</button></div>`, {
+    path: () => { const v = $("#proj-q").value.trim(); if (!/^(\/|[A-Za-z]:\\|~)/.test(v)) return toast("Type the folder's full path."); closeSheet(); openProject(v); },
+  });
+  const draw = () => {
+    const q = ($("#proj-q").value || "").toLowerCase();
+    $("#proj-all").innerHTML = ps.filter(p => !q || p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q)).slice(0, 200).map(p => `<div class="chat-item" data-pick="${esc(p.path)}" data-name="${esc(p.name)}" role="button" tabindex="0"><span class="t"><b>${esc(p.name)}</b> <span class="muted small">${esc(p.path)}</span></span></div>`).join("") || `<p class="muted small">No project matches.</p>`;
+  };
+  $("#proj-q").addEventListener("input", draw); draw();
+  $("#proj-all").addEventListener("click", e => { const it = e.target.closest("[data-pick]"); if (it) { closeSheet(); openProject(it.dataset.pick, it.dataset.name); } });
+}
+
 async function openChat(id) {
   if (S.gen) return toast("Wait for the reply to finish, or stop it first.");
   const c = id ? await Store.getChat(id) : null;
   S.cur = c || newChat(); S.cur.grants = S.cur.grants || {};
   S.pending = []; S.folder = null;
   await restoreFolder();
+  await loadProject();
   drawAll();
   $("#input").focus();
   if (window.innerWidth <= 820) document.body.classList.add("side-closed");
@@ -185,6 +229,7 @@ function toolLabel(c, res) {
     read_file: [`Reading ${p}`, `Read ${p}`, `Asked to read ${p}`],
     search_files: [`Searching your folder for ${q}`, `Searched your folder for ${q}`, `Asked to search your folder for ${q}`],
     write_file: [`Writing ${p}`, `Wrote ${p}`, `Asked to write ${p}`],
+    edit_file: [`Editing ${p}`, `Edited ${p}`, `Asked to edit ${p}`],
     run_command: [`Running <span class="path">${esc(shortCmd(a.command))}</span>`, `Ran <span class="path">${esc(shortCmd(a.command))}</span>`, `Asked to run <span class="path">${esc(shortCmd(a.command))}</span>`],
     use_skill: [`Loading the skill <span class="path">${esc(a.name || "")}</span>`, `Loaded the skill <span class="path">${esc(a.name || "")}</span>`, `Asked to load the skill <span class="path">${esc(a.name || "")}</span>`],
     run_applescript: [`Driving an app: <span class="path">${esc(shortCmd(a.script))}</span>`, `Drove an app: <span class="path">${esc(shortCmd(a.script))}</span>`, `Asked to drive an app: <span class="path">${esc(shortCmd(a.script))}</span>`],
@@ -194,7 +239,7 @@ function toolLabel(c, res) {
 function shortCmd(s) { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > 70 ? s.slice(0, 68) + "…" : s; }
 function toolCard(c, res) {
   const state = !res ? `<span class="state"><span class="spin"></span></span>` : res.state === "denied" ? `<span class="state no">Not allowed</span>` : res.state === "error" ? `<span class="state no">Did not work</span>` : `<span class="state ok">Done</span>`;
-  return `<details class="tool" data-call="${esc(c.id)}"><summary>${ic(c.name === "write_file" ? "edit" : c.name.startsWith("run_") ? "term" : "tool")}<span>${toolLabel(c, res)}</span>${state}</summary><div class="out">${esc(res ? res.content : "Working…")}</div></details>`;
+  return `<details class="tool" data-call="${esc(c.id)}"><summary>${ic(c.name === "write_file" || c.name === "edit_file" ? "edit" : c.name.startsWith("run_") ? "term" : "tool")}<span>${toolLabel(c, res)}</span>${state}</summary><div class="out">${esc(res ? res.content : "Working…")}</div></details>`;
 }
 function assistantHTML(m, live) {
   let h = "";
@@ -206,9 +251,11 @@ function drawThread() {
   const c = S.cur, el = $("#thread");
   if (!c.messages.length) {
     const pooled = ((S.server && S.server.nodes) || []).some(n => n.role === "worker");
-    const sugg = [pooled ? "Explain how this model is running across my computers" : "What can you do on this computer?", "Help me plan my week", "Draft a polite email declining a meeting", "Summarize a file I attach"];
+    const sugg = c.project
+      ? ["Explain how this project works and where it stands", "Run the tests and fix whatever fails", "Find bugs and fix the worst ones", "Suggest the most valuable next improvement, then build it"]
+      : [pooled ? "Explain how this model is running across my computers" : "What can you do on this computer?", "Help me plan my week", "Draft a polite email declining a meeting", "Summarize a file I attach"];
     el.innerHTML = (c.summary ? `<div class="wrap"><details class="think"><summary>${ic("file")}<span>Continued from an earlier chat. Its summary is included.</span></summary><div class="t">${esc(c.summary)}</div></details></div>` : "") +
-      `<div class="hello"><h2>What shall we work on?</h2><p>${running() ? (pooled ? "Running privately on your own computers." : "Running privately on this computer.") : "Type away; your message is sent once a model is ready."}</p><div class="suggest">${sugg.map(s => `<button data-a="suggest">${esc(s)}</button>`).join("")}</div></div>`;
+      `<div class="hello"><h2>${c.project ? "What shall we do in " + esc(c.project.name) + "?" : "What shall we work on?"}</h2><p>${running() ? (pooled ? "Running privately on your own computers." : "Running privately on this computer.") : "Type away; your message is sent once a model is ready."}</p><div class="suggest">${sugg.map(s => `<button data-a="suggest">${esc(s)}</button>`).join("")}</div></div>`;
     return;
   }
   const results = {}; c.messages.forEach(m => { if (m.role === "tool") results[m.callId] = m; });
@@ -250,6 +297,7 @@ function drawLive() { // redraw only the message being written
 // ---------- composer ----------
 function drawChips() {
   let h = "";
+  if (S.cur && S.cur.project) h += `<span class="chip folder" title="${esc(S.cur.project.root)}">${ic("folder")}<span class="n">${esc(S.cur.project.name)}</span><small>${S.proj && S.proj.error ? esc(S.proj.error) : "project" + (S.proj && S.proj.instrFile ? " · follows " + esc(S.proj.instrFile) : "")}</small></span>`;
   if (S.folder) h += `<span class="chip folder" title="${S.folder.kind === "handle" ? "The model can work in this folder, within the permission level you chose." : "A read-only copy of this folder."}">${ic("folder")}<span class="n">${esc(S.folder.name)}</span><small>${S.folder.needsAccess ? "click to reconnect" : S.folder.kind === "snapshot" ? S.folder.files.size + " files, read-only" : "working folder"}</small><button type="button" data-a="detach" title="Remove folder" aria-label="Remove folder">×</button></span>`;
   h += S.pending.map((f, i) => `<span class="chip ${f.skipped ? "bad" : ""}" title="${esc(f.skipped || (f.pasted ? "Click to put this text back in the message box" : f.name))}"${f.pasted ? ` data-pasted="${i}" style="cursor:pointer"` : ""}>${ic("file")}<span class="n">${esc(f.name)}</span><small>${f.skipped ? "cannot be read" : "about " + num(estTokens(f.text.length)) + " tokens"}</small><button type="button" data-a="unattach" data-i="${i}" title="Remove" aria-label="Remove">×</button></span>`).join("");
   $("#chips").innerHTML = h;
@@ -286,7 +334,7 @@ function drawHeader() {
   $("#chat-star").innerHTML = ic("star"); $("#chat-star").classList.toggle("on", c.starred);
   document.title = (c.title ? c.title + " · " : "") + "Potluck chat";
 }
-function drawAll() { drawHeader(); drawList(); drawThread(); drawChips(); drawTools(); scrollDown(true); }
+function drawAll() { drawHeader(); drawList(); drawProjects(); drawThread(); drawChips(); drawTools(); scrollDown(true); }
 function autosize() { const t = $("#input"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, window.innerHeight * 0.38) + "px"; }
 
 // ---------- attachments ----------
@@ -366,7 +414,9 @@ async function folderFile(path) {
   return (await (await dirAt(parts.slice(0, -1), false)).getFileHandle(parts[parts.length - 1])).getFile();
 }
 // agentOn: the model may run things on this computer (only from the computer running Potluck).
-const agentOn = () => S.settings.agent !== "off" && S.server && S.server.owner;
+// A project chat is a coding agent, so it can always run commands (asking first unless the
+// user chose to let it run freely).
+const agentOn = () => (S.settings.agent !== "off" || !!(S.cur && S.cur.project)) && S.server && S.server.owner;
 async function runOnComputer(kind, command, dir, timeout) {
   const r = await fetch("/potluck/run", { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify({ kind, command, dir: dir || "", timeout: +timeout || 0 }), signal: S.gen && S.gen.abort.signal });
   const j = await r.json().catch(() => ({}));
@@ -375,7 +425,7 @@ async function runOnComputer(kind, command, dir, timeout) {
   return head + "\n" + (j.output.trim() ? j.output : "(no output)");
 }
 const TOOLS = {
-  async run_command(a) { return runOnComputer("shell", a.command, a.folder, a.timeout_seconds); },
+  async run_command(a) { return runOnComputer("shell", a.command, a.folder || (S.cur && S.cur.project ? S.cur.project.root : ""), a.timeout_seconds); },
   async run_applescript(a) { return runOnComputer("applescript", a.script, "", a.timeout_seconds); },
   async use_skill(a) { const r = await api("/potluck/skill?name=" + encodeURIComponent(a.name || "")); return r.text; },
   async list_files(a) {
@@ -423,7 +473,18 @@ function toolSpecs() {
     if (mac) agent.push(fn("run_applescript", "Run an AppleScript on the user's Mac to control apps: open documents, read or change what an app shows (Finder, Safari, Mail, Notes, Music, System Events for clicks and keystrokes). macOS asks the user once per app before allowing it.",
       { script: { type: "string", description: "The AppleScript source" }, timeout_seconds: { type: "integer" } }, ["script"]));
   }
+  if (S.cur && S.cur.project && S.server && S.server.owner) {
+    if (!agent.some(t => t.function.name === "run_command")) agent.unshift(fn("run_command", "Run a command on the user's computer, in the project folder unless you give another folder. Use it for builds, tests, git, package managers and anything else. It cannot answer questions a command asks.",
+      { command: { type: "string" }, folder: { type: "string" }, timeout_seconds: { type: "integer", description: "Default 120, at most 900" } }, ["command"]));
+    agent.push(
+      fn("list_files", "List the project's files (dependency and build folders are left out).", { path: { type: "string", description: "Subfolder, relative to the project. Leave out for all." }, pattern: { type: "string", description: "Only files matching this, e.g. *.go or src/**/*.ts" } }),
+      fn("read_file", "Read a file from the project, with line numbers.", { path: { type: "string" }, start_line: { type: "integer" }, max_lines: { type: "integer", description: "Default 2000" } }, ["path"]),
+      fn("search_files", "Find lines in the project's files containing some text, or matching /a regular expression/.", { query: { type: "string" }, pattern: { type: "string", description: "Only files matching this, e.g. *.py" } }, ["query"]),
+      fn("edit_file", "Replace exact text in a file. old must match the file exactly (copy it from read_file, without the line numbers) and be unique unless all is true.", { path: { type: "string" }, old: { type: "string" }, new: { type: "string" }, all: { type: "boolean" } }, ["path", "old", "new"]),
+      fn("write_file", "Create a file in the project, or replace its whole content.", { path: { type: "string" }, content: { type: "string" } }, ["path", "content"]));
+  }
   if (S.ctx && (S.ctx.skills || []).length) agent.push(fn("use_skill", "Load one of the user's skills (listed in your instructions) and get its full instructions.", { name: { type: "string", description: "The skill's name" } }, ["name"]));
+  if (S.cur && S.cur.project) return agent;
   if (!S.folder || S.folder.needsAccess || S.settings.perm === "none") return agent.length ? agent : null;
   const t = [...agent,
     fn("list_files", "List the files in the user's folder, or in a subfolder of it.", { path: { type: "string", description: "Subfolder, relative to the folder. Leave out for everything." } }),
@@ -439,8 +500,11 @@ function askPermission(call, kind) {
     let a = {}; try { a = JSON.parse(call.args || "{}"); } catch { }
     const el = $(`.tool[data-call="${CSS.escape(call.id)}"]`); if (!el) return resolve("deny");
     el.classList.add("ask"); el.open = true;
-    const what = kind === "write" ? `The model wants to ${"write " + esc(a.path || "a file")} in ${esc(S.folder.name)}.` : `The model wants to ${call.name === "search_files" ? "search" : call.name === "list_files" ? "list the files in" : "read " + esc(a.path || "a file") + " in"} ${esc(S.folder.name)}.`;
-    $(".out", el).innerHTML = what + (kind === "write" ? `\n\n${esc(String(a.content || "").slice(0, 3000))}${String(a.content || "").length > 3000 ? "\n…" : ""}` : "");
+    const where = esc(S.folder ? S.folder.name : S.cur.project ? S.cur.project.name : "your folder");
+    const verb = call.name === "edit_file" ? "change " + esc(a.path || "a file") : "write " + esc(a.path || "a file");
+    const what = kind === "write" ? `The model wants to ${verb} in ${where}.` : `The model wants to ${call.name === "search_files" ? "search" : call.name === "list_files" ? "list the files in" : "read " + esc(a.path || "a file") + " in"} ${where}.`;
+    const shown = call.name === "edit_file" ? `Replace:\n${String(a.old || "").slice(0, 1500)}\n\nWith:\n${String(a.new || "").slice(0, 1500)}` : String(a.content || "");
+    $(".out", el).innerHTML = what + (kind === "write" ? `\n\n${esc(shown.slice(0, 3000))}${shown.length > 3000 ? "\n…" : ""}` : "");
     const row = document.createElement("div"); row.className = "ask-row";
     row.innerHTML = `<button class="btn small" data-v="allow">Allow</button><button class="btn small ghost" data-v="always">Always allow ${kind === "write" ? "changes" : "reading"} in this chat</button><button class="btn small ghost" data-v="deny">Don't allow</button>`;
     el.appendChild(row); scrollDown(true);
@@ -465,8 +529,26 @@ function askRun(call) {
     S.gen.cancelAsk = () => { row.remove(); resolve("deny"); };
   });
 }
+const PTOOLS = { // project chats: the files live on this computer, reached through Potluck
+  list_files: a => fsCall({ op: "list", root: S.cur.project.root, path: a.path || "", glob: a.pattern || "" }),
+  read_file: a => fsCall({ op: "read", root: S.cur.project.root, path: a.path, start: +a.start_line || 0, max: +a.max_lines || 0 }),
+  search_files: a => fsCall({ op: "search", root: S.cur.project.root, query: a.query, glob: a.pattern || "" }),
+  edit_file: a => fsCall({ op: "edit", root: S.cur.project.root, path: a.path, old: a.old, new: a.new, all: !!a.all }),
+  write_file: a => fsCall({ op: "write", root: S.cur.project.root, path: a.path, content: String(a.content ?? "") }),
+};
 async function runTool(call) {
   const c = S.cur;
+  if (c.project && PTOOLS[call.name]) {
+    const kind = call.name === "write_file" || call.name === "edit_file" ? "write" : "read", level = S.settings.perm;
+    const needAsk = level === "ask" || level === "none" ? !c.grants[kind] : level === "read" ? kind === "write" && !c.grants.write : false;
+    if (needAsk) {
+      const v = await askPermission(call, kind);
+      if (v === "deny") return { state: "denied", content: "The user did not allow this." };
+      if (v === "always") c.grants[kind] = true;
+    }
+    try { let a = {}; try { a = JSON.parse(call.args || "{}"); } catch { throw new Error("The tool request was not valid."); } return { state: "ok", content: (await PTOOLS[call.name](a)).text }; }
+    catch (e) { return { state: "error", content: "Could not do that: " + (e.message || e) }; }
+  }
   if (call.name === "use_skill") { // reads only Potluck's own copy of the user's skills
     try { let a = {}; try { a = JSON.parse(call.args || "{}"); } catch { } return { state: "ok", content: await TOOLS.use_skill(a) }; }
     catch (e) { return { state: "error", content: "Could not load that skill: " + (e.message || e) }; }
@@ -513,6 +595,16 @@ function systemPrompt() {
       (S.settings.agent === "auto"
         ? `The user has chosen to let you act without asking, so carry out what they ask, changes included. When you are done, say plainly what you did and what you found.`
         : `Before anything that deletes, overwrites, sends, buys or cannot be undone, stop and ask the user in your reply instead of running it. When you are done, say plainly what you did and what you found.`));
+  }
+  if (S.cur.project && S.proj) {
+    const pj = S.proj;
+    p.push(`You are working in the user's project "${pj.name}", the folder ${pj.root} on this computer${pj.git ? " (a git repository)" : ""}, ${pj.files || "some"} files. ` +
+      `Use list_files, read_file, search_files, edit_file and write_file with paths relative to that folder, and run_command for builds, tests, git and anything else (it starts in the project folder). ` +
+      `Work like a careful senior engineer: look before you change anything, read the files you edit, make focused edits with edit_file, then build or run the tests to check your work, and fix what fails. ` +
+      `When you are done, say plainly what you changed and how you checked it.`);
+    if ((pj.instructions || "").trim()) p.push(`The project's own instructions (${pj.instrFile}), which you follow:\n\n` + cap(pj.instructions.trim(), 24000));
+    if ((pj.memory || "").trim()) p.push("What you remember about this project:\n\n" + cap(pj.memory.trim(), 16000));
+    if (pj.error) p.push("Note: " + pj.error);
   }
   if (S.folder && toolSpecs() && toolSpecs().some(t => t.function.name === "list_files")) p.push(`The user has shared a folder named "${S.folder.name}". Use the tools to look at${S.folder.kind === "handle" ? " or change" : ""} files in it when that helps. Paths are relative to that folder. Do not guess what a file contains: read it.`);
   return p.join("\n\n");
@@ -666,7 +758,7 @@ async function generate() {
   S.gen = { abort, chatId: c.id, msg: null, note: "" };
   drawTools();
   try {
-    const rounds = agentOn() ? 30 : 12;
+    const rounds = S.cur.project ? 200 : agentOn() ? 30 : 12; // a coding task takes many steps
     for (let round = 0; round < rounds; round++) {
       const msg = { id: uid(), role: "assistant", content: "", reasoning: "", t: Date.now() };
       c.messages.push(msg); S.gen.msg = msg; S.gen.note = round ? "Reading what it found…" : (c.messages.length > 2 || !toolSpecs() ? "Reading your message…" : "Reading your message and how to use your folder…");
@@ -1021,6 +1113,7 @@ function wire() {
   $("#side-close").onclick = $("#side-open").onclick = toggleSide;
   $("#new-chat").onclick = () => openChat();
   $("#chat-search").oninput = e => { S.filter = e.target.value; drawList(); };
+  $("#project-list").onclick = e => { if (e.target.closest("[data-a=all-projects]")) return projectsSheet(); const it = e.target.closest("[data-proj]"); if (it) openProject(it.dataset.proj, it.dataset.name); };
   $("#chat-list").onclick = e => { const more = e.target.closest("[data-a=chat-more]"); if (more) { e.stopPropagation(); return chatMenu(more, more.dataset.id); } const it = e.target.closest(".chat-item"); if (it) openChat(it.dataset.id); };
   $("#chat-list").onkeydown = e => { if (e.key === "Enter" && e.target.classList.contains("chat-item")) openChat(e.target.dataset.id); };
   $("#cluster-chip").onclick = () => usageSheet();

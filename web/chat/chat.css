@@ -46,7 +46,9 @@ body.side-closed #side{margin-left:-280px}
 .search{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:6px 10px;color:var(--muted)}
 .search input{border:0;background:none;outline:0;width:100%;color:var(--ink)}
 #chat-list{flex:1;overflow-y:auto;margin:0 -6px;padding:0 6px}
-#chat-list h4{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:14px 6px 4px;font-weight:700}
+#project-list{margin:0 -6px;padding:0 6px;flex:none}
+#project-list .chat-item .ic{opacity:.7}
+#project-list h4,#chat-list h4{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:14px 6px 4px;font-weight:700}
 .chat-item{display:flex;align-items:center;gap:6px;border-radius:8px;padding:7px 8px;cursor:pointer;font-size:14.5px}
 .chat-item span.t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chat-item:hover{background:var(--track)}
