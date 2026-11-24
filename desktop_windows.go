@@ -229,7 +229,7 @@ func winLatest() (string, string, error) {
 	}
 	want := "Potluck-windows.exe"
 	if runtime.GOARCH == "arm64" {
-		want = "Potluck-windows-arm64.exe"
+		want = "Potluck-windows-arm.exe"
 	}
 	for _, a := range rel.Assets {
 		if a.Name == want {

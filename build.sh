@@ -18,10 +18,12 @@ for t in windows/amd64 windows/arm64 darwin/arm64 darwin/amd64 linux/amd64 linux
   echo "built $out"
 done
 
-# The Windows app people download: installs itself for the person (no administrator), with a
+# The Windows app people download (names that differ from the plain programs' names in more
+# than upper and lower case: on a Mac's disk Potluck-windows-arm64.exe and
+# potluck-windows-arm64.exe are the same file): installs itself for the person (no administrator), with a
 # tray icon and its own window (desktop_windows.go). Fixed names, so a website can link to them.
 for arch in amd64 arm64; do
-  out=dist/Potluck-windows.exe; [ $arch = arm64 ] && out=dist/Potluck-windows-arm64.exe
+  out=dist/Potluck-windows.exe; [ $arch = arm64 ] && out=dist/Potluck-windows-arm.exe
   GOOS=windows GOARCH=$arch CGO_ENABLED=0 go build -tags desktop -trimpath -ldflags "-s -w -H windowsgui -X main.version=$VERSION" -o "$out" .
   echo "built $out"
 done
@@ -98,7 +100,7 @@ if [ "$(uname -s)" = Darwin ] && command -v codesign >/dev/null 2>&1; then
 fi
 
 # Checksums for everything a release offers (the installers and updaters check them).
-(cd dist && rm -f SHA256SUMS.txt && for f in Potluck-mac.dmg Potluck-*-mac.zip Potluck-windows.exe Potluck-windows-arm64.exe install.sh \
+(cd dist && rm -f SHA256SUMS.txt && for f in Potluck-mac.dmg Potluck-*-mac.zip Potluck-windows.exe Potluck-windows-arm.exe install.sh \
     potluck-windows-amd64.exe potluck-windows-arm64.exe potluck-darwin-arm64 potluck-darwin-amd64 potluck-linux-amd64 potluck-linux-arm64; do
   [ -f "$f" ] && shasum -a 256 "$f"
 done > SHA256SUMS.txt)
