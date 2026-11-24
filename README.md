@@ -4,7 +4,7 @@ Run one large AI model across the spare computers you already own.
 
 A laptop with 16 GB, an old gaming PC, a Linux box in the closet: none of them can hold a big model alone, but together they can. Potluck pools their memory, splits the model between them, and gives you one chat page and one OpenAI-compatible API on your main computer.
 
-Version 1.7.0. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second (3.2 on 21 November with the newer engine in 1.6.0).
+Version 1.8.0. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second (3.2 on 21 November with the newer engine in 1.6.0).
 
 **Recommended model to start with: Inkling 2 Mini** (`AtomicChat/Inkling-2-Mini-Uncensored-GGUF`), starred in the Models tab. Its 8.7 GB IQ2_M size ran on one Windows PC with 30 GB and a 4 GB GTX 1050 Ti at 2.5 to 3 words per second on 21 November 2026. This version has had its refusals removed: it answers what it is asked. It always thinks briefly before answering; switching Think off in the chat page keeps that as short as the model allows.
 
@@ -53,6 +53,19 @@ Open `http://127.0.0.1:7720` on the main computer (or "Open chat" in the control
 - **Also:** thinking on or off, writing styles, your own standing instructions, stop, a preview panel for HTML and SVG the model writes, light and dark, keyboard shortcuts, and a phone-sized layout.
 
 Two things make it quick on slow hardware. Follow-up messages read only what is new: for Qwen-style models the page sends the conversation back exactly as it was written, where the standard route made the engine read every earlier token again on every turn (measured: 23 new tokens instead of 78). And there are no hidden extra requests, such as asking the model for a title.
+
+## On your iPhone
+
+The Potluck iPhone app (in `ios/`) chats with the model running on your computer, at home over Wi-Fi or anywhere through Tailscale. To pair: in the control panel, under Computers, choose **Pair a phone**, then scan the code with the app (or paste the link under the code). After that the app connects by itself.
+
+- The connection is encrypted with your computer's own certificate, and the app accepts no other: the pairing code carries its fingerprint. Each phone gets a key of its own; **Remove** in the control panel takes it away at once.
+- The phone can chat (with thinking on or off, and with text files or PDFs attached), see what is running, and start another model that is already on your computers. It cannot run commands on your computer or change settings: agent mode stays on the computer's own chat page, where each command is shown before it runs.
+- A model resting to free memory loads again with the phone's message.
+- Your computer only listens for phones while one is paired or a pairing code is showing, and only on its home-network and Tailscale addresses (port 7721). Chats are kept on the phone.
+
+To put it on your iPhone: open `ios/Potluck.xcodeproj` in Xcode, choose your team under Signing & Capabilities, connect the phone and press Run. (If you change `ios/project.yml`, run `xcodegen generate` in `ios/` first.)
+
+The app has a UI test (`ios/PotluckUITests`) that pairs with a running Potluck, asks a question and opens every screen, saving a screenshot of each. Give it a fresh pairing link: `TEST_RUNNER_POTLUCK_LINK='potluck://pair?…' TEST_RUNNER_POTLUCK_SHOTS=/some/folder xcodebuild test -project ios/Potluck.xcodeproj -scheme Potluck -destination 'platform=iOS Simulator,name=iPhone 17'`.
 
 ## What is inside
 

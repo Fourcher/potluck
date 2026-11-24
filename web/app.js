@@ -177,7 +177,31 @@ function viewComputers() {
         <div class="row"><select id="kitdrive" aria-label="Drive">${(kit.drives || []).map(d => `<option>${esc(d)}</option>`).join("")}<option value="">Another folder…</option></select>
         <button class="btn" data-a="kit">Make setup kit</button></div>
         <p class="small" id="kitmsg">${esc(kit.msg)}</p></div>
-    </div>`;
+    </div>
+    ${phonesView()}`;
+}
+
+// ---------- phones ----------
+let phones = { list: null, code: null, error: "" };
+function loadPhones() { api("/api/phones").then(r => { phones.list = r.phones || []; if (!phones.list.some(p => p.pairing)) phones.code = null; draw(true); }).catch(e => { phones.error = e.message; draw(true); }); }
+function phonesView() {
+  if (!phones.list || Date.now() - (phones.at || 0) > 15000) { phones.at = Date.now(); phones.list = phones.list || []; loadPhones(); }
+  const paired = phones.list.filter(p => !p.pairing);
+  const ago = t => { if (!t) return "not connected yet"; const s = (Date.now() - new Date(t)) / 1000; return s < 90 ? "connected just now" : s < 3600 ? `last connected ${Math.round(s / 60)} minutes ago` : `last connected ${new Date(t).toLocaleString()}`; };
+  const rows = paired.map(p => `<div class="file"><span class="q">${esc(p.name)}</span><span></span><span class="n muted small">Paired ${new Date(p.added).toLocaleDateString()} · ${ago(p.seen)}</span>
+    <span class="row"><button class="btn sm quiet" data-a="phoneforget" data-id="${esc(p.id)}">Remove</button></span></div>`).join("");
+  const code = phones.code ? `<div class="row" style="gap:18px;align-items:flex-start;margin-top:10px"><img src="${phones.code.qr}" alt="Pairing code" width="220" height="220" style="image-rendering:pixelated;background:#fff;border-radius:8px;padding:6px">
+      <div class="small"><p><b>In the Potluck app on your iPhone, tap "Scan the pairing code" and point the camera at this code.</b></p>
+      <p class="muted" style="margin-top:6px">It works once, for ${phones.code.minutes} minutes. The phone will reach this computer at ${phones.code.addrs.map(esc).join(" or ")}${phones.code.addrs.some(a => a.startsWith("100.")) ? " (the 100. address works away from home through Tailscale)" : ""}.</p>
+      <p class="muted" style="margin-top:6px">No camera handy? Copy this link into the app instead:</p>
+      <p><input type="text" readonly value="${esc(phones.code.link)}" style="width:100%;min-width:260px" onclick="this.select()" aria-label="Pairing link"></p>
+      <p style="margin-top:8px"><button class="btn sm quiet" data-a="phonestop">Hide the code</button></p></div></div>` : "";
+  return `<h2>Your iPhone</h2><div class="card">
+    <p class="muted small">Chat with your model from the Potluck iPhone app, at home or, with Tailscale, anywhere. The phone can chat, see what is running and switch models. It cannot run commands on this computer or change settings. The connection is encrypted and only phones you pair here get in.</p>
+    ${phones.error ? `<div class="err">${esc(phones.error)}</div>` : ""}
+    ${rows ? `<div class="files" style="margin-top:8px">${rows}</div>` : ""}
+    ${code || `<p style="margin-top:10px"><button class="btn sm" data-a="phonepair">${paired.length ? "Pair another phone" : "Pair a phone"}</button></p>`}
+  </div>`;
 }
 
 // ---------- main computer: models ----------
@@ -542,6 +566,9 @@ const actions = {
   stop() { logText = ""; act(() => api("/api/stop", {})); },
   test() { act(() => api("/api/test", {})); },
   planlocal(t) { openPlan({ source: "local", node: t.dataset.node, file: t.dataset.file }); },
+  phonepair() { phones.error = ""; api("/api/phones", { action: "pair" }).then(r => { phones.code = r; loadPhones(); }).catch(e => { phones.error = e.message; draw(true); }); },
+  phonestop() { phones.code = null; api("/api/phones", { action: "stop" }).then(loadPhones).catch(e => toast(e.message)); },
+  phoneforget(t) { if (confirm("Remove this phone? It will need to be paired again to connect.")) api("/api/phones", { action: "forget", id: t.dataset.id }).then(loadPhones).catch(e => toast(e.message)); },
   async usefound(t) {
     try {
       const r = await api("/api/use_found", { path: t.dataset.path });

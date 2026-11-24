@@ -55,6 +55,8 @@ type Config struct {
 	IdleUnload int `json:"idleUnload,omitempty"`
 	// AgentDir: the folder commands from the chat page's agent mode start in.
 	AgentDir string `json:"agentDir,omitempty"`
+	// Phones: paired iPhones, by id. Each holds a key; only its hash is kept here.
+	Phones map[string]PhoneKey `json:"phones,omitempty"`
 }
 
 // ConfigStore saves Config to disk on every change.
