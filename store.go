@@ -70,6 +70,9 @@ type StoreModel struct {
 	Recommended bool `json:"recommended,omitempty"`
 }
 
+// recommended is the model Potluck suggests first: the daily catalog's pick when it has one.
+func (h *Host) recommended() string { return recommendedRepo }
+
 // recommendedRepo is the model Potluck suggests first (starred in the model store).
 const recommendedRepo = "AtomicChat/Inkling-2-Mini-Uncensored-GGUF"
 

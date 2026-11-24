@@ -46,7 +46,19 @@ func openBrowser(url string) {
 	_ = cmd.Start()
 }
 
+// The desktop apps (desktop_windows.go) hook in here: desktopBefore installs the app and may
+// end this process; desktopRun shows the app's own window instead of a browser tab;
+// desktopShow opens that window when Potluck is already running.
+var (
+	desktopBefore func() bool
+	desktopRun    func(ui string)
+	desktopShow   func(ui string)
+)
+
 func main() {
+	if desktopBefore != nil && desktopBefore() {
+		return
+	}
 	role := ""
 	args := os.Args[1:]
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -84,7 +96,10 @@ func main() {
 		if res, err := (&http.Client{Timeout: 2 * time.Second}).Get(ui + "/api/state"); err == nil {
 			res.Body.Close()
 			fmt.Println("Potluck is already running. Opening its control panel.")
-			if !*noBrowser {
+			if desktopShow != nil {
+				desktopShow(ui)
+				select {} // the window keeps this process; closing it ends it
+			} else if !*noBrowser {
 				openBrowser(ui)
 			}
 			return
@@ -143,7 +158,9 @@ func main() {
 	fmt.Println("Control panel:", ui)
 	fmt.Println("Data folder:  ", *dataDir)
 	fmt.Println("Leave this window open. Close it to stop Potluck on this computer.")
-	if !*noBrowser {
+	if desktopRun != nil {
+		go desktopRun(ui)
+	} else if !*noBrowser {
 		go func() { time.Sleep(600 * time.Millisecond); openBrowser(ui) }()
 	}
 	if err := app.serveUI(); err != nil {

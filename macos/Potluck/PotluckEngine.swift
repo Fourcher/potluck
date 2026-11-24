@@ -17,6 +17,13 @@ final class PotluckEngine {
     var waiting: [Question] = []   // questions tasks are waiting on
     var version = ""
     var problem = ""               // why Potluck could not be started, if it could not
+    var role = ""                  // "" until the person chooses: single | main | helper
+    var hasModel = false           // a model has been chosen at least once
+    var linkPhase = ""             // helper: searching | pairing | connected
+    var linkNote = ""
+    var mainName = ""
+    var pairCode = ""
+    var checked = false            // the first answer from Potluck has arrived
 
     struct Question: Decodable, Identifiable, Equatable {
         let id: String
@@ -55,7 +62,7 @@ final class PotluckEngine {
         guard let bin = binary else { problem = "The Potluck program is missing from this app. Download it again."; return }
         let p = Process()
         p.executableURL = bin
-        p.arguments = ["main", "--data", dataDir, "--no-browser"]
+        p.arguments = ["--data", dataDir, "--no-browser"] // the role comes from the welcome window, then from its settings
         let logURL = URL(fileURLWithPath: dataDir).appendingPathComponent("logs/potluck-app.log")
         try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
@@ -98,6 +105,21 @@ final class PotluckEngine {
         _ = try? await post(Self.panelURL.appendingPathComponent("api/start"), m)
     }
 
+    /// The person's first choice: what this computer is for.
+    func choose(role r: String) async throws {
+        _ = try await post(Self.panelURL.appendingPathComponent("api/role"), ["role": r])
+        await refresh()
+    }
+
+    /// Downloads and starts the recommended model in the size that suits these computers.
+    func quickStart() async throws -> String {
+        let d = try await post(Self.panelURL.appendingPathComponent("api/quickstart"), [:], timeout: 120)
+        let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
+        if let e = j?["error"] as? String { throw NSError(domain: "Potluck", code: 1, userInfo: [NSLocalizedDescriptionKey: e]) }
+        await refresh()
+        return j?["title"] as? String ?? ""
+    }
+
     func answer(_ q: Question, _ text: String) async {
         _ = try? await post(Self.chatURL.appendingPathComponent("potluck/sessions/\(q.session)/answer"), ["question": q.id, "answer": text])
         waiting.removeAll { $0.id == q.id }
@@ -122,7 +144,15 @@ final class PotluckEngine {
             return
         }
         running = true
+        checked = true
         version = s["version"] as? String ?? ""
+        role = s["role"] as? String ?? ""
+        if let hp = s["helper"] as? [String: Any], let link = hp["link"] as? [String: Any] {
+            linkPhase = link["phase"] as? String ?? ""
+            linkNote = link["note"] as? String ?? ""
+            mainName = link["mainName"] as? String ?? ""
+            pairCode = link["code"] as? String ?? ""
+        }
         if let main = s["main"] as? [String: Any], let c = main["cluster"] as? [String: Any] {
             phase = c["phase"] as? String ?? "idle"
             if phase == "idle", main["asleep"] as? [String: Any] != nil { phase = "resting" }
@@ -131,6 +161,7 @@ final class PotluckEngine {
             errorText = c["error"] as? String ?? ""
             tps = c["tps"] as? Double ?? 0
             stepText = ((c["steps"] as? [[String: Any]])?.last { ($0["state"] as? String) == "doing" }?["text"] as? String) ?? ""
+            hasModel = c["model"] as? [String: Any] != nil || main["lastModel"] as? [String: Any] != nil || main["asleep"] as? [String: Any] != nil
             computers = ((main["nodes"] as? [[String: Any]]) ?? []).map {
                 (name: (($0["info"] as? [String: Any])?["name"] as? String) ?? "?", online: $0["online"] as? Bool ?? false, role: $0["role"] as? String ?? "")
             }
@@ -158,10 +189,10 @@ final class PotluckEngine {
     }
 
     @discardableResult
-    private func post(_ url: URL, _ body: [String: Any]) async throws -> Data {
+    private func post(_ url: URL, _ body: [String: Any], timeout: TimeInterval = 30) async throws -> Data {
         var r = URLRequest(url: url)
         r.httpMethod = "POST"
-        r.timeoutInterval = 30
+        r.timeoutInterval = timeout
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
         r.setValue("1", forHTTPHeaderField: "X-Potluck") // Potluck's own pages and apps send this
         r.httpBody = try JSONSerialization.data(withJSONObject: body)

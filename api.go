@@ -323,6 +323,22 @@ func (app *App) serveUI() error {
 		return nil, h.Start(in.ModelRef, in.Ctx, in.Solo)
 	})
 
+	// One button from "installed" to "chatting": the recommended model, in the size that suits
+	// these computers, downloaded and started.
+	api("/api/quickstart", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+		defer cancel()
+		m, err := h.QuickStart(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"title": m.Title, "file": m.File, "size": m.Size}, nil
+	})
+
 	api("/api/discover", func(r *http.Request) (any, error) {
 		h, err := needMain()
 		if err != nil {

@@ -16,6 +16,11 @@ struct PotluckApp: App {
         }
         .menuBarExtraStyle(.window)
 
+        Window("Welcome to Potluck", id: "welcome") {
+            WelcomeView().environment(delegate.engine)
+        }
+        .windowResizability(.contentSize)
+
         Window("Potluck", id: "chat") {
             WebView(url: PotluckEngine.chatURL).frame(minWidth: 720, minHeight: 520)
         }
@@ -39,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     let updater = Updater()
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        MoveToApplications.offerIfNeeded()
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         let yes = UNNotificationAction(identifier: "YES", title: "Yes")
@@ -88,7 +94,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
 struct MenuIcon: View {
     @Environment(PotluckEngine.self) private var engine
+    @Environment(\.openWindow) private var openWindow
+    @State private var welcomed = false
     var body: some View {
+        icon
+            // The first time (or while nothing is set up yet) the welcome window opens by itself,
+            // so a new person never faces just an icon in the menu bar.
+            .onChange(of: engine.checked) { _, ok in
+                guard ok, !welcomed else { return }
+                welcomed = true
+                if engine.role.isEmpty || (engine.role != "helper" && !engine.hasModel) || !UserDefaults.standard.bool(forKey: "welcomed") {
+                    NSApp.setActivationPolicy(.regular)
+                    openWindow(id: "welcome")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            }
+    }
+
+    @ViewBuilder private var icon: some View {
         // Three dots in a circle; filled while a model runs, with a badge when a task waits.
         let symbol = engine.waiting.isEmpty ? (engine.phase == "running" ? "circle.grid.cross.fill" : "circle.grid.cross") : "exclamationmark.circle.fill"
         Image(systemName: symbol)

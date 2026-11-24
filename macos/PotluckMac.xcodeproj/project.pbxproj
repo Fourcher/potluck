@@ -10,11 +10,13 @@
 		17A4FBAB60E5DE3A1070AC18 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 96886E9277DCDE21082C6A3D /* Assets.xcassets */; };
 		18F65D48D180CE7150EB1D10 /* PotluckEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2F1B5BB421E3D7A9408E372 /* PotluckEngine.swift */; };
 		3615502D0E59E62693688095 /* PotluckApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D9A6B8ED2D497A2E9F0DDA5 /* PotluckApp.swift */; };
+		36DBB93F01617101F2AFD781 /* Welcome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 070946A44B787FFC6D2A7232 /* Welcome.swift */; };
 		F457199AB684514B941FA7C8 /* Updater.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0095C3C4D36BA29F2D81342A /* Updater.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		0095C3C4D36BA29F2D81342A /* Updater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Updater.swift; sourceTree = "<group>"; };
+		070946A44B787FFC6D2A7232 /* Welcome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Welcome.swift; sourceTree = "<group>"; };
 		2D9A6B8ED2D497A2E9F0DDA5 /* PotluckApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PotluckApp.swift; sourceTree = "<group>"; };
 		96886E9277DCDE21082C6A3D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		E4FD522218FCA79A9039D871 /* Potluck.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Potluck.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -29,6 +31,7 @@
 				2D9A6B8ED2D497A2E9F0DDA5 /* PotluckApp.swift */,
 				F2F1B5BB421E3D7A9408E372 /* PotluckEngine.swift */,
 				0095C3C4D36BA29F2D81342A /* Updater.swift */,
+				070946A44B787FFC6D2A7232 /* Welcome.swift */,
 			);
 			path = Potluck;
 			sourceTree = "<group>";
@@ -123,6 +126,7 @@
 				3615502D0E59E62693688095 /* PotluckApp.swift in Sources */,
 				18F65D48D180CE7150EB1D10 /* PotluckEngine.swift in Sources */,
 				F457199AB684514B941FA7C8 /* Updater.swift in Sources */,
+				36DBB93F01617101F2AFD781 /* Welcome.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
