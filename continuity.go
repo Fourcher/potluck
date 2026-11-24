@@ -120,6 +120,15 @@ func scanContinuity(home string, folders []string) []*contFound {
 			out = append(out, c)
 		}
 	}
+	// What the person's AI saved for Potluck when it could not hand it over directly.
+	for _, f := range []string{filepath.Join(home, "Downloads", "potluck-import.json"), filepath.Join(home, "potluck-import.json")} {
+		if raw := readSmall(f, 16<<20); raw != "" {
+			if c, err := bundleFound([]byte(raw)); err == nil {
+				c.src.Name, c.src.Path = c.src.Name+", saved in "+filepath.Base(filepath.Dir(f)), f
+				out = append(out, c)
+			}
+		}
+	}
 	return out
 }
 
@@ -826,10 +835,12 @@ Gather all of this, as completely and specifically as you can:
 2. preferences: how I like you to work and talk (tone, level of detail, things I've asked you to always or never do).
 3. memories: every saved memory or fact you keep about me, one per item, each with a short title. Add "project" when a memory belongs to one project.
 4. projects: the projects we've worked on, each with its name, its folder path on this computer if there is one, and a few lines on what it is and where it stands.
-5. skills: any custom instructions, workflows, prompts or skills I've set up with you, each with a name, a one-line description, and the full instructions.
+5. skills: custom instructions, workflows, prompts or skills I've set up with you that live in your account or app (custom GPTs, project instructions, saved prompts), each with a name, a one-line description, and the full instructions. Skill files on this computer that Potluck reads itself can be left out.
 6. connectors: the integrations, MCP servers, plugins or apps you use for me, with what each is for and how it's set up. Do not include passwords, API keys or tokens; say which ones a connector needs instead.
 
 Get it the easiest way you can. Read files and run scripts first. If something only shows up inside an app or a web page (a memory settings page, for example), and you can control the screen or a browser, use that. Don't make things up: leave out anything you aren't sure of.
+
+This stays on my computer: Potluck runs here, and the hand-over below goes to this computer only, never over the internet. So include personal details where they help Potluck know me, except passwords, keys and tokens.
 
 Then hand it to Potluck as one JSON document of this shape:
 {"potluckImport": 1, "from": "<your name, e.g. ChatGPT or Claude>", "profile": "...", "preferences": "...",
