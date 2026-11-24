@@ -177,6 +177,7 @@ func winRun(ui string) {
 					case <-open.ClickedCh:
 						winShow(ui)
 					case <-quit.ClickedCh:
+						killAllEngines()
 						systray.Quit()
 						os.Exit(0)
 					}

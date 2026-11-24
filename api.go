@@ -762,6 +762,8 @@ func (app *App) serveUI() error {
 				app.host.Stop()
 			}
 			app.agent.Stop()
+			app.agent.stopAux()
+			killAllEngines()
 			time.Sleep(300 * time.Millisecond)
 			os.Exit(0)
 		}()

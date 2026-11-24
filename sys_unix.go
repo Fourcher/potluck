@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -40,4 +41,16 @@ func ownGroup(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: t
 // keeps watching it).
 func execSelf(exe string, args []string) {
 	_ = syscall.Exec(exe, append([]string{exe}, args...), os.Environ())
+}
+
+// procPath is the program a running process was started from ("" if unknown).
+func procPath(pid int) string {
+	if p, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe"); err == nil {
+		return p
+	}
+	out, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

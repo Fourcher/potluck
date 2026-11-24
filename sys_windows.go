@@ -87,3 +87,19 @@ func execSelf(exe string, args []string) {
 		os.Exit(0)
 	}
 }
+
+// procPath is the program a running process was started from ("" if unknown).
+func procPath(pid int) string {
+	h, err := syscall.OpenProcess(0x1000 /* PROCESS_QUERY_LIMITED_INFORMATION */, false, uint32(pid))
+	if err != nil {
+		return ""
+	}
+	defer syscall.CloseHandle(h)
+	buf := make([]uint16, 1024)
+	n := uint32(len(buf))
+	q := kernel32.NewProc("QueryFullProcessImageNameW")
+	if r, _, _ := q.Call(uintptr(h), 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&n))); r == 0 {
+		return ""
+	}
+	return syscall.UTF16ToString(buf[:n])
+}

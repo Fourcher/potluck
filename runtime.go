@@ -554,7 +554,9 @@ func (a *Agent) startProc(name, rtDir, bin string, args []string, restart, lowPr
 			_ = lowPrio
 			lowerPriority(cmd.Process.Pid)
 			lastResort(cmd.Process.Pid)
+			noteEngine(cmd.Process.Pid, cmd.Path)
 			_ = cmd.Wait()
+			forgetEngine(cmd.Process.Pid)
 			p.mu.Lock()
 			p.running = false
 			stopped := p.stopped

@@ -112,6 +112,10 @@ func main() {
 		fmt.Println("Cannot create the data folder:", err)
 		os.Exit(1)
 	}
+	// Engines a crashed or killed earlier run left behind go first; and from now on a quit
+	// request stops the engines before Potluck ends (reaper.go).
+	reapStale(*dataDir)
+	stopEnginesOnQuit()
 	id, err := loadOrCreateIdentity(*dataDir)
 	if err != nil {
 		fmt.Println("Cannot create this computer's identity:", err)
