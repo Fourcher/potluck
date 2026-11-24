@@ -72,11 +72,13 @@ func (h *Host) EnsureHelper() {
 		return
 	}
 	h.helper = helperState{Phase: "preparing", Note: "Choosing a computer for the helper"}
+	h.helperGen++
+	gen := h.helperGen
 	h.helperMu.Unlock()
 	go func() {
-		err := h.startHelper()
+		err := h.startHelper(gen)
 		h.helperMu.Lock()
-		if err != nil {
+		if err != nil && h.helperGen == gen {
 			h.helper.Phase, h.helper.Note = "error", err.Error()
 		}
 		h.helperMu.Unlock()
@@ -87,6 +89,15 @@ func (h *Host) helperNote(s string) {
 	h.helperMu.Lock()
 	h.helper.Note = s
 	h.helperMu.Unlock()
+}
+
+var errHelperCancelled = errors.New("cancelled")
+
+// helperCurrent says whether a setup run is still the wanted one (not stopped or restarted).
+func (h *Host) helperCurrent(gen int) bool {
+	h.helperMu.Lock()
+	defer h.helperMu.Unlock()
+	return h.helperGen == gen
 }
 
 // pickHelperNode: a computer that is lending now and has room, preferring one that isn't
@@ -100,6 +111,10 @@ func (h *Host) pickHelperNode(need int64) (string, string, error) {
 		free     int64
 		head     bool
 	}
+	headChoice := ""
+	if h.cfg != nil {
+		headChoice = h.cfg.Get().HeadChoice
+	}
 	var cs []cand
 	for id, n := range h.nodes {
 		if !n.Online || !n.Info.Limits.ActiveNow(now) {
@@ -109,7 +124,10 @@ func (h *Host) pickHelperNode(need int64) (string, string, error) {
 		if free < need {
 			continue
 		}
-		cs = append(cs, cand{id, n.Info.Name, free, id == h.cluster.Head && h.cluster.Phase == "running"})
+		// "head" here: anything to do with the main model (running it, holding part of it, or
+		// chosen to run it), so the helper never crowds it.
+		busy := (id == h.cluster.Head && h.cluster.Phase != "idle") || n.Role != "" || n.Held > 0 || id == headChoice
+		cs = append(cs, cand{id, n.Info.Name, free, busy})
 	}
 	if len(cs) == 0 {
 		return "", "", errors.New("none of your computers that lend their memory has " + humanBytes(need) + " free for the helper right now")
@@ -123,7 +141,7 @@ func (h *Host) pickHelperNode(need int64) (string, string, error) {
 	return cs[0].id, cs[0].name, nil
 }
 
-func (h *Host) startHelper() error {
+func (h *Host) startHelper(gen int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 	defer cancel()
 	m := helperModel
@@ -154,6 +172,9 @@ func (h *Host) startHelper() error {
 	if err := h.call(node, "fetch_model", FetchModelReq{URL: m.URL, File: m.File, Size: m.Size, SHA256: m.SHA256}, nil, 2*time.Hour); err != nil {
 		return err
 	}
+	if !h.helperCurrent(gen) {
+		return errHelperCancelled // stopped or moved while it downloaded: start nothing here
+	}
 	h.helperNote("Starting the helper on " + name)
 	if err := h.call(node, "start_aux", StartAuxReq{File: m.File, Ctx: helperCtx}, nil, time.Minute); err != nil {
 		return err
@@ -163,8 +184,17 @@ func (h *Host) startHelper() error {
 		if err := h.call(node, "aux_status", nil, &st, 15*time.Second); err != nil {
 			continue
 		}
+		if !h.helperCurrent(gen) {
+			_ = h.call(node, "stop_aux", nil, nil, 20*time.Second)
+			return errHelperCancelled
+		}
 		if st.Ready {
 			h.helperMu.Lock()
+			if h.helperGen != gen {
+				h.helperMu.Unlock()
+				_ = h.call(node, "stop_aux", nil, nil, 20*time.Second)
+				return errHelperCancelled
+			}
 			h.helper.Phase, h.helper.Note, h.helper.bytes = "ready", "", need
 			h.helperMu.Unlock()
 			return nil
@@ -195,6 +225,7 @@ func (h *Host) StopHelper() {
 	h.helperMu.Lock()
 	node := h.helper.Node
 	h.helper = helperState{Phase: "off"}
+	h.helperGen++ // a setup still running stops at its next step
 	h.helperMu.Unlock()
 	if node != "" {
 		_ = h.call(node, "stop_aux", nil, nil, 20*time.Second)

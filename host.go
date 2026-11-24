@@ -133,6 +133,7 @@ type Host struct {
 	phoneSrvs  []*http.Server
 	helperMu   sync.Mutex
 	helper     helperState // the Potluck helper (helper.go)
+	helperGen  int         // which setup run is current; bumped by stop and restart
 	shareMu    sync.Mutex
 	shareSrvs  []*http.Server
 	shareOn    string // the addresses the share server listens on now
