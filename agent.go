@@ -258,6 +258,7 @@ type (
 		Size   int64       `json:"size"`
 		SHA256 string      `json:"sha256"`
 		Parts  []ModelPart `json:"parts,omitempty"`
+		Vision *ModelPart  `json:"vision,omitempty"` // the image add-on, fetched with the model
 	}
 	SeedReq struct {
 		URL   string     `json:"url"`
@@ -462,6 +463,13 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 				return nil, err
 			}
 			before += part.Size
+		}
+		if v := in.Vision; v != nil && v.URL != "" {
+			if err := downloadFile(ctx, v.URL, filepath.Join(a.dir, "models", filepath.Base(v.File)), v.Size, v.SHA256, 8, func(d, t int64, s string) {
+				a.note("Image add-on: "+s, d, t)
+			}); err != nil {
+				return nil, fmt.Errorf("the model's image add-on: %w", err)
+			}
 		}
 		a.note("Model file ready", in.Size, in.Size)
 		return map[string]string{"path": dest}, nil

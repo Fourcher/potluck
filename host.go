@@ -1200,7 +1200,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			if local {
 				return nil // the file is already there
 			}
-			return h.call(p.id, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts}, nil, 24*time.Hour)
+			return h.call(p.id, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts, Vision: model.Vision}, nil, 24*time.Hour)
 		}
 		var res struct {
 			Port int `json:"port"`
