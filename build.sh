@@ -25,32 +25,21 @@ if [ "$(uname -s)" = Darwin ] && command -v codesign >/dev/null 2>&1; then
   codesign -s "$ID" -f dist/potluck-darwin-amd64 dist/potluck-darwin-arm64 2>/dev/null
   echo "signed the Mac programs ($([ "$ID" = - ] && echo "local signature" || echo "$ID"))"
 
-  # Potluck.app: one double-clickable app for both kinds of Mac. As a real app, macOS asks
-  # for Local Network permission by name instead of blocking it silently.
+  # Potluck.app: the native app (macos/: menu bar item, chat and control panel windows,
+  # notifications, updates) with the Potluck program for both kinds of Mac inside it. As a real
+  # app, macOS asks for Local Network permission by name instead of blocking it silently.
   APP=dist/Potluck.app
-  rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS"
-  lipo -create -output "$APP/Contents/MacOS/potluck" dist/potluck-darwin-arm64 dist/potluck-darwin-amd64
+  rm -rf "$APP"
+  DD="${POTLUCK_MAC_BUILD:-$PWD/dist/mac-build}"
+  (cd macos && xcodegen generate >/dev/null && xcodebuild build -project PotluckMac.xcodeproj -scheme Potluck -configuration Release \
+     -derivedDataPath "$DD" MARKETING_VERSION="$VERSION" CODE_SIGNING_ALLOWED=NO -quiet)
+  cp -R "$DD/Build/Products/Release/Potluck.app" "$APP"
+  lipo -create -output "$APP/Contents/Resources/potluck" dist/potluck-darwin-arm64 dist/potluck-darwin-amd64
   # The other platforms' programs travel inside the app so it can hand them to helpers.
   mkdir -p "$APP/Contents/Resources/kit"
   for f in dist/potluck-windows-amd64.exe dist/potluck-windows-arm64.exe dist/potluck-linux-amd64 dist/potluck-linux-arm64 dist/potluck-darwin-arm64 dist/potluck-darwin-amd64; do
     cp "$f" "$APP/Contents/Resources/kit/"
   done
-  cat > "$APP/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Potluck</string>
-  <key>CFBundleDisplayName</key><string>Potluck</string>
-  <key>CFBundleIdentifier</key><string>io.github.potluck.app</string>
-  <key>CFBundleExecutable</key><string>potluck</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>$VERSION</string>
-  <key>CFBundleVersion</key><string>$VERSION</string>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
-  <key>LSUIElement</key><true/>
-  <key>NSLocalNetworkUsageDescription</key><string>Potluck connects to your other computers on this network to share one AI model between them.</string>
-</dict></plist>
-PLIST
   if [ "$ID" = - ]; then
     codesign -s - -f --deep "$APP" 2>/dev/null
   else

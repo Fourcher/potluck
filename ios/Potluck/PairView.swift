@@ -76,6 +76,7 @@ struct PairView: View {
                 }
                 .padding(20)
             }
+            .task { LocalNetwork.ask() } // ask for local-network access now, not mid-pairing
             .sheet(isPresented: $scanning) {
                 ScannerSheet { text in
                     scanning = false

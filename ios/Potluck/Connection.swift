@@ -142,6 +142,7 @@ final class PotluckClient: @unchecked Sendable {
         let session = URLSession(configuration: conf, delegate: PinnedTrust(fingerprint: code.fingerprint), delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
         var lastError: Error = PotluckError.unreachable("Could not reach \(code.name).")
+        var silent: [String] = [] // addresses that did not answer at all
         for addr in code.addrs {
             var req = URLRequest(url: url(addr, code.port, "/phone/pair"))
             req.httpMethod = "POST"
@@ -157,9 +158,20 @@ final class PotluckClient: @unchecked Sendable {
             } catch let e as PotluckError {
                 if case .server = e { throw e } // the computer answered: no use trying other addresses
                 lastError = e
+                silent.append(addr)
             } catch {
                 lastError = error
+                silent.append(addr)
             }
+        }
+        // Say which addresses were tried and what to do, not just that it failed.
+        if !silent.isEmpty, silent.count == code.addrs.count {
+            let tried = silent.map { $0.hasPrefix("100.") ? "\($0) (Tailscale)" : "\($0) (home network)" }.joined(separator: " and ")
+            var hint = "Check the phone is on the same Wi-Fi as \(code.name), and that Potluck is running there."
+            if silent.contains(where: { $0.hasPrefix("100.") }) {
+                hint = "If this phone has Tailscale, turn it on in the Tailscale app and try again: it reaches \(code.name) from anywhere, and some computers only accept phones that way. Otherwise check the phone is on the same Wi-Fi."
+            }
+            throw PotluckError.unreachable("No answer from \(code.name) at \(tried). \(hint)")
         }
         throw friendly(lastError, name: code.name)
     }
@@ -384,4 +396,23 @@ struct TaskQuestion: Codable, Identifiable, Equatable {
     let detail: String?
     let kind: String
     let task: String?
+}
+
+
+import Network
+
+/// Asks iOS for local-network access up front (it only asks the first time the app reaches
+/// for the home network, which would otherwise be in the middle of pairing): a tiny mDNS
+/// packet does it, and nothing is sent anywhere else.
+enum LocalNetwork {
+    static func ask() {
+        let c = NWConnection(host: "224.0.0.251", port: 5353, using: .udp)
+        c.stateUpdateHandler = { state in
+            if case .ready = state {
+                c.send(content: Data([0]), completion: .contentProcessed { _ in c.cancel() })
+            }
+        }
+        c.start(queue: .global())
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { c.cancel() }
+    }
 }
