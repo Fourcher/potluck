@@ -547,9 +547,13 @@ func (a *Agent) startProc(name, rtDir, bin string, args []string, restart, lowPr
 			p.mu.Lock()
 			p.cmd, p.running = cmd, true
 			p.mu.Unlock()
-			if lowPrio {
-				lowerPriority(cmd.Process.Pid)
-			}
+			// Engines always run below normal priority. With the computer otherwise idle that
+			// costs nothing; when memory or the processor get tight, the desktop, remote logins
+			// and Potluck's guard still get their turn instead of freezing behind the engine.
+			// lowPrio (a pedal below 100%) used to be the only case; it now changes nothing.
+			_ = lowPrio
+			lowerPriority(cmd.Process.Pid)
+			lastResort(cmd.Process.Pid)
 			_ = cmd.Wait()
 			p.mu.Lock()
 			p.running = false

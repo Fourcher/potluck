@@ -425,7 +425,9 @@ func (n *NodeInfo) refresh(dataDir string) {
 	}
 	for i := range n.GPUs {
 		if n.GPUs[i].Unified {
-			n.GPUs[i].VRAMTotal, n.GPUs[i].VRAMFree = n.RAMTotal, n.RAMAvail
+			// The graphics chip shares the RAM but may only hold part of it (see metal.go).
+			lim := metalLimit(n.RAMTotal)
+			n.GPUs[i].VRAMTotal, n.GPUs[i].VRAMFree = min(n.RAMTotal, lim), min(n.RAMAvail, lim)
 		}
 	}
 	n.DiskFree = diskFree(dataDir)

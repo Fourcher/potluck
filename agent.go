@@ -111,6 +111,7 @@ type Agent struct {
 	rtDir     string
 	gpuDev    string // the engine's name for this computer's graphics card, "" if none is used
 	rpc, head *proc
+	guard     *GuardEvent // the guard's last stop (guard.go)
 	rpcPort   int
 	apiPort   int
 	listeners []net.Listener
@@ -168,11 +169,13 @@ func newAgent(dir string, id *Identity, cfg *ConfigStore) *Agent {
 	a.direct = newDirect(id, a.localPort)
 	a.info = staticInfo(dir)
 	a.info.ID = id.FP
+	go a.guardLoop()
 	return a
 }
 
 // Info returns a fresh snapshot of this computer.
 func (a *Agent) Info() NodeInfo {
+	probeMetal(a.dir, a.cfg.Get().EnginePath)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.info.refresh(a.dir)
@@ -285,6 +288,9 @@ type (
 		FullLog string `json:"fullLog,omitempty"` // the start of the engine's log: its load report
 		// Links says how the model running here reaches each helper: "direct" or "relay".
 		Links map[string]string `json:"links,omitempty"`
+		// Guard: the last time the guard stopped an engine here to keep this computer from
+		// freezing, and why (see guard.go).
+		Guard *GuardEvent `json:"guard,omitempty"`
 	}
 )
 
@@ -475,6 +481,11 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 
 	case "status":
 		return a.Status(), nil
+
+	case "guard":
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.guard, nil
 
 	case "storage":
 		return a.Storage(), nil
@@ -768,7 +779,7 @@ func (a *Agent) startStream(in StartHeadReq) (any, error) {
 // Status reports what is running here.
 func (a *Agent) Status() AgentStatus {
 	a.mu.Lock()
-	s := AgentStatus{RPC: a.rpc.Running(), Head: a.head.Running(), Msg: a.status, Done: a.done, Total: a.total}
+	s := AgentStatus{RPC: a.rpc.Running(), Head: a.head.Running(), Msg: a.status, Done: a.done, Total: a.total, Guard: a.guard}
 	if len(a.links) > 0 {
 		s.Links = map[string]string{}
 		for k, v := range a.links {

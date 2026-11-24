@@ -96,13 +96,15 @@ type Host struct {
 	id  *Identity
 	cfg *ConfigStore
 
-	mu      sync.Mutex
-	nodes   map[string]*Node
-	pending map[string]*Pending
-	tunnels map[string]chan net.Conn
-	cluster ClusterState
-	cancel  context.CancelFunc
-	release map[string]Asset // engine release assets by name
+	mu       sync.Mutex
+	nodes    map[string]*Node
+	memCeil  map[string]memCeiling // per computer, after its guard stepped in (hostguard.go)
+	guardWhy string                // why the guard stopped the model, shown instead of "stopped"
+	pending  map[string]*Pending
+	tunnels  map[string]chan net.Conn
+	cluster  ClusterState
+	cancel   context.CancelFunc
+	release  map[string]Asset // engine release assets by name
 
 	chatSrv  *http.Server
 	lastCtx  int
@@ -176,6 +178,7 @@ func (h *Host) Run() error {
 	go h.inventoryLoop()
 	go h.serveJoinPage()
 	go h.watchLoop()
+	go h.guardWatch()
 	go h.idleLoop()
 	h.applyShare()
 	go h.phoneLoop()
@@ -876,6 +879,7 @@ func (h *Host) planNodes() []PlanNode {
 			info = roomForOne(info)
 		}
 		cpu, gpu, uni := offer(info, held)
+		cpu, gpu = h.capByCeiling(id, cpu, gpu)
 		n.Offer = cpu + gpu
 		if !n.Active {
 			n.Offer = 0
@@ -1001,6 +1005,7 @@ func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 	h.mu.Lock()
 	h.cancel = cancel
 	h.cluster = ClusterState{Phase: "starting", Model: &model, Since: time.Now()}
+	h.guardWhy = ""
 	h.lastCtx, h.lastSolo, h.stale = ctxSize, solo, false
 	h.asleep, h.lastUse = nil, time.Now()
 	h.mu.Unlock()
@@ -1010,6 +1015,9 @@ func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 		h.mu.Lock()
 		if err != nil {
 			h.cluster.Phase, h.cluster.Error = "error", err.Error()
+			if h.guardWhy != "" {
+				h.cluster.Error = h.guardWhy // the guard stopped it: say that, not "stopped"
+			}
 			for i := range h.cluster.Steps {
 				if h.cluster.Steps[i].State == "doing" {
 					h.cluster.Steps[i].State = "failed"
@@ -1051,6 +1059,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		return fmt.Errorf("could not read the model: %w", err)
 	}
 	h.mu.Lock()
+	info.PlanCtx = ctxSize // plans count the context cache for this size
 	h.lastInfo = info
 	h.mu.Unlock()
 

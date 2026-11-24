@@ -45,6 +45,69 @@ type ModelInfo struct {
 	FileType    int      `json:"fileType,omitempty"`    // general.file_type: how it is compressed
 	Params      uint64   `json:"params,omitempty"`      // number of weights
 	Tensors     []Tensor `json:"-"`
+
+	// The attention shape, which sets how much memory the context takes (see ContextBytes).
+	KVHeads   []int  `json:"kvHeads,omitempty"` // key/value heads per layer (0: the layer keeps no cache)
+	KeyLen    int    `json:"keyLen,omitempty"`
+	ValLen    int    `json:"valLen,omitempty"`
+	SWAWindow int    `json:"swaWindow,omitempty"` // sliding-window layers only keep this many recent tokens
+	SWALayers []bool `json:"swaLayers,omitempty"` // which layers use the sliding window
+	LoopStart int    `json:"loopStart,omitempty"` // looped models run layers [LoopStart, LoopEnd)
+	LoopEnd   int    `json:"loopEnd,omitempty"`   // LoopCount times, and keep a cache for every pass
+	LoopCount int    `json:"loopCount,omitempty"`
+	Vocab     int    `json:"vocab,omitempty"`
+	PlanCtx   int    `json:"-"` // the context size a plan is being made for
+}
+
+// ubatch is the engine's default batch of tokens per step. A sliding-window layer keeps its
+// window plus one batch (llama.cpp: "SWA KV cache, size = 1536 cells" for a 1024 window).
+const ubatch = 512
+
+// ContextBytes is the memory each layer's context cache takes for ctx tokens (16-bit keys and
+// values, as the engine stores them by default). It follows the engine's own accounting:
+// full-attention layers keep every token, sliding-window layers their window plus one batch,
+// and layers of a looped model keep one cache per pass. Nil when the file does not say.
+func (m *ModelInfo) ContextBytes(ctx int) []int64 {
+	if ctx <= 0 || len(m.KVHeads) == 0 || m.KeyLen+m.ValLen == 0 {
+		return nil
+	}
+	out := make([]int64, m.Layers)
+	for i := range out {
+		heads := m.KVHeads[0]
+		if i < len(m.KVHeads) {
+			heads = m.KVHeads[i]
+		}
+		tokens := ctx
+		if m.SWAWindow > 0 && i < len(m.SWALayers) && m.SWALayers[i] && m.SWAWindow+ubatch < ctx {
+			tokens = m.SWAWindow + ubatch
+		}
+		passes := 1
+		if m.LoopCount > 1 && i >= m.LoopStart && i < m.LoopEnd {
+			passes = m.LoopCount
+		}
+		out[i] = int64(passes) * int64(tokens) * int64(heads) * int64(m.KeyLen+m.ValLen) * 2
+	}
+	return out
+}
+
+// ContextTotal is the whole context cache for ctx tokens.
+func (m *ModelInfo) ContextTotal(ctx int) int64 {
+	var t int64
+	for _, b := range m.ContextBytes(ctx) {
+		t += b
+	}
+	return t
+}
+
+// WorkBytes is the engine's working memory on each device beyond weights and cache: mostly
+// the scores for every word of the vocabulary for a batch of tokens. Never less than the
+// 600 MB measured on small models.
+func (m *ModelInfo) WorkBytes() int64 {
+	w := int64(m.Vocab) * ubatch * 4 * 2
+	if w < perDeviceOverhead {
+		return perDeviceOverhead
+	}
+	return w
 }
 
 // isExpertTensor recognises the expert weights of a mixture-of-experts layer by name
@@ -169,6 +232,19 @@ func (r *ggufReader) value(t uint32) (any, error) {
 			if err := r.need(int(n) * sz); err != nil {
 				return nil, err
 			}
+			// Short arrays of whole numbers or yes/no values describe the layers (head counts per
+			// layer, which layers use a sliding window): keep them. Floats and the tokenizer's
+			// long lists are skipped.
+			if n <= 4096 && et != 6 && et != 12 {
+				vals := make([]uint64, n)
+				for i := range vals {
+					for j := 0; j < sz; j++ {
+						vals[i] |= uint64(r.b[r.o+i*sz+j]) << (8 * j)
+					}
+				}
+				r.o += int(n) * sz
+				return vals, nil
+			}
 			r.o += int(n) * sz
 			return nil, nil
 		}
@@ -283,6 +359,49 @@ func parseGGUFPart(buf []byte, fileSize int64, layersHint int) (*ModelInfo, erro
 	if v, ok := kv["general.file_type"].(uint64); ok {
 		m.FileType = int(v)
 	}
+	ints := func(key string) []int {
+		switch v := kv[m.Arch+"."+key].(type) {
+		case uint64:
+			return []int{int(v)}
+		case []uint64:
+			out := make([]int, len(v))
+			for i, x := range v {
+				out[i] = int(x)
+			}
+			return out
+		}
+		return nil
+	}
+	one := func(key string) int {
+		if v := ints(key); len(v) > 0 {
+			return v[0]
+		}
+		return 0
+	}
+	m.KVHeads = ints("attention.head_count_kv")
+	if len(m.KVHeads) == 0 {
+		m.KVHeads = ints("attention.head_count")
+	}
+	m.KeyLen, m.ValLen = one("attention.key_length"), one("attention.value_length")
+	if m.KeyLen == 0 {
+		if heads, embd := one("attention.head_count"), one("embedding_length"); heads > 0 {
+			m.KeyLen, m.ValLen = embd/heads, embd/heads
+		}
+	}
+	m.SWAWindow = one("attention.sliding_window")
+	if pat := ints("attention.sliding_window_pattern"); m.SWAWindow > 0 && m.Layers > 0 {
+		m.SWALayers = make([]bool, m.Layers)
+		for i := range m.SWALayers {
+			switch {
+			case len(pat) == m.Layers:
+				m.SWALayers[i] = pat[i] != 0
+			case len(pat) == 1 && pat[0] > 0:
+				m.SWALayers[i] = (i+1)%pat[0] != 0 // every n-th layer sees everything
+			}
+		}
+	}
+	m.LoopStart, m.LoopEnd, m.LoopCount = one("loop.start"), one("loop.end"), one("loop.count")
+	m.Vocab = one("vocab_size")
 	for _, t := range raws {
 		m.Params += t.n
 	}
@@ -400,7 +519,9 @@ type Plan struct {
 	ShortBy    int64 `json:"shortBy"`    // bytes missing when it does not fit
 	Machines   int   `json:"machines"`   // computers that hold part of the model
 	Layers     int   `json:"layers"`
-	LayerBytes int64 `json:"layerBytes"` // largest layer
+	LayerBytes int64 `json:"layerBytes"` // largest layer, with its share of the context cache
+	// ContextBytes is the context cache for the planned context size, on top of ModelBytes.
+	ContextBytes int64 `json:"contextBytes,omitempty"`
 }
 
 // overhead kept free on every device for the context cache and working buffers.
@@ -423,13 +544,21 @@ const trunkOverhead = 500 << 20
 // the plan keeps as much as it can on the head and brings in as few helpers as possible.
 func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 	p := &Plan{ModelBytes: m.TotalBytes(), Layers: m.Layers}
+	// Each layer brings its share of the context cache to whichever computer holds it, so a
+	// layer's cost is its weights plus that cache at the context size being planned for.
+	kv := m.ContextBytes(m.PlanCtx)
+	p.ContextBytes = m.ContextTotal(m.PlanCtx)
 	var layer int64
-	for _, b := range m.LayerBytes {
+	for i, b := range m.LayerBytes {
+		if i < len(kv) {
+			b += kv[i]
+		}
 		if b > layer {
 			layer = b
 		}
 	}
 	p.LayerBytes = layer
+	perDeviceOverhead := m.WorkBytes()
 	if len(nodes) == 0 {
 		p.Reason = "No computers are available right now."
 		return p
@@ -456,7 +585,7 @@ func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 			p.BiggestOne = cap(n)
 		}
 	}
-	need := p.ModelBytes + perDeviceOverhead
+	need := p.ModelBytes + p.ContextBytes + perDeviceOverhead
 	p.NeedsPool = need > p.BiggestOne
 
 	// The head holds the model file and talks to everyone: pick the computer offering the most.
@@ -760,12 +889,18 @@ func planTrunkOpt(m *ModelInfo, head PlanNode, ramBound bool) trunkFit {
 // models, and on spinning disks.
 func planSolo(m *ModelInfo, n PlanNode) *Plan {
 	p := &Plan{ModelBytes: m.TotalBytes(), Layers: m.Layers, Head: n.ID, Solo: true}
-	for _, b := range m.LayerBytes {
+	kv := m.ContextBytes(m.PlanCtx)
+	p.ContextBytes = m.ContextTotal(m.PlanCtx)
+	for i, b := range m.LayerBytes {
+		if i < len(kv) {
+			b += kv[i]
+		}
 		if b > p.LayerBytes {
 			p.LayerBytes = b
 		}
 	}
 	layer := p.LayerBytes
+	perDeviceOverhead := m.WorkBytes()
 	edge := m.OtherBytes * 6 / 10
 	gpu := 0
 	if n.GPUBytes > perDeviceOverhead+edge+layer && layer > 0 {
@@ -784,7 +919,7 @@ func planSolo(m *ModelInfo, n PlanNode) *Plan {
 	}
 	need := int64(cpu)*layer + m.OtherBytes + perDeviceOverhead
 	if n.Unified {
-		need = p.ModelBytes + perDeviceOverhead
+		need = p.ModelBytes + p.ContextBytes + perDeviceOverhead
 	}
 	// Mixture-of-experts model on a card too small for whole layers: the card holds the trunk
 	// of as many layers as it can, their experts stay in memory (or on disk). Measured on a
@@ -801,6 +936,9 @@ func planSolo(m *ModelInfo, n PlanNode) *Plan {
 				case l < m.Layers-t.whole:
 					need += m.expertBytes(l)
 					p.ExpertCPU = append(p.ExpertCPU, l)
+				}
+				if l < len(kv) && l < cpu {
+					need += kv[l] // the context cache of layers kept in memory
 				}
 			}
 		}

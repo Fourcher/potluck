@@ -292,6 +292,7 @@ func (app *App) serveUI() error {
 		if err != nil {
 			return nil, errors.New("could not read that model: " + err.Error())
 		}
+		info.PlanCtx = 8192 // the set-up sheet's usual choice; the start plans for the size picked
 		// Two ways to run it: pooled across the computers, and (when one computer is close
 		// to big enough) on that computer alone with its disk covering the difference.
 		// A third, for the model families InferSSD knows: one computer streaming the experts
