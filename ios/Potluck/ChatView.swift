@@ -109,6 +109,7 @@ struct StatusBar: View {
         .buttonStyle(.plain)
         .background(.bar)
         .accessibilityHint("Choose a model")
+        .accessibilityIdentifier("modelStatus")
     }
 
     private func describe() -> (Color, String, String) {
@@ -124,7 +125,7 @@ struct StatusBar: View {
         case "running":
             let whereText = s.helpers > 0 ? "Running on \(s.helpers + 1) computers" : "Running on \(s.head ?? name)"
             return (.green, title, whereText)
-        case "resting": return (.green, title, "Resting to free memory · wakes with your message")
+        case "resting": return (.green.opacity(0.35), title, "Resting to free memory · wakes with your message")
         case "starting":
             let step = s.steps?.last { $0.state == "doing" }?.text ?? s.steps?.last?.text ?? "Loading"
             return (.orange, title, step + "…")

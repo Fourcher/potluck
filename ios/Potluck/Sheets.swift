@@ -92,6 +92,7 @@ struct ModelsSheet: View {
                     if let error { Text(error).font(.footnote).foregroundStyle(.red) }
                     ForEach(model.models) { m in
                         Button {
+                            guard !m.running else { return }
                             Task { await start(m) }
                         } label: {
                             HStack {
@@ -105,7 +106,8 @@ struct ModelsSheet: View {
                                 else if m.running { Image(systemName: "checkmark").foregroundStyle(Color.accentColor) }
                             }
                         }
-                        .disabled(m.running || switching != nil)
+                        .disabled(switching != nil && switching != m.id)
+                        .accessibilityValue(m.running ? "Running now" : "")
                     }
                 } header: {
                     Text("Models on your computers")

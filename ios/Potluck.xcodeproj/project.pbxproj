@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		2785446FE5E6ED4E1C669F5D /* ScreensTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0B0EF5DB61EA1FC61A6C897 /* ScreensTests.swift */; };
 		350F91AB645880288AABED1C /* PairView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F35E0FF40C74F0576FBEB727 /* PairView.swift */; };
 		3FED520E5BDF0588C2C64616 /* Sheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88FA9445D5CBB10AA015AEFF /* Sheets.swift */; };
 		4E97C6DF9983911D4BD95311 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9A00FC8EC8EBAF5AC83BE792 /* Assets.xcassets */; };
@@ -17,6 +18,16 @@
 		EE766F61F0419ECD2187F7EE /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 452BC50838B40FAE39728BA0 /* ChatView.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		ED264A6C5810F51266C6CC1A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = EEEC4D8D90F6C3A20133F4E3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 130F296BF795B3108A244B97;
+			remoteInfo = Potluck;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		2D3C3CA91009A953EFF5DCD0 /* Connection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Connection.swift; sourceTree = "<group>"; };
 		452BC50838B40FAE39728BA0 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
@@ -25,6 +36,8 @@
 		88FA9445D5CBB10AA015AEFF /* Sheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sheets.swift; sourceTree = "<group>"; };
 		9A00FC8EC8EBAF5AC83BE792 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B2BFA04A4B9E09375407F6AF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		D762CFE36C7EAF3B4FE300FE /* PotluckUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PotluckUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E0B0EF5DB61EA1FC61A6C897 /* ScreensTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreensTests.swift; sourceTree = "<group>"; };
 		E9D3C55FBDFD9BB5141C8F83 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		F1D25FBE7784232377B323E9 /* PotluckApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PotluckApp.swift; sourceTree = "<group>"; };
 		F35E0FF40C74F0576FBEB727 /* PairView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairView.swift; sourceTree = "<group>"; };
@@ -35,8 +48,17 @@
 			isa = PBXGroup;
 			children = (
 				74195ED9694CDC1F323B3C13 /* Potluck.app */,
+				D762CFE36C7EAF3B4FE300FE /* PotluckUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		724E5CBA8C1C26B6ECADCFAF /* PotluckUITests */ = {
+			isa = PBXGroup;
+			children = (
+				E0B0EF5DB61EA1FC61A6C897 /* ScreensTests.swift */,
+			);
+			path = PotluckUITests;
 			sourceTree = "<group>";
 		};
 		A5D9C982F6FE9DEE754353DC /* Potluck */ = {
@@ -59,6 +81,7 @@
 			isa = PBXGroup;
 			children = (
 				A5D9C982F6FE9DEE754353DC /* Potluck */,
+				724E5CBA8C1C26B6ECADCFAF /* PotluckUITests */,
 				329303A22BB04D27212786C9 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -84,6 +107,24 @@
 			productReference = 74195ED9694CDC1F323B3C13 /* Potluck.app */;
 			productType = "com.apple.product-type.application";
 		};
+		61B8D724EB0483FCFF818E66 /* PotluckUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 45D225165D0F9A27B15776C5 /* Build configuration list for PBXNativeTarget "PotluckUITests" */;
+			buildPhases = (
+				54231821FC4AAEF8BD6D5513 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E6495BF34B1C205C53EBCA2A /* PBXTargetDependency */,
+			);
+			name = PotluckUITests;
+			packageProductDependencies = (
+			);
+			productName = PotluckUITests;
+			productReference = D762CFE36C7EAF3B4FE300FE /* PotluckUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -96,6 +137,11 @@
 					130F296BF795B3108A244B97 = {
 						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
+					};
+					61B8D724EB0483FCFF818E66 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+						TestTargetID = 130F296BF795B3108A244B97;
 					};
 				};
 			};
@@ -114,6 +160,7 @@
 			projectRoot = "";
 			targets = (
 				130F296BF795B3108A244B97 /* Potluck */,
+				61B8D724EB0483FCFF818E66 /* PotluckUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -144,7 +191,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		54231821FC4AAEF8BD6D5513 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2785446FE5E6ED4E1C669F5D /* ScreensTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		E6495BF34B1C205C53EBCA2A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 130F296BF795B3108A244B97 /* Potluck */;
+			targetProxy = ED264A6C5810F51266C6CC1A /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		04FDD23586DDC204103C83A9 /* Debug */ = {
@@ -297,6 +360,23 @@
 			};
 			name = Release;
 		};
+		336EDAB5594812CF4AE7D206 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.fourcher.potluck.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Potluck;
+			};
+			name = Release;
+		};
 		51FC5692E3BC907182391450 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -320,9 +400,35 @@
 			};
 			name = Debug;
 		};
+		697622F5B6D36D00D676CD28 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.fourcher.potluck.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Potluck;
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		45D225165D0F9A27B15776C5 /* Build configuration list for PBXNativeTarget "PotluckUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				697622F5B6D36D00D676CD28 /* Debug */,
+				336EDAB5594812CF4AE7D206 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		69C73ED8557269011F87E8B1 /* Build configuration list for PBXNativeTarget "Potluck" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

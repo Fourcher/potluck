@@ -65,6 +65,8 @@ The Potluck iPhone app (in `ios/`) chats with the model running on your computer
 
 To put it on your iPhone: open `ios/Potluck.xcodeproj` in Xcode, choose your team under Signing & Capabilities, connect the phone and press Run. (If you change `ios/project.yml`, run `xcodegen generate` in `ios/` first.)
 
+The app has a UI test (`ios/PotluckUITests`) that pairs with a running Potluck, asks a question and opens every screen, saving a screenshot of each. Give it a fresh pairing link: `TEST_RUNNER_POTLUCK_LINK='potluck://pair?…' TEST_RUNNER_POTLUCK_SHOTS=/some/folder xcodebuild test -project ios/Potluck.xcodeproj -scheme Potluck -destination 'platform=iOS Simulator,name=iPhone 17'`.
+
 ## What is inside
 
 One self-contained program per platform (about 9 MB, no installer). Written in Go; the control panel is a local web page.

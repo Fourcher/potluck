@@ -41,3 +41,23 @@ targets:
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         ITSAppUsesNonExemptEncryption: false
+  PotluckUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: PotluckUITests
+    dependencies:
+      - target: Potluck
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.fourcher.potluck.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Potluck
+schemes:
+  Potluck:
+    build:
+      targets:
+        Potluck: all
+    test:
+      targets:
+        - PotluckUITests
