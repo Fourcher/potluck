@@ -46,7 +46,11 @@ struct ChatsSheet: View {
                         LabeledContent("Address", value: (model.client?.addr ?? c.lastAddr ?? c.addrs.first ?? "") + ":\(c.port)")
                         if let v = model.state?.version { LabeledContent("Potluck", value: v) }
                     }
-                    Button("Forget this computer", role: .destructive) { confirmForget = true }
+                    if model.isDemo {
+                        Button("Leave the demo") { model.forget(); dismiss() }
+                    } else {
+                        Button("Forget this computer", role: .destructive) { confirmForget = true }
+                    }
                 }
             }
             .searchable(text: $search, prompt: "Search chats")

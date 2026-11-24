@@ -14,6 +14,7 @@
 		5F4503EFB9CFBD040C01FC07 /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1C2E1B8CA33B2C454687FE /* Markdown.swift */; };
 		AADAEF5A51A57CC74196C23C /* Connection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D3C3CA91009A953EFF5DCD0 /* Connection.swift */; };
 		AF0CEAF157A8C229C65F440A /* Questions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B111BC0DD755FF8FA2F25834 /* Questions.swift */; };
+		DFEEB5CF41CDB133F3F4F9C1 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = CB765A4C926AC3C5BCBE26E7 /* PrivacyInfo.xcprivacy */; };
 		E021F610D9208B4991C32DC7 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9D3C55FBDFD9BB5141C8F83 /* AppModel.swift */; };
 		E53EBCD3F2C1E861B37969CF /* PotluckApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1D25FBE7784232377B323E9 /* PotluckApp.swift */; };
 		EE766F61F0419ECD2187F7EE /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 452BC50838B40FAE39728BA0 /* ChatView.swift */; };
@@ -38,6 +39,7 @@
 		9A00FC8EC8EBAF5AC83BE792 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B111BC0DD755FF8FA2F25834 /* Questions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Questions.swift; sourceTree = "<group>"; };
 		B2BFA04A4B9E09375407F6AF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		CB765A4C926AC3C5BCBE26E7 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		D762CFE36C7EAF3B4FE300FE /* PotluckUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PotluckUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		DD8923EB4932141BC5804F1E /* Potluck.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Potluck.entitlements; sourceTree = "<group>"; };
 		E0B0EF5DB61EA1FC61A6C897 /* ScreensTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreensTests.swift; sourceTree = "<group>"; };
@@ -76,6 +78,7 @@
 				F35E0FF40C74F0576FBEB727 /* PairView.swift */,
 				DD8923EB4932141BC5804F1E /* Potluck.entitlements */,
 				F1D25FBE7784232377B323E9 /* PotluckApp.swift */,
+				CB765A4C926AC3C5BCBE26E7 /* PrivacyInfo.xcprivacy */,
 				B111BC0DD755FF8FA2F25834 /* Questions.swift */,
 				88FA9445D5CBB10AA015AEFF /* Sheets.swift */,
 			);
@@ -176,6 +179,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				4E97C6DF9983911D4BD95311 /* Assets.xcassets in Resources */,
+				DFEEB5CF41CDB133F3F4F9C1 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -271,7 +275,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.10.0;
+				MARKETING_VERSION = 1.11.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -303,7 +307,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.fourcher.potluck;
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
@@ -356,7 +360,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.10.0;
+				MARKETING_VERSION = 1.11.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -404,7 +408,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.fourcher.potluck;
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
 		};

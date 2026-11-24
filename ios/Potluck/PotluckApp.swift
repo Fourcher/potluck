@@ -10,6 +10,17 @@ struct PotluckApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
+                #if DEBUG
+                // For App Store screenshots: -demo opens the demo, -demoAsk also asks a question.
+                .task {
+                    let args = ProcessInfo.processInfo.arguments
+                    if args.contains("-demo") || args.contains("-demoAsk") { model.startDemo() }
+                    if args.contains("-demoAsk") {
+                        try? await Task.sleep(for: .seconds(1))
+                        model.send("How do I connect my computer?", attachments: [])
+                    }
+                }
+                #endif
                 .tint(Color.accentColor)
                 .onOpenURL { url in
                     // A pairing link opened from the Camera app or another app.
@@ -20,13 +31,13 @@ struct PotluckApp: App {
         }
         .onChange(of: phase) { _, p in
             delegate.model = model
-            if p == .active, model.computer != nil { model.startPolling(); delegate.enableAlerts() }
+            if p == .active, model.computer != nil { model.startPolling(); if !model.isDemo { delegate.enableAlerts() } }
             if p == .background { model.stopPolling(); model.scheduleSave() }
         }
         // Right after pairing the app is already in the foreground, so ask for alerts then too.
         .onChange(of: model.computer != nil) { _, paired in
             delegate.model = model
-            if paired { delegate.enableAlerts() }
+            if paired, !model.isDemo { delegate.enableAlerts() }
         }
     }
 }

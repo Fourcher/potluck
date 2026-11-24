@@ -16,6 +16,16 @@ struct ChatView: View {
         let chat = model.current
         VStack(spacing: 0) {
             StatusBar(showModels: $showModels)
+            if model.isDemo {
+                HStack(spacing: 8) {
+                    Label("Demo: no AI model is answering. Install Potluck on a computer to chat for real.", systemImage: "info.circle")
+                        .font(.footnote)
+                    Spacer(minLength: 4)
+                    Button("Leave") { model.forget() }.font(.footnote.weight(.semibold))
+                }
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                .background(Color.accentColor.opacity(0.12))
+            }
             QuestionsBanner()
             ScrollViewReader { proxy in
                 ScrollView {

@@ -89,6 +89,19 @@ final class AppModel {
         startPolling()
     }
 
+    /// Try Potluck without a computer: a clearly labelled demo that explains how it works.
+    func startDemo() {
+        let c = Computer(name: "Demo computer", addrs: [], port: 0, fingerprint: "", id: PotluckClient.demoID)
+        client?.close()
+        computer = c
+        client = PotluckClient(computer: c, key: "")
+        notPaired = false
+        link = .connecting
+        startPolling()
+    }
+
+    var isDemo: Bool { computer?.id == PotluckClient.demoID }
+
     func forget() {
         stop()
         pollTask?.cancel()
