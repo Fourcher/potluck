@@ -333,7 +333,7 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 		if e.Error.Message == "" {
 			e.Error.Message = res.Status
 		}
-		return SMsg{}, errors.New("the model answered: " + e.Error.Message)
+		return SMsg{}, errors.New(strings.TrimPrefix(e.Error.Message, "Potluck: "))
 	}
 	msg := SMsg{Role: "assistant"}
 	calls := map[int]*SToolCall{}

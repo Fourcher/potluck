@@ -252,3 +252,9 @@ body:not(.side-closed) #side-open{display:none}
 .qcard .qrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0 6px}
 .qcard .btn kbd{font-size:11px;opacity:.75;margin-left:6px;border:1px solid currentColor;border-radius:4px;padding:0 4px}
 .qcard .btn.no{background:var(--surface-2,#3a3a3a);color:var(--text);border:1px solid var(--line,#555)}
+
+.tdot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block;flex:none;margin-right:2px;opacity:.6}
+.tdot.work{background:var(--accent);opacity:1;animation:pulse 1.4s ease-in-out infinite}
+.tdot.wait{background:#e8a33d;opacity:1;box-shadow:0 0 0 3px color-mix(in srgb,#e8a33d 30%,transparent)}
+@keyframes pulse{50%{opacity:.35}}
+#project-list h4 .icon.small{float:right;margin-top:-4px}

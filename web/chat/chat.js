@@ -91,6 +91,7 @@ async function poll() {
   if (!running()) S.props = null;
   // The setup the user brought over from their earlier AI (Computers > Bring your AI setup
   // over). Only this computer's own browser gets it.
+  if (S.server.owner) loadTasks();
   if (S.server.owner && (!S.ctxAt || Date.now() - S.ctxAt > 60000)) { S.ctxAt = Date.now(); try { S.ctx = await api("/potluck/context"); } catch { S.ctx = null; } drawProjects(); }
   drawStatus();
   if (was !== S.server.phase && S.cur && !S.cur.messages.length && !S.gen) drawThread(); // the greeting says whether a model is ready
@@ -183,7 +184,7 @@ function askConnector(call, tool) {
 // The task keeps going with this page closed. The page follows it through a live event stream
 // and answers its questions: Yes (Enter), No (Backspace or Delete), or your own words typed in
 // the message box.
-const isTask = () => !!(S.cur && S.cur.project);
+const isTask = () => !!(S.cur && (S.cur.project || S.cur.task));
 function taskPolicy() {
   return { files: S.settings.perm === "none" ? "ask" : S.settings.perm, commands: S.settings.agent === "auto" ? "auto" : "ask",
     connectors: { ...(S.settings.connectors || {}) }, all: !!(S.cur && S.cur.approveAll), thinking: !!S.settings.thinking };
@@ -235,10 +236,10 @@ async function taskSend(text) {
   const c = S.cur;
   if (S.task && S.task.q) return taskAnswer(text);
   c.messages.push({ id: uid(), role: "user", content: text, t: Date.now() });
-  if (!c.title || c.title === c.project.name) c.title = c.project.name + ": " + titleFrom(text);
+  if (!c.title || (c.project && c.title === c.project.name)) c.title = (c.project && c.project.name ? c.project.name + ": " : "") + titleFrom(text);
   $("#input").value = ""; autosize(); drawHeader(); drawThread(); scrollDown(true);
   try {
-    if (!c.session) { const ss = await taskApi("sessions", { project: c.project, policy: taskPolicy(), text }); c.session = ss.id; }
+    if (!c.session) { const ss = await taskApi("sessions", { project: c.project && c.project.root ? c.project : null, policy: taskPolicy(), text }); c.session = ss.id; }
     else await taskApi("sessions/" + c.session + "/message", { text });
     S.task = { status: "working" }; await saveChat(c); taskFollow(); drawTools(); drawThread();
   } catch (e) { toast(e.message); }
@@ -278,7 +279,7 @@ async function fsCall(body) {
 }
 async function loadProject() {
   S.proj = null;
-  if (!S.cur || !S.cur.project) return;
+  if (!S.cur || !S.cur.project || !S.cur.project.root) return;
   try { S.proj = await fsCall({ op: "project", root: S.cur.project.root }); } catch (e) { S.proj = { root: S.cur.project.root, name: S.cur.project.name, error: e.message }; }
 }
 async function openProject(root, name) {
@@ -290,11 +291,37 @@ async function openProject(root, name) {
   drawAll(); $("#input").focus();
   if (window.innerWidth <= 820) document.body.classList.add("side-closed");
 }
+// Tasks running in Potluck (from this page, the phone or elsewhere), waiting ones first.
+async function loadTasks() {
+  if (!S.server || !S.server.owner) return;
+  try { S.tasks = (await taskApi("sessions")).sessions || []; } catch { S.tasks = []; }
+  drawProjects();
+}
+async function openTask(id) {
+  if (S.gen) return toast("Wait for the reply to finish, or stop it first.");
+  const all = await Store.allChats();
+  let c = all.find(x => x.session === id);
+  if (!c) {
+    const t = (S.tasks || []).find(x => x.id === id) || {};
+    c = newChat(); c.session = id; c.title = t.title || "Task"; c.project = t.project || null; c.task = true;
+  }
+  S.cur = c; S.cur.grants = S.cur.grants || {}; S.pending = []; S.folder = null;
+  await loadProject(); S.task = null; await taskLoad(); drawAll();
+}
+function newTaskChat() {
+  if (S.gen) return toast("Wait for the reply to finish, or stop it first.");
+  S.cur = newChat(); S.cur.task = true; S.cur.project = null; S.pending = []; S.folder = null; closeTask(); S.task = null; S.proj = null;
+  drawAll(); $("#input").focus(); toast("New task: it runs in Potluck and keeps going if you close this page.");
+}
 function drawProjects() {
   const el = $("#project-list"); if (!el) return;
   const ps = ((S.ctx && S.ctx.projects) || []).filter(p => p.path);
   if (!S.server || !S.server.owner) { el.innerHTML = ""; return; }
-  el.innerHTML = `<h4>Projects</h4>` + ps.slice(0, 6).map(p => `<div class="chat-item proj ${S.cur && S.cur.project && S.cur.project.root === p.path ? "on" : ""}" data-proj="${esc(p.path)}" data-name="${esc(p.name)}" tabindex="0" role="button" title="${esc(p.path)}"><span class="ic">${icon("folder")}</span><span class="t">${esc(p.name)}</span></div>`).join("") +
+  const ts = (S.tasks || []).slice().sort((a, b) => (b.status === "waiting") - (a.status === "waiting") || Date.parse(b.updated) - Date.parse(a.updated)).slice(0, 6);
+  const dot = st => st === "waiting" ? `<span class="tdot wait" title="Waiting for you"></span>` : st === "working" ? `<span class="tdot work" title="Working"></span>` : `<span class="tdot" title="${esc(st)}"></span>`;
+  const tasksHTML = `<h4>Tasks <button class="icon small" data-a="new-task" title="New task" aria-label="New task">${ic("plus")}</button></h4>` +
+    (ts.length ? ts.map(t => `<div class="chat-item ${S.cur && S.cur.session === t.id ? "on" : ""}" data-task="${esc(t.id)}" tabindex="0" role="button" title="${esc(t.question ? "Waiting: " + t.question.title : t.status)}">${dot(t.status)}<span class="t">${esc(t.title || "Task")}</span></div>`).join("") : `<div class="empty-list small">Tasks keep going in Potluck when you close this page.</div>`);
+  el.innerHTML = tasksHTML + `<h4>Projects</h4>` + ps.slice(0, 6).map(p => `<div class="chat-item proj ${S.cur && S.cur.project && S.cur.project.root === p.path ? "on" : ""}" data-proj="${esc(p.path)}" data-name="${esc(p.name)}" tabindex="0" role="button" title="${esc(p.path)}"><span class="ic">${icon("folder")}</span><span class="t">${esc(p.name)}</span></div>`).join("") +
     `<div class="chat-item proj" data-a="all-projects" tabindex="0" role="button"><span class="t muted">${ps.length > 6 ? `All ${ps.length} projects…` : "Open a project…"}</span></div>`;
 }
 function projectsSheet() {
@@ -386,11 +413,11 @@ function drawThread() {
   const c = S.cur, el = $("#thread");
   if (!c.messages.length) {
     const pooled = ((S.server && S.server.nodes) || []).some(n => n.role === "worker");
-    const sugg = c.project
+    const sugg = c.project && c.project.root
       ? ["Explain how this project works and where it stands", "Run the tests and fix whatever fails", "Find bugs and fix the worst ones", "Suggest the most valuable next improvement, then build it"]
       : [pooled ? "Explain how this model is running across my computers" : "What can you do on this computer?", "Help me plan my week", "Draft a polite email declining a meeting", "Summarize a file I attach"];
     el.innerHTML = (c.summary ? `<div class="wrap"><details class="think"><summary>${ic("file")}<span>Continued from an earlier chat. Its summary is included.</span></summary><div class="t">${esc(c.summary)}</div></details></div>` : "") +
-      `<div class="hello"><h2>${c.project ? "What shall we do in " + esc(c.project.name) + "?" : "What shall we work on?"}</h2><p>${running() ? (pooled ? "Running privately on your own computers." : "Running privately on this computer.") : "Type away; your message is sent once a model is ready."}</p><div class="suggest">${sugg.map(s => `<button data-a="suggest">${esc(s)}</button>`).join("")}</div></div>`;
+      `<div class="hello"><h2>${c.project && c.project.root ? "What shall we do in " + esc(c.project.name) + "?" : c.task ? "What should this task do?" : "What shall we work on?"}</h2><p>${running() ? (pooled ? "Running privately on your own computers." : "Running privately on this computer.") : "Type away; your message is sent once a model is ready."}</p><div class="suggest">${sugg.map(s => `<button data-a="suggest">${esc(s)}</button>`).join("")}</div></div>`;
     return;
   }
   const results = {}; c.messages.forEach(m => { if (m.role === "tool") results[m.callId] = m; });
@@ -437,7 +464,7 @@ function drawLive() { // redraw only the message being written
 // ---------- composer ----------
 function drawChips() {
   let h = "";
-  if (S.cur && S.cur.project) h += `<span class="chip folder" title="${esc(S.cur.project.root)}">${ic("folder")}<span class="n">${esc(S.cur.project.name)}</span><small>${S.proj && S.proj.error ? esc(S.proj.error) : "project" + (S.proj && S.proj.instrFile ? " · follows " + esc(S.proj.instrFile) : "")}</small></span>`;
+  if (S.cur && S.cur.project && S.cur.project.root) h += `<span class="chip folder" title="${esc(S.cur.project.root)}">${ic("folder")}<span class="n">${esc(S.cur.project.name)}</span><small>${S.proj && S.proj.error ? esc(S.proj.error) : "project" + (S.proj && S.proj.instrFile ? " · follows " + esc(S.proj.instrFile) : "")}</small></span>`;
   if (S.folder) h += `<span class="chip folder" title="${S.folder.kind === "handle" ? "The model can work in this folder, within the permission level you chose." : "A read-only copy of this folder."}">${ic("folder")}<span class="n">${esc(S.folder.name)}</span><small>${S.folder.needsAccess ? "click to reconnect" : S.folder.kind === "snapshot" ? S.folder.files.size + " files, read-only" : "working folder"}</small><button type="button" data-a="detach" title="Remove folder" aria-label="Remove folder">×</button></span>`;
   h += S.pending.map((f, i) => `<span class="chip ${f.skipped ? "bad" : ""}" title="${esc(f.skipped || (f.pasted ? "Click to put this text back in the message box" : f.name))}"${f.pasted ? ` data-pasted="${i}" style="cursor:pointer"` : ""}>${ic("file")}<span class="n">${esc(f.name)}</span><small>${f.skipped ? "cannot be read" : "about " + num(estTokens(f.text.length)) + " tokens"}</small><button type="button" data-a="unattach" data-i="${i}" title="Remove" aria-label="Remove">×</button></span>`).join("");
   $("#chips").innerHTML = h;
@@ -1283,7 +1310,7 @@ function wire() {
   $("#side-close").onclick = $("#side-open").onclick = toggleSide;
   $("#new-chat").onclick = () => openChat();
   $("#chat-search").oninput = e => { S.filter = e.target.value; drawList(); };
-  $("#project-list").onclick = e => { if (e.target.closest("[data-a=all-projects]")) return projectsSheet(); const it = e.target.closest("[data-proj]"); if (it) openProject(it.dataset.proj, it.dataset.name); };
+  $("#project-list").onclick = e => { if (e.target.closest("[data-a=new-task]")) return newTaskChat(); const tk = e.target.closest("[data-task]"); if (tk) return openTask(tk.dataset.task); if (e.target.closest("[data-a=all-projects]")) return projectsSheet(); const it = e.target.closest("[data-proj]"); if (it) openProject(it.dataset.proj, it.dataset.name); };
   $("#chat-list").onclick = e => { const more = e.target.closest("[data-a=chat-more]"); if (more) { e.stopPropagation(); return chatMenu(more, more.dataset.id); } const it = e.target.closest(".chat-item"); if (it) openChat(it.dataset.id); };
   $("#chat-list").onkeydown = e => { if (e.key === "Enter" && e.target.classList.contains("chat-item")) openChat(e.target.dataset.id); };
   $("#cluster-chip").onclick = () => usageSheet();
