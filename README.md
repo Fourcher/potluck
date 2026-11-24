@@ -25,10 +25,12 @@ Too big for one computer's memory does not always mean you need several. When a 
 
 Potluck works on a single computer too, with nothing else to set up. On first start choose **Just this computer**. That computer then runs models itself with all the memory it can spare, and:
 
-- **Finds the models you already have.** Under Models, "Already on this computer" lists the GGUF models that LM Studio, Ollama, Hugging Face downloads, llama.cpp, Jan or GPT4All keep, plus `~/models`, your Downloads folder and any folder you add. "Search the whole computer" asks macOS's file index for every model on every drive in about a second (on Windows and Linux it walks the drives, skipping system folders). Each one shows its type, compression, size, how long a conversation it can remember, and whether it fits this computer's memory. "Use it" runs it from where it is: nothing is copied, moved or downloaded again, and "Remove from list" never deletes the other app's file.
+- **Finds the models you already have.** Under Models, "Already on this computer" lists the GGUF models that LM Studio, Ollama, Hugging Face downloads, llama.cpp, Jan or GPT4All keep, plus `~/models`, your Downloads folder and any folder you add. "Search the whole computer" asks macOS's file index for every model on every drive in about a second (on Windows and Linux it walks the drives, skipping system folders), and Potluck remembers what it found. Each one shows its type, compression, size, how long a conversation it can remember, and whether it fits this computer's memory. "Use it" runs it from where it is: nothing is copied, moved or downloaded again, and "Remove from list" never deletes the other app's file.
 - **Uses an AI engine you already have** when it is new enough. A llama.cpp server found on the computer (Homebrew, your own build) is used for models that run here alone if its version is at least Potluck's own; otherwise Potluck installs its own. You can pick one in "On this computer".
 - **Lets go of the memory** when the model has not been used for a while (30 minutes by default; choose 10 minutes to 3 hours, or never). The next chat message loads it again by itself. Potluck itself idles at about 13 MB of memory and next to no processor time.
 - On a Mac, counts the memory other apps can give up, not only what is idle this second: macOS makes room by compressing them.
+
+Measured on a Mac mini M4 with 16 GB: Inkling 2 Mini (the IQ2_M file, 8.7 GB) loads in about 18 seconds and writes about 18 tokens per second, with an 8,192-token conversation memory.
 
 You can add other computers later; nothing changes for the ones you have.
 

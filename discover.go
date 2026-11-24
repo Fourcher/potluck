@@ -315,7 +315,15 @@ func (a *Agent) discoverModels(ctx context.Context, deep bool) []FoundModel {
 	for _, r := range modelRoots(cfg.ModelDirs, own) {
 		walkModels(ctx, r, seen, &cands)
 	}
+	// What a whole-computer search found before is remembered, so a model kept in an
+	// unusual folder stays listed without searching again.
+	remembered := filepath.Join(a.dir, "found-elsewhere.json")
+	var before []string
+	if b, err := os.ReadFile(remembered); err == nil {
+		_ = json.Unmarshal(b, &before)
+	}
 	if deep {
+		start := len(cands)
 		if hits := spotlightModels(ctx); hits != nil {
 			for _, p := range hits {
 				if p != "" && !strings.HasPrefix(p, a.dir) {
@@ -328,6 +336,28 @@ func (a *Agent) discoverModels(ctx context.Context, deep bool) []FoundModel {
 				walkDeep(ctx2, d, seen, &cands)
 			}
 			cancel()
+		}
+		keep := map[string]bool{}
+		for _, p := range before {
+			if _, err := os.Stat(p); err == nil {
+				keep[p] = true
+			}
+		}
+		for _, c := range cands[start:] {
+			keep[c.parts[0]] = true
+		}
+		list := make([]string, 0, len(keep))
+		for p := range keep {
+			list = append(list, p)
+		}
+		sort.Strings(list)
+		if b, err := json.Marshal(list); err == nil {
+			_ = os.WriteFile(remembered, b, 0o644)
+		}
+	}
+	for _, p := range before {
+		if _, err := os.Stat(p); err == nil {
+			addCandidate(p, "Found on this computer", seen, &cands)
 		}
 	}
 	inUse := map[string]bool{}

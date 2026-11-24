@@ -1091,7 +1091,12 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			go func(id string) { _ = h.call(id, "prune_cache", nil, nil, 30*time.Second) }(id)
 		}
 
-		done = h.step("Installing the AI engine on each computer")
+		alone := len(parts) == 1
+		if alone {
+			done = h.step("Getting the AI engine ready")
+		} else {
+			done = h.step("Installing the AI engine on each computer")
+		}
 		var replan sync.Map
 		if err := parallelDo(parts, func(p part) error {
 			h.mu.Lock()
@@ -1148,8 +1153,13 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 	}
 
 	text := "Downloading the model (each computer fetches its own share)"
-	if local {
+	switch {
+	case local && len(plan.WorkerOrder) == 0:
+		text = "Finding the model file"
+	case local:
 		text = "Getting the helpers ready (the head sends them their share)"
+	case len(parts) == 1:
+		text = "Downloading the model"
 	}
 	done = h.step(text)
 	split := parseSplit(plan.TensorSplit)
@@ -1203,7 +1213,11 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		return errors.New("stopped")
 	}
 
-	done = h.step("Loading the model across the computers")
+	if len(plan.WorkerOrder) == 0 {
+		done = h.step("Loading the model")
+	} else {
+		done = h.step("Loading the model across the computers")
+	}
 	// Devices the helpers offer, in order; the head's own card (if any) is the last entry
 	// of the plan's device list and is not one of them.
 	rpcDevs, helperLayers := 0, 0
@@ -1213,7 +1227,15 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			helperLayers += plan.DevLayers[i]
 		}
 	}
-	req := StartHeadReq{File: model.File, Workers: plan.WorkerOrder, NGL: plan.NGL, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream, DenseBytes: info.denseBytes(),
+	ngl := plan.NGL
+	if ngl > info.Layers {
+		// Every layer on graphics chips: say "all" rather than a count. Some models run part
+		// of their layers more than once (Inkling 2 repeats 12 of its 24 three times), and the
+		// engine counts each pass as a layer, so a count from the file left half of Inkling
+		// on the processor (2 words per second instead of 18.5, measured on the Mac mini).
+		ngl = 999
+	}
+	req := StartHeadReq{File: model.File, Workers: plan.WorkerOrder, NGL: ngl, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream, DenseBytes: info.denseBytes(),
 		ExpertCPU: plan.ExpertCPU,
 		// Every hardware thread only where it measured faster: pooled, with the card holding
 		// the trunk of all the head's layers (3.8 against 3.3 words/s). With whole layers on

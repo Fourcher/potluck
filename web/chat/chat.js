@@ -201,9 +201,10 @@ function assistantHTML(m, live) {
 function drawThread() {
   const c = S.cur, el = $("#thread");
   if (!c.messages.length) {
-    const sugg = ["Explain how this model is running across my computers", "Help me plan my week", "Draft a polite email declining a meeting", "Summarize a file I attach"];
+    const pooled = ((S.server && S.server.nodes) || []).some(n => n.role === "worker");
+    const sugg = [pooled ? "Explain how this model is running across my computers" : "What can you do on this computer?", "Help me plan my week", "Draft a polite email declining a meeting", "Summarize a file I attach"];
     el.innerHTML = (c.summary ? `<div class="wrap"><details class="think"><summary>${ic("file")}<span>Continued from an earlier chat. Its summary is included.</span></summary><div class="t">${esc(c.summary)}</div></details></div>` : "") +
-      `<div class="hello"><h2>What shall we work on?</h2><p>${running() ? "Running privately on your own computers." : "Type away; your message is sent once a model is ready."}</p><div class="suggest">${sugg.map(s => `<button data-a="suggest">${esc(s)}</button>`).join("")}</div></div>`;
+      `<div class="hello"><h2>What shall we work on?</h2><p>${running() ? (pooled ? "Running privately on your own computers." : "Running privately on this computer.") : "Type away; your message is sent once a model is ready."}</p><div class="suggest">${sugg.map(s => `<button data-a="suggest">${esc(s)}</button>`).join("")}</div></div>`;
     return;
   }
   const results = {}; c.messages.forEach(m => { if (m.role === "tool") results[m.callId] = m; });
