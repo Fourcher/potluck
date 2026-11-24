@@ -130,12 +130,15 @@ func winUninstall() {
 	_ = os.Remove(filepath.Join(os.Getenv("USERPROFILE"), `Desktop\Potluck.lnk`))
 	_ = registry.DeleteKey(registry.CURRENT_USER, uninstallKey)
 	// The program can't delete itself while it runs: a moment after it quits, cmd does it.
-	c := exec.Command("cmd", "/C", "ping -n 4 127.0.0.1 >NUL & rmdir /S /Q \""+installDir()+"\"")
+	// cmd.exe reads its command line itself, so it is passed exactly as written: Go's usual
+	// argument quoting would garble the quoted folder name.
+	line := `cmd.exe /C ping -n 4 127.0.0.1 >NUL & rmdir /S /Q "` + installDir() + `"`
+	c := exec.Command("cmd.exe")
 	// Detached and out of any job, so it outlives this process and whatever started it.
-	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x01000000 | 0x00000008}
+	c.SysProcAttr = &syscall.SysProcAttr{CmdLine: line, HideWindow: true, CreationFlags: 0x01000000 | 0x00000008}
 	if c.Start() != nil { // a job that forbids leaving it: start it plainly instead
-		c = exec.Command(c.Path, c.Args[1:]...)
-		c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x00000008}
+		c = exec.Command("cmd.exe")
+		c.SysProcAttr = &syscall.SysProcAttr{CmdLine: line, HideWindow: true, CreationFlags: 0x00000008}
 		_ = c.Start()
 	}
 	_ = exec.Command("taskkill", "/IM", "Potluck.exe", "/F").Start()
