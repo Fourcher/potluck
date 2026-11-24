@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -68,11 +69,31 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 			return
 		}
 		var pics []string
-		for _, call := range msg.Calls {
+		// Several delegate calls in one step go out at once: each crew member works on its
+		// part in parallel, on its own computer.
+		results := make([]*SMsg, len(msg.Calls))
+		var wg sync.WaitGroup
+		for i, call := range msg.Calls {
+			if call.Name == "delegate" {
+				wg.Add(1)
+				go func(i int, call SToolCall) {
+					defer wg.Done()
+					r := st.runTool(ctx, s, call)
+					results[i] = &r
+				}(i, call)
+			}
+		}
+		wg.Wait()
+		for i, call := range msg.Calls {
 			if ctx.Err() != nil {
 				return
 			}
-			res := st.runTool(ctx, s, call)
+			var res SMsg
+			if results[i] != nil {
+				res = *results[i]
+			} else {
+				res = st.runTool(ctx, s, call)
+			}
 			pics = append(pics, res.Images...)
 			res.Images = nil
 			st.addMsg(s, res)
@@ -168,6 +189,15 @@ func (st *sessionStore) systemPrompt(s *Session) string {
 	if pol.All {
 		p = append(p, "The user has chosen to approve everything for this task: act without asking.")
 	}
+	var crew []string
+	for _, c := range h.CrewList() {
+		if c.Phase == "running" {
+			crew = append(crew, fmt.Sprintf("- %s: %s on %s", c.Name, strings.TrimSuffix(c.Model.File, ".gguf"), c.NodeName))
+		}
+	}
+	if len(crew) > 0 {
+		p = append(p, "Your crew (other models on the user's other computers) can work on sub-tasks in parallel with the delegate tool. Split big work (reviewing many files, drafting several parts, checking several options) into self-contained pieces and hand them out at once, then check and combine what comes back:\n"+strings.Join(crew, "\n"))
+	}
 	return strings.Join(p, "\n\n")
 }
 
@@ -237,6 +267,10 @@ func (st *sessionStore) tools(ctx context.Context, s *Session) []toolSpec {
 			spec("screen_type", "Type text into whatever has the keyboard focus.", `{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}`),
 			spec("screen_key", "Press keys, e.g. enter, tab, escape, cmd+s, ctrl+shift+t.", `{"type":"object","properties":{"keys":{"type":"string"}},"required":["keys"]}`),
 			spec("screen_scroll", "Scroll at a point: positive amount scrolls down, negative up.", `{"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"},"amount":{"type":"integer"}},"required":["x","y"]}`))
+	}
+	if crew := st.host.CrewList(); len(crew) > 0 {
+		t = append(t, spec("delegate", "Hand a self-contained sub-task to a crew member: another model running on another of the user's computers. It gets only the text you give it (no tools, no files), so include everything it needs. Call delegate several times in one step to have several crew members work at the same time.",
+			`{"type":"object","properties":{"member":{"type":"string","description":"The crew member's name"},"task":{"type":"string","description":"The complete sub-task, with all the material it needs"}},"required":["member","task"]}`))
 	}
 	if cx := loadContContext(st.host.a.dir); len(cx.Skills) > 0 {
 		t = append(t, spec("use_skill", "Load one of the user's skills (listed in your instructions) and get its full instructions.", `{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`))
@@ -617,6 +651,8 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 			return "The user answered: " + ans, nil
 		case "request_permissions":
 			return st.requestPermissions(ctx, s, args)
+		case "delegate":
+			return st.delegate(ctx, str("member"), str("task"))
 		}
 		if strings.HasPrefix(call.Name, "mcp__") {
 			s.mu.Lock()
@@ -759,4 +795,50 @@ func thinkBudget(body map[string]any, on bool) {
 		// measured on 2026-11-24) repeat their own markers instead of answering. 1 is as fast.
 		body["reasoning_budget_tokens"] = 1
 	}
+}
+
+// delegate runs one sub-task on a crew member and returns its answer.
+func (st *sessionStore) delegate(ctx context.Context, member, task string) (string, error) {
+	c := st.host.crewMember(member)
+	if c == nil || c.Phase != "running" {
+		var names []string
+		for _, m := range st.host.CrewList() {
+			if m.Phase == "running" {
+				names = append(names, m.Name)
+			}
+		}
+		return "", fmt.Errorf("no running crew member called %q (running: %s)", member, strings.Join(names, ", "))
+	}
+	body := map[string]any{"model": "crew:" + c.Name, "stream": false,
+		"messages":             []map[string]string{{"role": "user", "content": task}},
+		"chat_template_kwargs": map[string]any{"enable_thinking": false, "reasoning_effort": "none"}}
+	thinkBudget(body, false)
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequestWithContext(ctx, "POST", "http://127.0.0.1:"+strconv.Itoa(portChat)+"/v1/chat/completions", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	res, err := sessionHTTP.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	if out.Error.Message != "" {
+		return "", errors.New(out.Error.Message)
+	}
+	if len(out.Choices) == 0 {
+		return "", errors.New("the crew member gave no answer")
+	}
+	return c.Name + " answered:\n" + out.Choices[0].Message.Content, nil
 }

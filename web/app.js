@@ -532,7 +532,39 @@ async function openPlan(model) {
 
 // ---------- main computer: running ----------
 
-function viewRun() { return viewRunMain() + aiCard(); }
+function viewRun() { return viewRunMain() + crewView() + aiCard(); }
+
+// ---------- the crew: extra models, each on one computer (crew.go) ----------
+let crew = { list: null, at: 0, storage: null, msg: "" };
+function loadCrew() {
+  crew.at = Date.now();
+  Promise.all([api("/api/crew"), crew.storage ? Promise.resolve(crew.storage) : api("/api/storage")])
+    .then(([c, st]) => { crew.list = c.crew || []; crew.storage = st; draw(true); }).catch(e => { crew.msg = e.message; draw(true); });
+}
+function crewView() {
+  if (!S.main) return "";
+  if (crew.list === null || Date.now() - crew.at > 5000) loadCrew();
+  const nodes = (S.main.nodes || []).filter(n => n.online && n.info.limits && n.info.limits.enabled);
+  const list = (crew.list || []).map(c => `<div class="file"><span class="q">${esc(c.name)}</span><span class="small muted">${esc(c.nodeName)}</span>
+      <span class="n small">${esc((c.model.title || c.model.file || "").replace(/\.gguf$/, ""))} · ${c.phase === "running" ? `<span class="badge ok">Running</span>` : c.phase === "error" ? `<span class="badge bad">Stopped</span> ${esc(c.error || "")}` : `${esc(c.note || "Starting")}…`}</span>
+      <button class="btn sm quiet" data-a="crewstop" data-name="${esc(c.name)}">Stop</button></div>`).join("");
+  // Models already on each computer, to start one without downloading.
+  const local = [];
+  for (const [id, rep] of Object.entries(crew.storage || {})) for (const m of (rep.models || [])) if (m.complete && !/-0000[2-9]-of-/.test(m.file)) local.push({ id, file: m.file, size: m.size });
+  const nodeOpts = nodes.map(n => `<option value="${esc(n.info.id)}">${esc(n.info.name)}</option>`).join("");
+  const modelOpts = local.map(m => `<option value="${esc(m.id + "|" + m.file)}">${esc(m.file.replace(/\.gguf$/, ""))} (${gb(m.size)}, on ${esc(((S.main.nodes || []).find(n => n.info.id === m.id) || { info: { name: "?" } }).info.name)})</option>`).join("");
+  return `<div class="card" style="margin-top:16px"><h3>Crew: more models at once</h3>
+    <p class="muted small">Run extra models on your other computers, next to the main one. Chat with any of them from the chat's model menu, or let a task hand them parts of a big job at the same time (it uses them by itself when they are running).</p>
+    ${crew.msg ? `<div class="err">${esc(crew.msg)}</div>` : ""}
+    ${list ? `<div class="files" style="margin-top:8px">${list}</div>` : `<p class="small muted" style="margin-top:8px">No crew members yet.</p>`}
+    <div class="tools" style="margin-top:10px;flex-wrap:wrap">
+      <select id="crew-node" aria-label="Computer">${nodeOpts}</select>
+      <select id="crew-model" aria-label="Model" style="min-width:240px"><option value="">A model already downloaded…</option>${modelOpts}</select>
+      <input type="text" id="crew-repo" placeholder="or Hugging Face repo, e.g. unsloth/gemma-4-12B-it-GGUF" style="min-width:260px" aria-label="Hugging Face repository">
+      <input type="text" id="crew-file" placeholder="file, e.g. gemma-4-12B-it-Q4_K_M.gguf" style="min-width:220px" aria-label="Model file">
+      <button class="btn" data-a="crewstart">Start</button></div>
+    <p class="small muted">A model already on a computer runs there; a Hugging Face model is downloaded to the computer you pick.</p></div>`;
+}
 
 function viewRunMain() {
   const m = S.main, c = m.cluster;
@@ -709,6 +741,16 @@ const actions = {
     api("/api/connections", { action: "add", name, baseURL, key }).then(r => { toast(`Added ${r.name}. Its models are in the chat's model menu.`); conns = null; draw(true); }).catch(e => toast(e.message));
   },
   connrm(t) { if (confirm("Remove this connection? Its models leave Potluck's chat.")) api("/api/connections", { action: "remove", id: t.dataset.id }).then(() => { conns = null; draw(true); }).catch(e => toast(e.message)); },
+  crewstart() {
+    const node = $("#crew-node").value, pick = $("#crew-model").value, repo = $("#crew-repo").value.trim(), file = $("#crew-file").value.trim();
+    let body;
+    if (pick) { const [id, f] = pick.split("|"); body = { action: "start", node: id, file: f }; }
+    else if (repo && file) body = { action: "start", node, repo, file };
+    else return toast("Pick a downloaded model, or type a Hugging Face repo and file.");
+    crew.msg = "";
+    api("/api/crew", body).then(r => { toast("Starting " + r.name + "…"); loadCrew(); }).catch(e => { crew.msg = e.message; draw(true); });
+  },
+  crewstop(t) { api("/api/crew", { action: "stop", name: t.dataset.name }).then(loadCrew).catch(e => toast(e.message)); },
   copytext(t) { navigator.clipboard.writeText(t.dataset.text).then(() => toast("Copied.")).catch(() => toast(t.dataset.text)); },
   newsharekey() { if (confirm("Make a new key? Devices and apps using the old key stop working until you give them the new one.")) act(() => api("/api/share", { rotate: true })); },
   pushtest() { api("/api/phones", { action: "test" }).then(() => { toast("Test alert sent. Answer it on your phone."); setTimeout(loadPhones, 8000); setTimeout(loadPhones, 30000); }).catch(e => toast(e.message)); },

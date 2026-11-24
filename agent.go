@@ -125,9 +125,7 @@ type Agent struct {
 	vision    bool        // the model running here was loaded with its image add-on
 	rpcPort   int
 	apiPort   int
-	aux       *proc // the Potluck helper's own small engine (aux.go)
-	auxPort   int
-	auxFile   string
+	aux       map[string]*auxEngine // extra engines: the helper and crew members (aux.go)
 	listeners []net.Listener
 	jobCancel context.CancelFunc
 	status    string
@@ -891,9 +889,9 @@ func (a *Agent) localPort(target string) (int, error) {
 		if a.head.Running() {
 			return a.apiPort, nil
 		}
-	case "aux":
-		if a.aux.Running() {
-			return a.auxPort, nil
+	default:
+		if p, ok := a.auxPortFor(target); ok {
+			return p, nil
 		}
 	}
 	return 0, fmt.Errorf("nothing is running for %q here", target)

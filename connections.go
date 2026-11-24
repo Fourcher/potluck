@@ -176,7 +176,7 @@ func (h *Host) mergedModels(w http.ResponseWriter, r *http.Request, api http.Han
 		_ = json.Unmarshal(rec.Body.Bytes(), &list)
 	}
 	list.Object = "list"
-	for _, m := range h.connChatModels() {
+	for _, m := range append(h.crewChatModels(), h.connChatModels()...) {
 		list.Data = append(list.Data, map[string]any{"id": m.File, "object": "model", "owned_by": m.NodeName})
 	}
 	writeJSON(w, list)

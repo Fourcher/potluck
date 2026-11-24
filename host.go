@@ -132,8 +132,9 @@ type Host struct {
 	phoneMu    sync.Mutex
 	phoneSrvs  []*http.Server
 	helperMu   sync.Mutex
-	helper     helperState // the Potluck helper (helper.go)
-	helperGen  int         // which setup run is current; bumped by stop and restart
+	helper     helperState            // the Potluck helper (helper.go)
+	helperGen  int                    // which setup run is current; bumped by stop and restart
+	crew       map[string]*CrewMember // extra models on other computers (crew.go), under mu
 	shareMu    sync.Mutex
 	shareSrvs  []*http.Server
 	shareOn    string // the addresses the share server listens on now
@@ -894,7 +895,11 @@ func (h *Host) planNodes() []PlanNode {
 		}
 		cpu, gpu, uni := offer(info, held)
 		cpu, gpu = h.capByCeiling(id, cpu, gpu)
-		if r := h.helperReserveLocked(id); r > 0 { // the helper's memory is not on offer
+		// The helper's and crew members' memory is not on offer to the main model.
+		if r := h.helperReserveLocked(id) + h.crewReserveLocked(id); r > 0 {
+			if r > cpu {
+				gpu = max(0, gpu-(r-cpu))
+			}
 			cpu = max(0, cpu-r)
 		}
 		n.Offer = cpu + gpu

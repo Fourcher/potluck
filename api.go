@@ -452,6 +452,44 @@ func (app *App) serveUI() error {
 		return map[string]string{"id": s.ID}, nil
 	})
 
+	// The crew: extra models, each on one computer (crew.go).
+	// POST {action: "start", node, repo, file, ctx, name} (repo empty: a file already on that
+	// computer) or {action: "stop", name}.
+	api("/api/crew", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		if r.Method == http.MethodPost {
+			var in struct {
+				Action, Name, Node, Repo, File string
+				Ctx                            int
+			}
+			if err := body(r, &in); err != nil {
+				return nil, err
+			}
+			switch in.Action {
+			case "start":
+				m := ModelRef{Source: "hf", Repo: in.Repo, File: in.File}
+				if in.Repo == "" {
+					m = ModelRef{Source: "local", File: in.File, Node: in.Node}
+				}
+				name, err := h.StartCrew(in.Name, in.Node, m, in.Ctx)
+				if err != nil {
+					return nil, err
+				}
+				return map[string]string{"name": name}, nil
+			case "stop":
+				if err := h.StopCrew(in.Name); err != nil {
+					return nil, err
+				}
+			default:
+				return nil, errors.New("unknown action")
+			}
+		}
+		return map[string]any{"crew": h.CrewList()}, nil
+	})
+
 	api("/api/discover", func(r *http.Request) (any, error) {
 		h, err := needMain()
 		if err != nil {
@@ -762,7 +800,7 @@ func (app *App) serveUI() error {
 				app.host.Stop()
 			}
 			app.agent.Stop()
-			app.agent.stopAux()
+			app.agent.stopAllAux()
 			killAllEngines()
 			time.Sleep(300 * time.Millisecond)
 			os.Exit(0)

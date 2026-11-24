@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -176,7 +177,7 @@ func (h *Host) startHelper(gen int) error {
 		return errHelperCancelled // stopped or moved while it downloaded: start nothing here
 	}
 	h.helperNote("Starting the helper on " + name)
-	if err := h.call(node, "start_aux", StartAuxReq{File: m.File, Ctx: helperCtx}, nil, time.Minute); err != nil {
+	if err := h.call(node, "start_aux", StartAuxReq{Name: "helper", File: m.File, Ctx: helperCtx}, nil, time.Minute); err != nil {
 		return err
 	}
 	for deadline := time.Now().Add(5 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
@@ -260,6 +261,17 @@ func (h *Host) helperRoute(w http.ResponseWriter, r *http.Request) bool {
 		Model string `json:"model"`
 	}
 	_ = json.Unmarshal(raw, &peek)
+	if name, ok := strings.CutPrefix(peek.Model, "crew:"); ok {
+		c := h.crewMember(name)
+		if c == nil || c.Phase != "running" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "No running crew member called " + name}})
+			return true
+		}
+		h.proxyAux(w, r, c.Node, "aux:"+c.Name, nil)
+		return true
+	}
 	if peek.Model != "potluck-helper" {
 		return false
 	}
@@ -275,22 +287,31 @@ func (h *Host) helperRoute(w http.ResponseWriter, r *http.Request) bool {
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": msg}})
 		return true
 	}
-	target, _ := url.Parse("http://helper.invalid")
-	rp := httputil.NewSingleHostReverseProxy(target)
+	h.proxyAux(w, r, st.Node, "aux", func() {
+		h.helperMu.Lock()
+		h.helper.Phase = "off"
+		h.helperMu.Unlock()
+	})
+	return true
+}
+
+// proxyAux passes a request to an extra engine (the helper or a crew member) on a computer.
+func (h *Host) proxyAux(w http.ResponseWriter, r *http.Request, node, target string, onFail func()) {
+	u, _ := url.Parse("http://aux.invalid")
+	rp := httputil.NewSingleHostReverseProxy(u)
 	rp.Transport = &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return h.openTunnel(st.Node, "aux")
+			return h.openTunnel(node, target)
 		},
 	}
 	rp.FlushInterval = 50 * time.Millisecond
 	rp.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		h.helperMu.Lock()
-		h.helper.Phase = "off"
-		h.helperMu.Unlock()
+		if onFail != nil {
+			onFail()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "The Potluck helper could not be reached: " + err.Error()}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "Could not reach that model: " + err.Error()}})
 	}
 	rp.ServeHTTP(w, r)
-	return true
 }
