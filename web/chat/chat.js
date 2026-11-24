@@ -808,6 +808,11 @@ function systemPrompt() {
 // thinkingKwargs tells the model's chat template whether to think first. Qwen-style
 // templates take enable_thinking; others (Inkling 2) take a reasoning effort, where "none"
 // keeps the thinking as short as the model allows.
+// A budget is the only reliable stop for models that think whatever they are told (Inkling 2):
+// none when thinking is off, a few thousand tokens when on, then the engine asks for the answer.
+function thinkBudget(on = !!S.settings.thinking) {
+  return on ? { reasoning_budget_tokens: 4096, reasoning_budget_message: "Time to stop thinking and give the answer." } : { reasoning_budget_tokens: 0 };
+}
 function thinkingKwargs(on = !!S.settings.thinking) {
   return { enable_thinking: on, reasoning_effort: on ? "high" : "none" };
 }
@@ -854,7 +859,7 @@ function parseToolCalls(raw) {
   return calls;
 }
 async function streamDirect(msg, signal) {
-  const s = S.settings, tools = toolSpecs(), body = { messages: apiMessages(), chat_template_kwargs: thinkingKwargs(false) };
+  const s = S.settings, tools = toolSpecs(), body = { messages: apiMessages(), chat_template_kwargs: thinkingKwargs(false), ...thinkBudget(false) };
   if (tools) body.tools = tools;
   const fail = async r => { let t = await r.text(); try { const j = JSON.parse(t); t = (j.error && (j.error.message || j.error)) || t; } catch { } return String(t); };
   const tr = await fetch("/apply-template", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
@@ -899,7 +904,7 @@ async function streamDirect(msg, signal) {
 }
 async function streamOnce(msg, signal) {
   const s = S.settings, tools = toolSpecs();
-  const body = { messages: apiMessages(), stream: true, stream_options: { include_usage: true }, cache_prompt: true, chat_template_kwargs: thinkingKwargs() };
+  const body = { messages: apiMessages(), stream: true, stream_options: { include_usage: true }, cache_prompt: true, chat_template_kwargs: thinkingKwargs(), ...thinkBudget() };
   if (tools) body.tools = tools;
   if (s.temperature !== "" && !isNaN(+s.temperature)) body.temperature = +s.temperature;
   if (s.maxTokens !== "" && +s.maxTokens > 0) body.max_tokens = +s.maxTokens;
@@ -1040,7 +1045,7 @@ async function compact() {
   const c = S.cur; if (S.gen || !c.messages.length) return toast("There is nothing to summarize yet.");
   if (!running()) return toast("No model is running.");
   S.compacting = true; drawStatus();
-  const body = { messages: [...apiMessages(), { role: "user", content: "Summarize our conversation so far for your own later use. Keep every fact, decision, name, number and open question that matters, in compact notes. Do not add anything new." }], stream: false, chat_template_kwargs: thinkingKwargs(false) };
+  const body = { messages: [...apiMessages(), { role: "user", content: "Summarize our conversation so far for your own later use. Keep every fact, decision, name, number and open question that matters, in compact notes. Do not add anything new." }], stream: false, chat_template_kwargs: thinkingKwargs(false), ...thinkBudget(false) };
   try {
     const r = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const j = await r.json(); if (!r.ok) throw new Error((j.error && j.error.message) || "The model did not answer.");

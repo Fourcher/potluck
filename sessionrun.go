@@ -353,6 +353,11 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 		"stream_options":       map[string]bool{"include_usage": true},
 		"chat_template_kwargs": map[string]any{"enable_thinking": thinking, "reasoning_effort": map[bool]string{true: "high", false: "none"}[thinking]},
 	}
+	// Some models (Inkling 2) think at length whatever the template is told; a budget is the
+	// only reliable stop: none when thinking is off, a few thousand tokens when it is on, then
+	// the engine tells the model to answer. Measured: 12000 tokens of thinking and no answer
+	// without it; 16 tokens and no thinking with a budget of 0.
+	thinkBudget(body, thinking)
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://127.0.0.1:"+strconv.Itoa(portChat)+"/v1/chat/completions", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
@@ -470,7 +475,7 @@ func (st *sessionStore) compactIfNeeded(ctx context.Context, s *Session) error {
 	body, _ := json.Marshal(map[string]any{"model": "potluck", "messages": []map[string]string{
 		{"role": "system", "content": "Summarise this work log for the assistant that continues it: the task, what was done, what was found, files changed, decisions, and what is left. Be complete and specific; it replaces the log."},
 		{"role": "user", "content": trimTo(b.String(), ctxTok*2)},
-	}, "chat_template_kwargs": map[string]any{"enable_thinking": false, "reasoning_effort": "none"}})
+	}, "chat_template_kwargs": map[string]any{"enable_thinking": false, "reasoning_effort": "none"}, "reasoning_budget_tokens": 0})
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://127.0.0.1:"+strconv.Itoa(portChat)+"/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	res, err := sessionHTTP.Do(req)
@@ -706,4 +711,14 @@ func (st *sessionStore) requestPermissions(ctx context.Context, s *Session, args
 		out += ". Some apps were not allowed or did not answer; ask_user if you need them"
 	}
 	return out + ".", nil
+}
+
+// thinkBudget caps a request's thinking (see complete).
+func thinkBudget(body map[string]any, on bool) {
+	if on {
+		body["reasoning_budget_tokens"] = 4096
+		body["reasoning_budget_message"] = "Time to stop thinking and give the answer."
+	} else {
+		body["reasoning_budget_tokens"] = 0
+	}
 }

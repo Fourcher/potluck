@@ -220,6 +220,9 @@ final class PotluckClient: @unchecked Sendable {
                         // Qwen-style templates read enable_thinking; Inkling 2 reads a reasoning
                         // effort, where "none" keeps its thinking as short as it allows.
                         "chat_template_kwargs": ["enable_thinking": think, "reasoning_effort": think ? "high" : "none"],
+                        // The only reliable stop for models that think regardless (Inkling 2).
+                        "reasoning_budget_tokens": think ? 4096 : 0,
+                        "reasoning_budget_message": "Time to stop thinking and give the answer.",
                     ]
                     req.httpBody = try JSONSerialization.data(withJSONObject: body)
                     let (bytes, resp) = try await session.bytes(for: req)
