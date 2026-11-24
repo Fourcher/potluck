@@ -203,3 +203,27 @@ func TestWorkReported(t *testing.T) {
 		t.Fatal("a measured working memory must replace the estimate")
 	}
 }
+
+// One computer with a card: a looped model's layer count is given in slots, and the card's
+// layers always include the loop core.
+func TestSoloLoop(t *testing.T) {
+	m := inkling()
+	m.LayerBytes = make([]int64, 24)
+	m.ExpertBytes = make([]int64, 24)
+	for i := range m.LayerBytes {
+		m.LayerBytes[i], m.ExpertBytes[i] = 1000<<20, 970<<20
+	}
+	m.OtherBytes, m.OutputBytes, m.PlanCtx = 1<<30, 500<<20, 8192
+	p := planSolo(m, PlanNode{ID: "a", Name: "A", CPUBytes: 26 << 30, GPUBytes: 3 << 30, HasGPU: true})
+	if !p.Fits {
+		t.Fatal(p.Reason)
+	}
+	if g := p.Shares[0].GPULayers; g > 0 {
+		if m.Layers-g > m.LoopStart {
+			t.Fatalf("card holds %d layers: the loop core is split", g)
+		}
+		if p.NGL != g+1+m.loopSlots() {
+			t.Fatalf("ngl %d for %d card layers, want it in slots", p.NGL, g)
+		}
+	}
+}

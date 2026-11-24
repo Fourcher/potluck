@@ -977,6 +977,20 @@ func planSolo(m *ModelInfo, n PlanNode) *Plan {
 			}
 		}
 	}
+	// Looped models: the card's layers must include the whole loop core, or the repeat passes
+	// (their slots come last, on the card) run apart from their weights and the engine turns
+	// flash attention off. Otherwise keep the model on the processor.
+	if extra := m.loopSlots(); extra > 0 && gpu > 0 && m.Layers-gpu > m.LoopStart {
+		gpu, cpu = 0, m.Layers
+		p.CardTrunk, p.ExpertCPU = false, nil
+		need = m.OtherBytes + perDeviceOverhead
+		for l := 0; l < m.Layers; l++ {
+			need += m.LayerBytes[l]
+			if l < len(kv) {
+				need += kv[l]
+			}
+		}
+	}
 	if need > inMemory {
 		p.Overflow = need - inMemory
 	}
@@ -991,7 +1005,7 @@ func planSolo(m *ModelInfo, n PlanNode) *Plan {
 		p.DevOwner, p.DevLayers = []string{n.ID}, []int{gpu}
 	}
 	if gpu > 0 {
-		p.NGL = gpu + 1
+		p.NGL = gpu + 1 + m.loopSlots() // in the engine's slots (see planLayout)
 	}
 	p.Machines, p.Fits = 1, true
 	return p
