@@ -275,6 +275,9 @@ func (h *Host) helperStatusText() string {
 		if i.Limits.Enabled {
 			lends = ", can lend " + humanBytes(can) + " to a model"
 		}
+		if n.Role != "" {
+			lends = ", busy running the model now"
+		}
 		fmt.Fprintf(&b, "- %s%s: %s, %s, %s memory (%s free now), %s, %s%s\n", i.Name, main, state, osPretty(i.OS), humanBytes(int64(i.RAMTotal)), humanBytes(int64(i.RAMAvail)), gpu, lend, lends)
 		if n.Online && i.Limits.ActiveNow(now) {
 			total += can
@@ -284,7 +287,11 @@ func (h *Host) helperStatusText() string {
 	c := h.cluster
 	switch {
 	case c.Model != nil && c.Phase == "running":
-		fmt.Fprintf(&b, "Running: %s, %.1f tokens a second.\n", c.Model.Title, c.TPS)
+		if c.TPS > 0 {
+			fmt.Fprintf(&b, "Running: %s, %.1f tokens a second.\n", c.Model.Title, c.TPS)
+		} else {
+			fmt.Fprintf(&b, "Running: %s (its speed hasn't been measured yet).\n", c.Model.Title)
+		}
 	case c.Model != nil && c.Phase == "starting":
 		step := ""
 		if len(c.Steps) > 0 {
