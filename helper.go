@@ -125,9 +125,9 @@ func (h *Host) pickHelperNode(need int64) (string, string, error) {
 		if free < need {
 			continue
 		}
-		// "head" here: anything to do with the main model (running it, holding part of it, or
-		// chosen to run it), so the helper never crowds it.
-		busy := (id == h.cluster.Head && h.cluster.Phase != "idle") || n.Role != "" || n.Held > 0 || id == headChoice
+		// "busy": anything to do with the main model (running it, holding part of it, or chosen
+		// to run it) or a crew member, so the helper never crowds them.
+		busy := (id == h.cluster.Head && h.cluster.Phase != "idle") || n.Role != "" || n.Held > 0 || id == headChoice || h.crewReserveLocked(id) > 0
 		cs = append(cs, cand{id, n.Info.Name, free, busy})
 	}
 	if len(cs) == 0 {
