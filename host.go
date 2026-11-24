@@ -99,6 +99,8 @@ type Host struct {
 	mu       sync.Mutex
 	nodes    map[string]*Node
 	memCeil  map[string]memCeiling // per computer, after its guard stepped in (hostguard.go)
+	sessOnce sync.Once
+	sess     *sessionStore // agent sessions (sessions.go)
 	guardWhy string                // why the guard stopped the model, shown instead of "stopped"
 	pending  map[string]*Pending
 	tunnels  map[string]chan net.Conn

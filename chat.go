@@ -142,6 +142,12 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = io.WriteString(w, h.aiGuide())
+		case strings.HasPrefix(r.URL.Path, "/potluck/sessions") || r.URL.Path == "/potluck/questions":
+			if !chatOwner(r) {
+				http.NotFound(w, r)
+				return
+			}
+			h.sessionStore().handle(w, r, true)
 		case r.URL.Path == "/potluck/mcp" && r.Method == http.MethodPost:
 			handleMCP(w, r, h.a.dir)
 		case r.URL.Path == "/potluck/fs" && r.Method == http.MethodPost:

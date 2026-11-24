@@ -1,0 +1,425 @@
+package main
+
+// Agent sessions: tasks that run inside Potluck, so they keep going with the browser closed
+// and can be watched and answered from anywhere (the chat page, the iPhone app, a
+// notification). Local models are slow; a task should be something you set and forget.
+//
+// A session holds its conversation, its project (if any), its permission policy and what was
+// approved. Potluck runs the loop itself: ask the model, run the tools it calls, feed the
+// results back, until the model is done. Whenever something needs the person (a command, a
+// file change, a connector, or a question the model asks), it becomes a Question in one queue
+// that any client can answer with yes, no, or their own words. Sessions are saved to disk
+// after every step.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Policy is what a session may do without asking.
+type Policy struct {
+	Files      string          `json:"files"`      // ask | read (read freely, ask before changes) | edit (all freely)
+	Commands   string          `json:"commands"`   // ask | auto
+	Connectors map[string]bool `json:"connectors"` // switched-on MCP servers (started only if on)
+	All        bool            `json:"all"`        // approve everything: nothing asks (the person accepted the warning)
+	Thinking   bool            `json:"thinking"`
+}
+
+// Grants are standing yeses given during a session ("yes, and don't ask again").
+type Grants struct {
+	Read, Write, Run bool
+	Connectors       map[string]bool
+}
+
+type SMsg struct {
+	Role      string      `json:"role"` // user | assistant | tool
+	Content   string      `json:"content"`
+	Reasoning string      `json:"reasoning,omitempty"`
+	Calls     []SToolCall `json:"calls,omitempty"`
+	CallID    string      `json:"callId,omitempty"`
+	Name      string      `json:"name,omitempty"`  // tool messages: which tool
+	State     string      `json:"state,omitempty"` // tool messages: ok | error | denied
+	At        time.Time   `json:"at"`
+}
+
+type SToolCall struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Args string `json:"args"`
+}
+
+// Question is something only the person can decide. Answer "yes", "no", "always" (yes, and
+// stop asking about this kind of thing in this session), or anything else in their own words.
+type Question struct {
+	ID       string    `json:"id"`
+	Session  string    `json:"session"`
+	Title    string    `json:"title"`  // one line: what is being asked
+	Detail   string    `json:"detail"` // the command, the change, the full question
+	Kind     string    `json:"kind"`   // run | read | write | connector | ask | plan
+	Created  time.Time `json:"created"`
+	Answer   string    `json:"answer,omitempty"`
+	answered chan string
+}
+
+type Session struct {
+	ID       string      `json:"id"`
+	Title    string      `json:"title"`
+	Project  *ProjectRef `json:"project,omitempty"`
+	Created  time.Time   `json:"created"`
+	Updated  time.Time   `json:"updated"`
+	Status   string      `json:"status"` // idle | working | waiting | error | stopped
+	Error    string      `json:"error,omitempty"`
+	Policy   Policy      `json:"policy"`
+	Grants   Grants      `json:"grants"`
+	Messages []SMsg      `json:"messages"`
+	Question *Question   `json:"question,omitempty"` // the open question, if waiting
+	Steps    int         `json:"steps"`
+
+	lastPrompt int // tokens the model read last time, to know when to make room
+	mu         sync.Mutex
+	cancel     context.CancelFunc
+	subs       map[chan SEvent]bool
+}
+
+type ProjectRef struct {
+	Root string `json:"root"`
+	Name string `json:"name"`
+}
+
+// SEvent is what watchers of a session receive.
+type SEvent struct {
+	Type      string    `json:"type"` // delta | message | tool | question | status
+	Text      string    `json:"text,omitempty"`
+	Reasoning string    `json:"reasoning,omitempty"`
+	Msg       *SMsg     `json:"msg,omitempty"`
+	Question  *Question `json:"question,omitempty"`
+	Status    string    `json:"status,omitempty"`
+	Error     string    `json:"error,omitempty"`
+}
+
+type sessionStore struct {
+	mu       sync.Mutex
+	dir      string
+	host     *Host
+	sessions map[string]*Session
+	notify   func(q *Question, s *Session) // phones and other alerts (set by the host)
+}
+
+func newSessionStore(h *Host, data string) *sessionStore {
+	st := &sessionStore{dir: filepath.Join(data, "sessions"), host: h, sessions: map[string]*Session{}}
+	_ = os.MkdirAll(st.dir, 0o700)
+	files, _ := filepath.Glob(filepath.Join(st.dir, "*.json"))
+	for _, f := range files {
+		var s Session
+		if readJSONFile(f, &s) == nil && s.ID != "" {
+			if s.Status == "working" || s.Status == "waiting" {
+				s.Status, s.Error = "stopped", "Potluck restarted while this was running. Send a message to carry on."
+				s.Question = nil
+			}
+			s.subs = map[chan SEvent]bool{}
+			st.sessions[s.ID] = &s
+		}
+	}
+	return st
+}
+
+func (st *sessionStore) save(s *Session) {
+	s.mu.Lock()
+	b, err := json.MarshalIndent(s, "", " ")
+	s.mu.Unlock()
+	if err == nil {
+		tmp := filepath.Join(st.dir, s.ID+".json.tmp")
+		if os.WriteFile(tmp, b, 0o600) == nil {
+			_ = os.Rename(tmp, filepath.Join(st.dir, s.ID+".json"))
+		}
+	}
+}
+
+func (s *Session) emit(ev SEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for ch := range s.subs {
+		select {
+		case ch <- ev:
+		default: // a slow watcher misses deltas, never blocks the task
+		}
+	}
+}
+
+func (s *Session) setStatus(status, errText string) {
+	s.mu.Lock()
+	s.Status, s.Error, s.Updated = status, errText, time.Now()
+	s.mu.Unlock()
+	s.emit(SEvent{Type: "status", Status: status, Error: errText})
+}
+
+// ---------- creating, talking, answering ----------
+
+func (st *sessionStore) create(project *ProjectRef, pol Policy) *Session {
+	s := &Session{ID: randomHex(8), Created: time.Now(), Updated: time.Now(), Status: "idle", Policy: pol, Project: project, subs: map[chan SEvent]bool{}}
+	if s.Policy.Files == "" {
+		s.Policy.Files = "read"
+	}
+	if s.Policy.Commands == "" {
+		s.Policy.Commands = "ask"
+	}
+	if project != nil {
+		s.Title = project.Name
+		// Approvals kept for this project in earlier sessions carry over.
+		if g, ok := st.projectGrants(project.Root); ok {
+			s.Grants = g
+		}
+	}
+	st.mu.Lock()
+	st.sessions[s.ID] = s
+	st.mu.Unlock()
+	st.save(s)
+	return s
+}
+
+func (st *sessionStore) get(id string) *Session {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.sessions[id]
+}
+
+// send adds the person's message and starts the loop if it is not running.
+func (st *sessionStore) send(s *Session, text string) error {
+	s.mu.Lock()
+	if s.Status == "working" || s.Status == "waiting" {
+		s.mu.Unlock()
+		return errors.New("this task is still working: stop it first, or answer its question")
+	}
+	s.Messages = append(s.Messages, SMsg{Role: "user", Content: text, At: time.Now()})
+	if s.Title == "" || (s.Project != nil && s.Title == s.Project.Name && len(s.Messages) == 1) {
+		s.Title = titleOf(text, s.Project)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	s.Status, s.Error = "working", "" // from the moment it is sent, so no one sees it as finished
+	s.mu.Unlock()
+	st.save(s)
+	go st.run(ctx, s)
+	return nil
+}
+
+func titleOf(text string, p *ProjectRef) string {
+	t := strings.Join(strings.Fields(text), " ")
+	if len(t) > 48 {
+		t = t[:46] + "…"
+	}
+	if p != nil {
+		return p.Name + ": " + t
+	}
+	return t
+}
+
+func (st *sessionStore) stop(s *Session) {
+	s.mu.Lock()
+	c, q := s.cancel, s.Question
+	s.mu.Unlock()
+	if c != nil {
+		c()
+	}
+	if q != nil {
+		select {
+		case q.answered <- "no":
+		default:
+		}
+	}
+}
+
+// answer resolves the open question.
+func (st *sessionStore) answer(s *Session, qid, ans string) error {
+	s.mu.Lock()
+	q := s.Question
+	s.mu.Unlock()
+	if q == nil || q.ID != qid {
+		return errors.New("that question has already been answered")
+	}
+	ans = strings.TrimSpace(ans)
+	if ans == "" {
+		return errors.New("give an answer")
+	}
+	select {
+	case q.answered <- ans:
+		return nil
+	default:
+		return errors.New("that question has already been answered")
+	}
+}
+
+// questions lists every open question across sessions, newest first (for phones).
+func (st *sessionStore) questions() []*Question {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	var out []*Question
+	for _, s := range st.sessions {
+		s.mu.Lock()
+		if s.Question != nil {
+			out = append(out, s.Question)
+		}
+		s.mu.Unlock()
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Created.After(out[j].Created) })
+	return out
+}
+
+// ask puts a question to the person and waits for the answer.
+func (st *sessionStore) ask(ctx context.Context, s *Session, kind, title, detail string) (string, error) {
+	q := &Question{ID: randomHex(6), Session: s.ID, Title: title, Detail: detail, Kind: kind, Created: time.Now(), answered: make(chan string, 1)}
+	s.mu.Lock()
+	s.Question = q
+	s.mu.Unlock()
+	s.setStatus("waiting", "")
+	s.emit(SEvent{Type: "question", Question: q})
+	st.save(s)
+	if st.notify != nil {
+		go st.notify(q, s)
+	}
+	var ans string
+	select {
+	case ans = <-q.answered:
+	case <-ctx.Done():
+		ans = "no"
+	}
+	s.mu.Lock()
+	q.Answer, s.Question = ans, nil
+	s.mu.Unlock()
+	s.setStatus("working", "")
+	s.emit(SEvent{Type: "question", Question: q})
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	return ans, nil
+}
+
+// ---------- permissions ----------
+
+// allowed decides whether a tool call may run, asking the person if the policy says so.
+// It returns "" to go ahead, or the text to give the model instead of running it.
+func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall, args map[string]any) (string, error) {
+	s.mu.Lock()
+	pol, g := s.Policy, s.Grants
+	s.mu.Unlock()
+	if pol.All {
+		return "", nil
+	}
+	kind, title, detail := "", "", ""
+	str := func(k string) string { v, _ := args[k].(string); return v }
+	switch {
+	case call.Name == "run_command" || call.Name == "run_applescript":
+		if pol.Commands == "auto" || g.Run {
+			return "", nil
+		}
+		kind = "run"
+		if call.Name == "run_applescript" {
+			title, detail = "Run this AppleScript to control an app?", str("script")
+		} else {
+			title, detail = "Run this command?", str("command")
+			if f := str("folder"); f != "" {
+				detail += "\n\n(in " + f + ")"
+			}
+		}
+	case call.Name == "edit_file" || call.Name == "write_file":
+		if pol.Files == "edit" || g.Write {
+			return "", nil
+		}
+		kind = "write"
+		if call.Name == "edit_file" {
+			title, detail = "Change "+str("path")+"?", "Replace:\n"+trimTo(str("old"), 2000)+"\n\nWith:\n"+trimTo(str("new"), 2000)
+		} else {
+			title, detail = "Write "+str("path")+"?", trimTo(str("content"), 3000)
+		}
+	case call.Name == "read_file" || call.Name == "list_files" || call.Name == "search_files":
+		if pol.Files == "read" || pol.Files == "edit" || g.Read {
+			return "", nil
+		}
+		kind, title, detail = "read", "Look at the project's files?", call.Name+" "+call.Args
+	case strings.HasPrefix(call.Name, "mcp__"):
+		server := strings.SplitN(strings.TrimPrefix(call.Name, "mcp__"), "__", 2)[0]
+		if g.Connectors[server] || pol.Commands == "auto" {
+			return "", nil
+		}
+		kind, title, detail = "connector", "Use "+strings.Replace(strings.TrimPrefix(call.Name, "mcp__"), "__", ": ", 1)+"?", trimTo(call.Args, 3000)
+	default:
+		return "", nil // skills and questions to the person need no permission
+	}
+	ans, err := st.ask(ctx, s, kind, title, detail)
+	if err != nil {
+		return "", err
+	}
+	switch strings.ToLower(ans) {
+	case "yes", "y", "ok", "allow":
+		return "", nil
+	case "always":
+		s.mu.Lock()
+		switch kind {
+		case "run":
+			s.Grants.Run = true
+		case "write":
+			s.Grants.Write, s.Grants.Read = true, true
+		case "read":
+			s.Grants.Read = true
+		case "connector":
+			if s.Grants.Connectors == nil {
+				s.Grants.Connectors = map[string]bool{}
+			}
+			s.Grants.Connectors[strings.SplitN(strings.TrimPrefix(call.Name, "mcp__"), "__", 2)[0]] = true
+		}
+		s.mu.Unlock()
+		return "", nil
+	case "no", "n", "deny":
+		return "The user said no. Do not try it another way; ask what they would like instead, or carry on without it.", nil
+	}
+	return "The user did not allow that, and said: " + ans, nil
+}
+
+func trimTo(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "\n…"
+	}
+	return s
+}
+
+// projectGrants are approvals kept for a project across sessions.
+func (st *sessionStore) projectGrants(root string) (Grants, bool) {
+	var all map[string]Grants
+	_ = readJSONFile(filepath.Join(st.dir, "project-grants.json"), &all)
+	g, ok := all[root]
+	return g, ok
+}
+
+func (st *sessionStore) keepGrants(root string, g *Grants) {
+	var all map[string]Grants
+	_ = readJSONFile(filepath.Join(st.dir, "project-grants.json"), &all)
+	if all == nil {
+		all = map[string]Grants{}
+	}
+	if g == nil {
+		delete(all, root)
+	} else {
+		all[root] = *g
+	}
+	_ = writeJSONFile(filepath.Join(st.dir, "project-grants.json"), all)
+}
+
+func (h *Host) sessionStore() *sessionStore {
+	h.sessOnce.Do(func() { h.sess = newSessionStore(h, h.a.dir) })
+	return h.sess
+}
+
+func removeFile(dir, name string) error {
+	err := os.Remove(filepath.Join(dir, name))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
