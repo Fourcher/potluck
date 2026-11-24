@@ -4,7 +4,7 @@ Run one large AI model across the spare computers you already own.
 
 A laptop with 16 GB, an old gaming PC, a Linux box in the closet: none of them can hold a big model alone, but together they can. Potluck pools their memory, splits the model between them, and gives you one chat page and one OpenAI-compatible API on your main computer.
 
-Version 1.10.0. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second (3.2 on 21 November with the newer engine in 1.6.0).
+Version 1.11.0. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter model across a Windows PC and two 16 GB laptops on Wi-Fi, none of which could hold it alone, at 3.3 to 4 words per second (3.2 on 21 November with the newer engine in 1.6.0).
 
 **Recommended model to start with: Inkling 2 Mini** (`AtomicChat/Inkling-2-Mini-Uncensored-GGUF`), starred in the Models tab. Its 8.7 GB IQ2_M size ran on one Windows PC with 30 GB and a 4 GB GTX 1050 Ti at 2.5 to 3 words per second on 21 November 2026. This version has had its refusals removed: it answers what it is asked. It always thinks briefly before answering; switching Think off in the chat page keeps that as short as the model allows.
 
@@ -61,6 +61,12 @@ Open `http://127.0.0.1:7720` on the main computer (or "Open chat" in the control
 - **Also:** thinking on or off, writing styles, your own standing instructions, stop, a preview panel for HTML and SVG the model writes, light and dark, keyboard shortcuts, and a phone-sized layout.
 
 Two things make it quick on slow hardware. Follow-up messages read only what is new: for Qwen-style models the page sends the conversation back exactly as it was written, where the standard route made the engine read every earlier token again on every turn (measured: 23 new tokens instead of 78). And there are no hidden extra requests, such as asking the model for a title.
+
+## Ask Potluck
+
+Potluck has a helper of its own: a small model (LFM3 1.7B, 1.1 GB) that sets Potluck up and answers questions about it, using Potluck's own controls. Ask "install the best model my computers can run", "help me add my other computers", "put Potluck on my D drive", "connect my iPhone" or "use my LM Studio models too". It asks before anything big (downloading a model, stopping the running model, moving Potluck's folder). On a Mac: Ask Potluck… in the menu bar or the welcome window; on Windows and Linux: the Ask Potluck button in the control panel.
+
+It runs on one of your computers that lends its memory, on the processor only and in an engine of its own, so it answers while a big model downloads or runs; its memory is kept out of the big model's plans. It downloads in the background once Potluck is set up (`"helperOff": true` in the settings file turns it off).
 
 ## Models: always current
 
