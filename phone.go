@@ -302,8 +302,16 @@ func (h *Host) PairingCode() (map[string]any, error) {
 	}
 	code.Scale = 6
 	img := "data:image/png;base64," + base64.StdEncoding.EncodeToString(code.PNG())
-	return map[string]any{"link": link, "qr": img, "addrs": addrs, "minutes": 10}, nil
+	out := map[string]any{"link": link, "qr": img, "addrs": addrs, "minutes": 10, "appURL": iPhoneAppURL}
+	if app, err := qr.Encode(iPhoneAppURL, qr.M); err == nil {
+		app.Scale = 6
+		out["appQR"] = "data:image/png;base64," + base64.StdEncoding.EncodeToString(app.PNG())
+	}
+	return out, nil
 }
+
+// iPhoneAppURL is the Potluck app's App Store page.
+const iPhoneAppURL = "https://apps.apple.com/app/id6838920258"
 
 // Phones lists the paired phones for the control panel.
 func (h *Host) Phones() []map[string]any {
