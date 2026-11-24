@@ -901,7 +901,7 @@ func (a *Agent) localPort(target string) (int, error) {
 			return a.apiPort, nil
 		}
 	default:
-		if p, ok := a.auxPortFor(target); ok {
+		if p, ok := a.auxPortLocked(target); ok {
 			return p, nil
 		}
 	}

@@ -147,16 +147,15 @@ func (a *Agent) auxStatus(name string) AuxStatus {
 	return st
 }
 
-// auxPort is where a named slot's engine answers, for tunnels ("aux" is the helper).
-func (a *Agent) auxPortFor(target string) (int, bool) {
+// auxPortLocked is where a named slot's engine answers, for tunnels ("aux" is the helper).
+// The caller holds a.mu (localPort does).
+func (a *Agent) auxPortLocked(target string) (int, bool) {
 	name := "helper"
 	if rest, ok := strings.CutPrefix(target, "aux:"); ok {
 		name = rest
 	} else if target != "aux" {
 		return 0, false
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	if e := a.aux[name]; e != nil && e.proc.Running() {
 		return e.port, true
 	}
