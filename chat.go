@@ -119,7 +119,8 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 			writeJSON(w, map[string]string{"text": text})
 		case r.URL.Path == "/potluck/import" && r.Method == http.MethodPost:
 			// Another AI on this computer hands over a bundle (the panel's "bring your setup" prompt).
-			if !chatOwner(r) || r.Header.Get("X-Potluck") != "1" {
+			// Programs (curl, an AI's tools) send no Origin; a web page elsewhere would.
+			if !chatOwner(r) || r.Header.Get("X-Potluck") != "1" || !sameOrigin(r) {
 				w.WriteHeader(http.StatusForbidden)
 				_ = json.NewEncoder(w).Encode(map[string]string{"error": "only programs on this computer can import, with the header X-Potluck: 1"})
 				return
@@ -141,6 +142,8 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = io.WriteString(w, h.aiGuide())
+		case r.URL.Path == "/potluck/mcp" && r.Method == http.MethodPost:
+			handleMCP(w, r, h.a.dir)
 		case r.URL.Path == "/potluck/fs" && r.Method == http.MethodPost:
 			handleFS(w, r, h.a.dir)
 		case r.URL.Path == "/potluck/run" && r.Method == http.MethodPost:

@@ -136,6 +136,49 @@ async function saveChat(c = S.cur) {
   if (i >= 0) S.chats[i] = meta; else S.chats.unshift(meta);
   drawList();
 }
+// ---------- connectors: the user's MCP servers (mcp.go) ----------
+// Each connector is switched on once (Settings is per browser): that is the up-front
+// permission to start it. Its tools then follow the agent mode's ask / run-freely choice.
+const connOn = name => !!(S.settings.connectors || {})[name];
+const conns = () => ((S.ctx && S.ctx.connectors) || []).filter(k => k.kind === "mcp-stdio" || k.kind === "mcp-http");
+async function loadMCP(force) {
+  const root = S.cur && S.cur.project ? S.cur.project.root : "";
+  if (!S.server || !S.server.owner || !conns().some(k => connOn(k.name))) { S.mcp = { tools: [], problems: [], root }; return; }
+  if (!force && S.mcp && S.mcp.root === root && Date.now() - S.mcp.at < 600000) return;
+  try {
+    const r = await fetch("/potluck/mcp", { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify({ op: "tools", root, servers: conns().filter(k => connOn(k.name)).map(k => k.name) }) });
+    const j = await r.json(); if (!r.ok) throw new Error(j.error || "Potluck could not start the connectors.");
+    S.mcp = { tools: (j.tools || []).filter(t => connOn(t.server)), problems: j.problems || [], root, at: Date.now() };
+    if (S.mcp.problems.length) toast("Some connectors did not start: " + S.mcp.problems.join("; "));
+  } catch (e) { S.mcp = { tools: [], problems: [e.message], root, at: Date.now() }; toast(e.message); }
+}
+const mcpName = t => ("mcp__" + t.server + "__" + t.name).replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64);
+function connMenu(a) {
+  const ks = conns();
+  const h = `<h5>Connectors: which of your MCP servers may the model use?</h5>` + (ks.length ? ks.map(k => mi("c:" + k.name, esc(k.name), { on: connOn(k.name), check: 1, d: esc(k.kind === "mcp-http" ? k.url || "" : [k.command, ...(k.args || [])].join(" ")) + (k.source ? " · from " + esc(k.source) : "") })).join("") + `<hr>` + mi("all", "Switch them all on", { icon: "check" }) + mi("none", "Switch them all off", { icon: "x" })
+    : `<div class="note">No connectors yet. Bring them over in the control panel: Computers, then "Bring your AI setup over".</div>`) +
+    `<div class="note">Switching one on lets Potluck start it on this computer. Using its tools then asks you first, unless agent mode is set to run freely.</div>`;
+  showPop(a, h, async v => {
+    const c = { ...(S.settings.connectors || {}) };
+    if (v === "all") ks.forEach(k => c[k.name] = true); else if (v === "none") ks.forEach(k => c[k.name] = false); else if (v.startsWith("c:")) c[v.slice(2)] = !c[v.slice(2)];
+    S.settings.connectors = c; saveSettings(); drawTools();
+    await loadMCP(true); drawTools();
+    if (S.mcp.tools.length) toast(`${S.mcp.tools.length} tools ready from ${new Set(S.mcp.tools.map(t => t.server)).size} connector(s).`);
+  });
+}
+function askConnector(call, tool) {
+  return new Promise(resolve => {
+    const el = $(`.tool[data-call="${CSS.escape(call.id)}"]`); if (!el) return resolve("deny");
+    el.classList.add("ask"); el.open = true;
+    $(".out", el).innerHTML = `<b>The model wants to use ${esc(tool.name)} from the connector ${esc(tool.server)}:</b><pre class="cmd">${esc(String(call.args || "{}").slice(0, 3000))}</pre>`;
+    const row = document.createElement("div"); row.className = "ask-row";
+    row.innerHTML = `<button class="btn small" data-v="allow">Allow</button><button class="btn small ghost" data-v="always">Always allow ${esc(tool.server)} in this chat</button><button class="btn small ghost" data-v="deny">Don't allow</button>`;
+    el.appendChild(row); scrollDown(true);
+    row.addEventListener("click", e => { const v = e.target.dataset.v; if (!v) return; row.remove(); el.classList.remove("ask"); resolve(v); });
+    S.gen.cancelAsk = () => { row.remove(); resolve("deny"); };
+  });
+}
+
 // ---------- projects: chats that work inside a code project on this computer ----------
 async function fsCall(body) {
   const r = await fetch("/potluck/fs", { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify(body), signal: S.gen && S.gen.abort.signal });
@@ -233,7 +276,7 @@ function toolLabel(c, res) {
     run_command: [`Running <span class="path">${esc(shortCmd(a.command))}</span>`, `Ran <span class="path">${esc(shortCmd(a.command))}</span>`, `Asked to run <span class="path">${esc(shortCmd(a.command))}</span>`],
     use_skill: [`Loading the skill <span class="path">${esc(a.name || "")}</span>`, `Loaded the skill <span class="path">${esc(a.name || "")}</span>`, `Asked to load the skill <span class="path">${esc(a.name || "")}</span>`],
     run_applescript: [`Driving an app: <span class="path">${esc(shortCmd(a.script))}</span>`, `Drove an app: <span class="path">${esc(shortCmd(a.script))}</span>`, `Asked to drive an app: <span class="path">${esc(shortCmd(a.script))}</span>`],
-  }[c.name] || [`Using ${esc(c.name)}`, `Used ${esc(c.name)}`, `Asked to use ${esc(c.name)}`];
+  }[c.name] || (c.name.startsWith("mcp__") ? (n => [`Using ${n}`, `Used ${n}`, `Asked to use ${n}`])(esc(c.name.slice(5).replace("__", ": "))) : [`Using ${esc(c.name)}`, `Used ${esc(c.name)}`, `Asked to use ${esc(c.name)}`]);
   return forms[!res ? 0 : res.state === "ok" ? 1 : 2];
 }
 function shortCmd(s) { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > 70 ? s.slice(0, 68) + "…" : s; }
@@ -318,6 +361,8 @@ function drawTools() {
   const ag = $("#agent"), canAgent = S.server && S.server.owner;
   ag.hidden = !canAgent; ag.innerHTML = `${ic("term")}<span>${AGENT[s.agent] ? AGENT[s.agent].name : AGENT.off.name}</span>`;
   ag.classList.toggle("on", canAgent && s.agent !== "off"); ag.classList.toggle("warn", canAgent && s.agent === "auto");
+  const cb = $("#conn"), nk = conns().length, non = conns().filter(k => connOn(k.name)).length;
+  if (cb) { cb.hidden = !(S.server && S.server.owner) || !nk; cb.innerHTML = `${ic("tool")}<span>${non ? non + " connector" + (non > 1 ? "s" : "") : "Connectors"}</span>`; cb.classList.toggle("on", non > 0); }
   $("#think").innerHTML = `${ic("bulb")}<span>Think</span>`; $("#think").classList.toggle("on", s.thinking);
   $("#model").innerHTML = `<span>${esc(modelTitle() || "No model")}</span>${ic("down")}`;
   $("#mic").classList.toggle("rec", !!S.rec);
@@ -483,6 +528,10 @@ function toolSpecs() {
       fn("edit_file", "Replace exact text in a file. old must match the file exactly (copy it from read_file, without the line numbers) and be unique unless all is true.", { path: { type: "string" }, old: { type: "string" }, new: { type: "string" }, all: { type: "boolean" } }, ["path", "old", "new"]),
       fn("write_file", "Create a file in the project, or replace its whole content.", { path: { type: "string" }, content: { type: "string" } }, ["path", "content"]));
   }
+  for (const t of (S.mcp && S.mcp.tools) || []) {
+    let params = t.inputSchema; if (!params || params.type !== "object") params = { type: "object", properties: {} };
+    agent.push({ type: "function", function: { name: mcpName(t), description: `[${t.server}] ${t.description || t.name}`.slice(0, 1024), parameters: params } });
+  }
   if (S.ctx && (S.ctx.skills || []).length) agent.push(fn("use_skill", "Load one of the user's skills (listed in your instructions) and get its full instructions.", { name: { type: "string", description: "The skill's name" } }, ["name"]));
   if (S.cur && S.cur.project) return agent;
   if (!S.folder || S.folder.needsAccess || S.settings.perm === "none") return agent.length ? agent : null;
@@ -538,6 +587,21 @@ const PTOOLS = { // project chats: the files live on this computer, reached thro
 };
 async function runTool(call) {
   const c = S.cur;
+  const mt = call.name.startsWith("mcp__") && ((S.mcp && S.mcp.tools) || []).find(t => mcpName(t) === call.name);
+  if (call.name.startsWith("mcp__")) {
+    if (!mt) return { state: "error", content: "That connector tool is not available now." };
+    if (S.settings.agent !== "auto" && !c.grants["mcp:" + mt.server]) {
+      const v = await askConnector(call, mt);
+      if (v === "deny") return { state: "denied", content: "The user did not allow this." };
+      if (v === "always") c.grants["mcp:" + mt.server] = true;
+    }
+    try {
+      const r = await fetch("/potluck/mcp", { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, signal: S.gen && S.gen.abort.signal,
+        body: JSON.stringify({ op: "call", root: c.project ? c.project.root : "", server: mt.server, tool: mt.name, args: JSON.parse(call.args || "{}") }) });
+      const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || "The connector did not answer.");
+      return { state: "ok", content: j.text || "(no output)" };
+    } catch (e) { return { state: "error", content: "Could not do that: " + (e.message || e) }; }
+  }
   if (c.project && PTOOLS[call.name]) {
     const kind = call.name === "write_file" || call.name === "edit_file" ? "write" : "read", level = S.settings.perm;
     const needAsk = level === "ask" || level === "none" ? !c.grants[kind] : level === "read" ? kind === "write" && !c.grants.write : false;
@@ -801,6 +865,7 @@ async function send(text) {
   S.pending = []; $("#input").value = ""; autosize(); hideSlash();
   drawHeader(); drawChips(); drawThread(); scrollDown(true);
   await saveChat(c);
+  if (conns().some(k => connOn(k.name))) await loadMCP();
   await generate();
 }
 // Versions. Trying again, or editing a message, starts a new version of that turn; the
@@ -1124,6 +1189,7 @@ function wire() {
   $("#attach").onclick = e => attachMenu(e.currentTarget);
   $("#perm").onclick = e => permMenu(e.currentTarget);
   $("#agent").onclick = e => agentMenu(e.currentTarget);
+  $("#conn").onclick = e => connMenu(e.currentTarget);
   $("#think").onclick = () => COMMANDS.find(c => c[0] === "think")[2]();
   $("#model").onclick = e => modelMenu(e.currentTarget);
   $("#usage").onclick = () => usageSheet();
