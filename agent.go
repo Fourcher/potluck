@@ -681,11 +681,14 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	}
 	if len(in.ExpertCPU) > 0 {
 		// Keep these layers' expert weights in memory; the rest of each layer goes to the card.
+		// Any ffn_...exps tensor, as isExpertTensor counts them: models fuse them differently
+		// (Inkling 2 has ffn_gate_up_exps; a pattern for up/down/gate alone left two thirds of
+		// its experts on a 4 GB card, 15 GB in all).
 		nums := make([]string, len(in.ExpertCPU))
 		for i, l := range in.ExpertCPU {
 			nums[i] = strconv.Itoa(l)
 		}
-		args = append(args, "-ot", `blk\.(`+strings.Join(nums, "|")+`)\.ffn_(up|down|gate)_(ch|)exps=CPU`)
+		args = append(args, "-ot", `blk\.(`+strings.Join(nums, "|")+`)\.ffn_[a-z_]*exps=CPU`)
 	}
 	// The helpers must be named before the device list: the engine only knows the names
 	// RPC0, RPC1, ... once it has read --rpc.

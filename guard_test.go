@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -159,6 +160,21 @@ func TestLoopSplit(t *testing.T) {
 	for slot := m.Layers; slot <= m.EngineLayers(); slot++ {
 		if got := deviceOfLayer(slot, m.EngineLayers(), p.NGL, split); got != last {
 			t.Fatalf("repeat/output slot %d on device %d, want the last (%d)", slot, got, last)
+		}
+	}
+}
+
+// The pattern that keeps a layer's experts in memory catches every way models name them,
+// and nothing else.
+func TestExpertPattern(t *testing.T) {
+	re := regexp.MustCompile(`^blk\.(5|6)\.ffn_[a-z_]*exps`)
+	for name, want := range map[string]bool{
+		"blk.5.ffn_gate_up_exps.weight": true, "blk.5.ffn_down_exps.weight": true, "blk.6.ffn_up_exps.weight": true,
+		"blk.6.ffn_gate_exps.weight": true, "blk.5.ffn_down_chexps.weight": true,
+		"blk.5.ffn_gate_inp.weight": false, "blk.5.ffn_norm.weight": false, "blk.5.attn_q.weight": false, "blk.7.ffn_down_exps.weight": false,
+	} {
+		if re.MatchString(name) != want || isExpertTensor(name) != (want || strings.HasPrefix(name, "blk.7.ffn_down_exps")) {
+			t.Fatalf("%s: pattern %v, isExpertTensor %v, want %v", name, re.MatchString(name), isExpertTensor(name), want)
 		}
 	}
 }
