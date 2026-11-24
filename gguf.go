@@ -543,6 +543,24 @@ const trunkOverhead = 500 << 20
 // network hand-offs per word, and all the computers needed about the same time per layer. So
 // the plan keeps as much as it can on the head and brings in as few helpers as possible.
 func planLayout(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
+	p := planLayoutAll(m, nodes, headID)
+	// Looped models: each repeat pass runs with the weights of its layer but keeps its
+	// context cache on the last device (its slot comes after every file layer). Unless the
+	// whole loop core sits on that last device, the engine finds a layer's attention on
+	// another device than its cache, turns flash attention off for the whole model, and its
+	// working memory grows many times over (measured: 14.3 GB on a 4 GB card at 32k).
+	if m.loopSlots() > 0 && p.Fits && len(p.DevLayers) > 0 {
+		layer := p.LayerBytes
+		if first := m.Layers - p.DevLayers[len(p.DevLayers)-1]; first > m.LoopStart {
+			p.Fits = false
+			p.ShortBy = int64(first-m.LoopStart) * layer
+			p.Reason = fmt.Sprintf("This model repeats its layers %d to %d, and they all have to run on one computer: it needs room for %d more of its layers on the computer running it. Try a smaller size of this model, or a shorter conversation memory.", m.LoopStart, m.LoopEnd-1, first-m.LoopStart)
+		}
+	}
+	return p
+}
+
+func planLayoutAll(m *ModelInfo, nodes []PlanNode, headID string) *Plan {
 	p := &Plan{ModelBytes: m.TotalBytes(), Layers: m.Layers}
 	// Each layer brings its share of the context cache to whichever computer holds it, so a
 	// layer's cost is its weights plus that cache at the context size being planned for.

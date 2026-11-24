@@ -133,8 +133,21 @@ func TestLoopSplit(t *testing.T) {
 	}
 	m.OtherBytes = 1 << 30
 	m.PlanCtx = 8192
+	// Inkling's real core (6-17) cannot be split between a processor-only head (its layers come
+	// first) and a helper (last): refused below. For the slot arithmetic, loop the last six.
+	m.LoopStart, m.LoopEnd = 18, 24
 	nodes := []PlanNode{{ID: "big", Name: "Big", CPUBytes: 22 << 30}, {ID: "small", Name: "Small", CPUBytes: 12 << 30}}
 	p := planLayout(m, nodes, "big")
+	// The loop core (layers 6-17) must all be on the last device.
+	if p.Fits && len(p.DevLayers) > 0 && m.Layers-p.DevLayers[len(p.DevLayers)-1] > m.LoopStart {
+		t.Fatalf("plan splits the loop core across devices: %v", p.DevLayers)
+	}
+	// Inkling's own core across such a layout: refused with a reason, not loaded broken.
+	real := *m
+	real.LoopStart, real.LoopEnd = 6, 18
+	if q := planLayout(&real, []PlanNode{{ID: "big", Name: "Big", CPUBytes: 14 << 30}, {ID: "a", Name: "A", CPUBytes: 12 << 30}, {ID: "b", Name: "B", CPUBytes: 12 << 30}}, "big"); q.Fits || !strings.Contains(q.Reason, "repeats its layers") {
+		t.Fatalf("small head: fits=%v %q %v", q.Fits, q.Reason, q.DevLayers)
+	}
 	if !p.Fits || len(p.DevLayers) < 1 {
 		t.Fatalf("plan: fits=%v %s devs=%v", p.Fits, p.Reason, p.DevLayers)
 	}
