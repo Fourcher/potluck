@@ -26,6 +26,7 @@ var (
 	portJoin  = 7715 // "add a computer" web page for the local network
 	portChat  = 7720 // this computer only: chat page and OpenAI-compatible API of the running model
 	portPhone = 7721 // paired phones (encrypted, with a key per phone); only while one is paired
+	portShare = 7722 // other devices and apps, with the share key; only while sharing is on
 )
 
 const engineTag = "b12608"
@@ -34,7 +35,7 @@ const engineTag = "b12608"
 // moves every port up by 100. Computers only find each other with the same offset.
 func init() {
 	if n, err := strconv.Atoi(os.Getenv("POTLUCK_PORT_OFFSET")); err == nil && n > 0 && n < 20000 {
-		portUI, portLink, portJoin, portChat, portPhone = portUI+n, portLink+n, portJoin+n, portChat+n, portPhone+n
+		portUI, portLink, portJoin, portChat, portPhone, portShare = portUI+n, portLink+n, portJoin+n, portChat+n, portPhone+n, portShare+n
 	}
 }
 
@@ -130,6 +131,9 @@ type Host struct {
 	phoneSeen  map[string]time.Time
 	phoneMu    sync.Mutex
 	phoneSrvs  []*http.Server
+	shareMu    sync.Mutex
+	shareSrvs  []*http.Server
+	shareOn    string // the addresses the share server listens on now
 	phoneOn    string // the addresses the phone server listens on now
 }
 
@@ -187,6 +191,7 @@ func (h *Host) Run() error {
 	go h.idleLoop()
 	h.applyShare()
 	go h.phoneLoop()
+	go h.shareLoop()
 	return nil
 }
 
@@ -619,16 +624,16 @@ func (h *Host) applyShare() {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "Potluck: " + err.Error() + ". Start a model first."}})
 	}
+	// The chat address is for this computer only; other devices use the share address
+	// (netapi.go), on home-network and Tailscale addresses, with the key.
 	addr := "127.0.0.1:" + strconv.Itoa(portChat)
-	if h.cfg.Get().ShareChat {
-		addr = ":" + strconv.Itoa(portChat)
-	}
 	h.mu.Lock()
 	old := h.chatSrv
 	handler := h.chatHandler(rp)
 	srv := &http.Server{Addr: addr, Handler: handler}
 	h.chatSrv, h.chatAPI = srv, handler
 	h.mu.Unlock()
+	go h.applyNetShare()
 	go func() {
 		if old != nil {
 			_ = old.Close()

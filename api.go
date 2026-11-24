@@ -602,12 +602,16 @@ func (app *App) serveUI() error {
 		if err != nil {
 			return nil, err
 		}
-		var in struct{ On bool }
+		var in struct{ On, Rotate bool }
 		if err := body(r, &in); err != nil {
 			return nil, err
 		}
-		app.cfg.Update(func(c *Config) { c.ShareChat = in.On })
-		h.applyShare()
+		if in.Rotate {
+			h.RotateShareKey()
+		} else {
+			app.cfg.Update(func(c *Config) { c.ShareChat = in.On })
+		}
+		h.applyNetShare()
 		return nil, nil
 	})
 
@@ -730,13 +734,20 @@ func (app *App) state() map[string]any {
 		join, shared := "", ""
 		if len(ips) > 0 {
 			join = "http://" + net.JoinHostPort(ips[0], strconv.Itoa(portJoin))
-			shared = "http://" + net.JoinHostPort(ips[0], strconv.Itoa(portChat))
+		}
+		var shareURLs []string
+		shareKey := ""
+		if c.ShareChat {
+			shareURLs, shareKey = h.shareURLs(), c.ShareKey
+			if len(shareURLs) > 0 {
+				shared = shareURLs[0]
+			}
 		}
 		out["main"] = map[string]any{
 			"nodes": nodes, "pending": pend, "cluster": cl, "joinURL": join, "addrs": ips,
 			"headChoice": c.HeadChoice, "chatURL": "http://127.0.0.1:" + strconv.Itoa(portChat),
 			"totalOffer": total, "biggestOffer": biggest, "lastModel": c.LastModel, "firewall": app.firewall(), "profiles": c.Profiles, "measured": c.Measured,
-			"shareChat": c.ShareChat, "sharedURL": shared, "dataDir": app.dir, "pauseWhy": pauseWhy, "stale": stale,
+			"shareChat": c.ShareChat, "sharedURL": shared, "shareURLs": shareURLs, "shareKey": shareKey, "dataDir": app.dir, "pauseWhy": pauseWhy, "stale": stale,
 			"lastCtx": lastCtx, "single": c.Single, "idleUnload": c.IdleUnload, "asleep": asleep, "enginePath": c.EnginePath, "modelDirs": c.ModelDirs, "agentDir": app.agentDir(),
 		}
 	}

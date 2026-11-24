@@ -1,0 +1,13 @@
+{
+  "note": "Hand-picked models, in order: the first is what Potluck suggests to start with. Each says why, with links to check the claim. tools/catalog.py adds the daily lists from Hugging Face around these.",
+  "picks": [
+    {"repo": "AtomicChat/Inkling-2-Mini-Uncensored-GGUF", "blurb": "Our pick to start with: Inkling 2 Mini, 26 billion parameters, whose smallest size runs on a 12 GB laptop. This version has had its refusals removed: it answers what it is asked.", "good_for": ["chat", "writing", "code", "pictures"], "sources": ["https://huggingface.co/AtomicChat/Inkling-2-Mini-Uncensored-GGUF"]},
+    {"repo": "unsloth/gemma-4-12B-it-GGUF", "blurb": "Small and quick. Runs on almost anything.", "good_for": ["chat", "small computers"], "sources": ["https://huggingface.co/unsloth/gemma-4-12B-it-GGUF"]},
+    {"repo": "unsloth/Qwen3.8-27B-GGUF", "blurb": "Strong all-rounder.", "good_for": ["chat", "code", "reasoning"], "sources": ["https://huggingface.co/unsloth/Qwen3.8-27B-GGUF"]},
+    {"repo": "unsloth/gemma-4-26B-A4B-it-GGUF", "blurb": "Fast for its size: only part of it runs per word.", "good_for": ["chat", "speed"], "sources": ["https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF"]},
+    {"repo": "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF", "blurb": "Fast mixture-of-experts model, good first test.", "good_for": ["chat", "speed"], "sources": ["https://huggingface.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF"]},
+    {"repo": "unsloth/Qwen3.6-35B-A3B-GGUF", "blurb": "Good at tools and agent work.", "good_for": ["tasks", "tools", "code"], "sources": ["https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF"]},
+    {"repo": "NousResearch/Hermes-4.3-36B-GGUF", "blurb": "Large general model.", "good_for": ["chat", "writing"], "sources": ["https://huggingface.co/NousResearch/Hermes-4.3-36B-GGUF"]},
+    {"repo": "unsloth/Qwen3.5-122B-A10B-GGUF", "blurb": "Very large. Needs several computers pooled together.", "good_for": ["reasoning", "pooling"], "sources": ["https://huggingface.co/unsloth/Qwen3.5-122B-A10B-GGUF"]}
+  ]
+}

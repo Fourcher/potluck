@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
 )
@@ -17,8 +16,8 @@ func (h *Host) aiGuide() string {
 	base := "http://127.0.0.1:" + strconv.Itoa(portChat)
 	shared := ""
 	if h.cfg.Get().ShareChat {
-		if ips := localIPs(); len(ips) > 0 {
-			shared = "http://" + net.JoinHostPort(ips[0], strconv.Itoa(portChat))
+		if u := h.shareURLs(); len(u) > 0 {
+			shared = u[0]
 		}
 	}
 
@@ -47,7 +46,7 @@ func (h *Host) aiGuide() string {
 	w("## Where it is")
 	w("- On this computer: %s (OpenAI-compatible API at %s/v1). No API key; if a tool insists on one, use any text such as \"potluck\".", base, base)
 	if shared != "" {
-		w("- From other devices on my home network: %s/v1 (chat and model list only).", shared)
+		w("- From other devices on my home network or Tailscale: %s/v1, with the header Authorization: Bearer <the key shown in Potluck under Running>.", shared)
 	} else {
 		w("- It only answers on this computer (127.0.0.1). If you run somewhere else and cannot reach it, say so instead of guessing.")
 	}

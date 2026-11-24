@@ -68,10 +68,20 @@ type StoreModel struct {
 	Files     []StoreFile `json:"files,omitempty"`
 	// Recommended marks the model Potluck suggests trying first.
 	Recommended bool `json:"recommended,omitempty"`
+	// Section groups the starting shelf: pick | trending | new | popular.
+	Section string   `json:"section,omitempty"`
+	GoodFor []string `json:"goodFor,omitempty"`
+	Sources []string `json:"sources,omitempty"`
+	Created string   `json:"created,omitempty"`
 }
 
 // recommended is the model Potluck suggests first: the daily catalog's pick when it has one.
-func (h *Host) recommended() string { return recommendedRepo }
+func (h *Host) recommended() string {
+	if c := h.catalog(); c != nil && len(c.Picks) > 0 {
+		return c.Picks[0].Repo
+	}
+	return recommendedRepo
+}
 
 // recommendedRepo is the model Potluck suggests first (starred in the model store).
 const recommendedRepo = "AtomicChat/Inkling-2-Mini-Uncensored-GGUF"
@@ -233,20 +243,39 @@ func (h *Host) storeSearch(source, q string) ([]StoreModel, error) {
 		return pirateSearch(q)
 	}
 	if q == "" {
-		out := make([]StoreModel, len(featured))
+		// The starting shelf: the catalog's picks (checked against these computers), then
+		// what is trending, new and popular on Hugging Face (sizes checked when opened).
+		cat := h.catalog()
+		rec := h.recommended()
+		var out []StoreModel
+		for _, p := range cat.Picks {
+			out = append(out, StoreModel{Source: "hf", Repo: p.Repo, Blurb: p.Blurb, GoodFor: p.GoodFor, Sources: p.Sources, Section: "pick", Recommended: p.Repo == rec})
+		}
+		if len(out) == 0 {
+			for _, f := range featured {
+				out = append(out, StoreModel{Source: "hf", Repo: f.Repo, Blurb: f.Blurb, Section: "pick", Recommended: f.Repo == rec})
+			}
+		}
 		var wg sync.WaitGroup
-		for i, f := range featured {
-			out[i] = StoreModel{Source: "hf", Repo: f.Repo, Blurb: f.Blurb, Recommended: f.Repo == recommendedRepo}
+		for i := range out {
 			wg.Add(1)
-			go func(i int, repo string) {
+			go func(i int) {
 				defer wg.Done()
-				if files, err := hfFiles(repo); err == nil {
+				if files, err := hfFiles(out[i].Repo); err == nil {
 					h.judge(files)
 					out[i].Files = files
 				}
-			}(i, f.Repo)
+			}(i)
 		}
 		wg.Wait()
+		for _, l := range []struct {
+			name string
+			list []CatalogEntry
+		}{{"trending", cat.Trending}, {"new", cat.New}, {"popular", cat.Popular}} {
+			for _, e := range l.list {
+				out = append(out, StoreModel{Source: "hf", Repo: e.Repo, Downloads: e.Downloads, Likes: e.Likes, Created: e.Created, Section: l.name})
+			}
+		}
 		return out, nil
 	}
 	var res []struct {

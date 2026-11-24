@@ -32,7 +32,8 @@ type Config struct {
 	Trusted    map[string]string `json:"trusted,omitempty"` // fingerprint -> name
 	JoinSecret string            `json:"joinSecret,omitempty"`
 	EngineTag  string            `json:"engineTag,omitempty"`
-	ShareChat  bool              `json:"shareChat,omitempty"`  // chat page and API reachable from the local network
+	ShareChat  bool              `json:"shareChat,omitempty"`  // chat page and API reachable from home network and Tailscale, with ShareKey
+	ShareKey   string            `json:"shareKey,omitempty"`   // the key other devices and apps use
 	HeadChoice string            `json:"headChoice,omitempty"` // "" = automatic
 	LastModel  *ModelRef         `json:"lastModel,omitempty"`
 	// Known remembers where each model that Potluck downloaded came from, by file name, so

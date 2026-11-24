@@ -8,7 +8,7 @@ import (
 
 // quickPrefs is the order in which a first model's size is chosen: good quality that still
 // answers quickly first, then smaller ones, then the bigger, slower ones.
-var quickPrefs = []string{"Q4_K_M", "Q5_K_M", "Q4_K_S", "IQ4_XS", "IQ4_NL", "Q4_0", "Q6_K", "Q3_K_M", "Q3_K_L", "IQ3_M", "IQ3_XS", "Q3_K_S", "IQ2_M", "Q2_K", "IQ2_S", "IQ2_XS", "Q5_K_S", "Q8_0"}
+var quickPrefs = []string{"Q4_K_M", "Q4_K", "Q5_K_M", "Q5_K", "Q4_K_S", "IQ4_XS", "IQ4_NL", "Q4_0", "Q6_K", "Q3_K_M", "Q3_K_L", "IQ3_M", "IQ3_XS", "Q3_K_S", "IQ2_M", "Q2_K", "IQ2_S", "IQ2_XS", "Q5_K_S", "Q8_0"}
 
 // pickQuick chooses the file to start with: the preferred size that fits on one computer,
 // or failing that the smallest that runs pooled.

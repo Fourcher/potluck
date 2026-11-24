@@ -299,9 +299,26 @@ function modelCard(mod) {
     </div>`).join("")}</div>` : "";
   const fit = files ? (() => { const n = files.filter(runs).length; return n ? `<span class="badge ${best && best.verdict === "pool" ? "main" : best && best.verdict === "stream" ? "warn" : "ok"}">${best && best.verdict === "pool" ? "Runs pooled across your computers" : best && best.verdict === "stream" ? "Only by streaming from disk (slow)" : "Runs here"}</span>` : `<span class="badge bad">Too big for your setup</span>`; })() : "";
   return `<div class="model${mod.recommended ? " recommended" : ""}"><div class="row spread"><div><h3>${mod.recommended ? `<span class="badge main" title="Potluck's recommended model to start with">★ Recommended</span> ` : ""}${esc(mod.repo)}</h3>${mod.blurb ? `<p class="muted small">${esc(mod.blurb)}</p>` : ""}
-      ${mod.downloads ? `<p class="muted small">${mod.downloads.toLocaleString()} downloads</p>` : ""}</div>
+      ${mod.goodFor && mod.goodFor.length ? `<p class="small">${mod.goodFor.map(g => `<span class="badge">${esc(g)}</span>`).join(" ")}</p>` : ""}
+      ${mod.downloads || mod.likes ? `<p class="muted small">${mod.downloads ? mod.downloads.toLocaleString() + " downloads" : ""}${mod.likes ? " · " + mod.likes.toLocaleString() + " likes" : ""}${mod.created ? " · released " + esc(mod.created) : ""} · <a href="https://huggingface.co/${esc(mod.repo)}" target="_blank" rel="noopener">model page</a></p>` : ""}
+      ${mod.sources && mod.sources.length ? `<p class="muted small">${mod.sources.map(u => `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u.replace(/^https?:\/\//, "").split("/").slice(0, 2).join("/"))}</a>`).join(" · ")}</p>` : ""}</div>
       <div class="row">${fit}${best ? `<button class="btn sm" data-a="plan" data-repo="${esc(mod.repo)}" data-file="${esc(best.file)}">Set up best fit (${gb(best.size)})</button>` : ""}
       <button class="btn sm ghost" data-a="files" data-repo="${esc(mod.repo)}">${open ? "Hide sizes" : files ? `All ${files.length} sizes` : "Show sizes"}</button></div></div>${rows}</div>`;
+}
+
+// The starting shelf comes in sections (from the daily catalog); search results don't.
+function shelf(list) {
+  if (!list.some(m => m.section)) return list.map(modelCard).join("");
+  const parts = [
+    ["pick", "Our picks", "Chosen for quality and how well they run at home. Every size is checked against your computers."],
+    ["trending", "Trending on Hugging Face", "What people are downloading right now. Open one to see which sizes fit."],
+    ["new", "New this month", "Released in the last 30 days."],
+    ["popular", "Most downloaded", "The most downloaded models of all time."],
+  ];
+  return parts.map(([key, title, note]) => {
+    const ms = list.filter(m => m.section === key);
+    return ms.length ? `<h3 style="margin-top:22px">${title}</h3><p class="muted small">${note}</p>${ms.map(modelCard).join("")}` : "";
+  }).join("");
 }
 
 function viewModels() {
@@ -318,7 +335,7 @@ function viewModels() {
     </div>
     ${pf ? `<div class="note">PirateFace lists community torrents of Hugging Face models, for when Hugging Face is unreachable. Potluck only reads the list. Download with your own torrent app, then compare the file's SHA-256 with the one Hugging Face publishes before you trust it. Downloading torrents inside Potluck is planned.</div>` : ""}
     ${store.error ? `<div class="err">${esc(store.error)}</div>` : ""}
-    ${store.loading ? `<p class="muted">Searching…</p>` : (store.results || []).map(modelCard).join("") || `<p class="muted">Nothing found.</p>`}
+    ${store.loading ? `<p class="muted">Searching…</p>` : shelf(store.results || []) || `<p class="muted">Nothing found.</p>`}
     ${pf ? "" : diskView()}
     ${pf ? "" : localSettings()}
     ${pf ? "" : `<h2>Have a direct link?</h2><div class="tools"><input type="text" id="url" placeholder="https://…/model.gguf" style="flex:1;min-width:260px" aria-label="Direct link to a model file"><button class="btn quiet" data-a="planurl">Check it</button></div>`}`;
@@ -527,8 +544,14 @@ function viewRunMain() {
       <div class="card"><h3>Use it from other apps and devices</h3>
         <p class="muted small">Anything that speaks the OpenAI API can use your pooled model. On this computer the address is:</p>
         <p class="addr" style="font-size:17px">${esc(m.chatURL)}/v1</p>
-        <label class="sw" style="margin-top:10px"><input type="checkbox" data-share ${m.shareChat ? "checked" : ""}> Let phones and other devices on my network use it too</label>
-        ${m.shareChat ? `<p class="muted small" style="margin-top:6px">Open this on any device on your network. There is no password, so only switch this on at home.</p><p class="addr" style="font-size:17px">${esc(m.sharedURL)}</p>` : ""}</div>
+        <label class="sw" style="margin-top:10px"><input type="checkbox" data-share ${m.shareChat ? "checked" : ""}> Let my other devices and apps use it (home network and Tailscale, with a key)</label>
+        ${m.shareChat ? `<div style="margin-top:8px">
+          <p class="muted small">In an app such as Apollo, Open WebUI, Msty or a router, add a custom OpenAI-compatible server with:</p>
+          <p class="small">Server: <span class="addr">${esc((m.shareURLs && m.shareURLs[0]) || "")}/v1</span> <button class="link" data-a="copytext" data-text="${esc((m.shareURLs && m.shareURLs[0]) || "")}/v1">Copy</button></p>
+          <p class="small">API key: <span class="addr">${esc(m.shareKey || "")}</span> <button class="link" data-a="copytext" data-text="${esc(m.shareKey || "")}">Copy</button></p>
+          ${m.shareURLs && m.shareURLs.length > 1 ? `<p class="muted small">Also reachable at ${m.shareURLs.slice(1).map(u => esc(u)).join(", ")} (Tailscale addresses work away from home).</p>` : ""}
+          <p class="muted small">In a browser on another device, open <span class="addr">${esc((m.shareURLs && m.shareURLs[0]) || "")}/?key=${esc(m.shareKey || "")}</span> once; it remembers the key.</p>
+          <p class="small"><button class="link" data-a="newsharekey">Make a new key</button> <span class="muted">(locks out every device and app using the old one)</span></p></div>` : ""}</div>
     </div>
     <div class="grid" style="margin-top:16px">${nodes}</div>`;
 }
@@ -649,6 +672,8 @@ const actions = {
     const v = k => (document.querySelector(`[data-push=${k}]`) || {}).value || "";
     api("/api/phones", { action: "push", keyPath: v("keyPath").trim(), keyID: v("keyID").trim(), teamID: v("teamID").trim() }).then(() => { toast("Alerts are on. Your phone hears about every question from now on."); loadPhones(); }).catch(e => toast(e.message));
   },
+  copytext(t) { navigator.clipboard.writeText(t.dataset.text).then(() => toast("Copied.")).catch(() => toast(t.dataset.text)); },
+  newsharekey() { if (confirm("Make a new key? Devices and apps using the old key stop working until you give them the new one.")) act(() => api("/api/share", { rotate: true })); },
   pushtest() { api("/api/phones", { action: "test" }).then(() => { toast("Test alert sent. Answer it on your phone."); setTimeout(loadPhones, 8000); setTimeout(loadPhones, 30000); }).catch(e => toast(e.message)); },
   pushoff() { api("/api/phones", { action: "push", keyPath: "" }).then(loadPhones).catch(e => toast(e.message)); },
   phoneforget(t) { if (confirm("Remove this phone? It will need to be paired again to connect.")) api("/api/phones", { action: "forget", id: t.dataset.id }).then(loadPhones).catch(e => toast(e.message)); },
