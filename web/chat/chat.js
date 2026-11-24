@@ -78,9 +78,11 @@ async function api(path, body) {
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
-const running = () => S.server && (S.server.phase === "running" || S.server.phase === "resting"); // resting: loads again with the next message
+const running = () => !!S.settings.extModel || (S.server && (S.server.phase === "running" || S.server.phase === "resting")); // resting: loads again with the next message
 const ctxSize = () => (S.props && S.props.default_generation_settings && S.props.default_generation_settings.n_ctx) || (S.server && S.server.ctx) || 4096;
-const modelTitle = () => (S.server && S.server.model && (S.server.model.title || S.server.model.file)) || "";
+const modelTitle = () => S.settings.extModel ? (S.settings.extTitle || S.settings.extModel) : (S.server && S.server.model && (S.server.model.title || S.server.model.file)) || "";
+// A model from one of the person's other AI setups (LM Studio, Ollama, a router…), when chosen.
+const extModel = () => S.settings.extModel ? { model: S.settings.extModel } : {};
 
 let pollTimer;
 async function poll() {
@@ -904,7 +906,7 @@ async function streamDirect(msg, signal) {
 }
 async function streamOnce(msg, signal) {
   const s = S.settings, tools = toolSpecs();
-  const body = { messages: apiMessages(), stream: true, stream_options: { include_usage: true }, cache_prompt: true, chat_template_kwargs: thinkingKwargs(), ...thinkBudget() };
+  const body = { messages: apiMessages(), stream: true, stream_options: { include_usage: true }, cache_prompt: true, chat_template_kwargs: thinkingKwargs(), ...thinkBudget(), ...extModel() };
   if (tools) body.tools = tools;
   if (s.temperature !== "" && !isNaN(+s.temperature)) body.temperature = +s.temperature;
   if (s.maxTokens !== "" && +s.maxTokens > 0) body.max_tokens = +s.maxTokens;
@@ -1045,7 +1047,7 @@ async function compact() {
   const c = S.cur; if (S.gen || !c.messages.length) return toast("There is nothing to summarize yet.");
   if (!running()) return toast("No model is running.");
   S.compacting = true; drawStatus();
-  const body = { messages: [...apiMessages(), { role: "user", content: "Summarize our conversation so far for your own later use. Keep every fact, decision, name, number and open question that matters, in compact notes. Do not add anything new." }], stream: false, chat_template_kwargs: thinkingKwargs(false), ...thinkBudget(false) };
+  const body = { messages: [...apiMessages(), { role: "user", content: "Summarize our conversation so far for your own later use. Keep every fact, decision, name, number and open question that matters, in compact notes. Do not add anything new." }], stream: false, chat_template_kwargs: thinkingKwargs(false), ...thinkBudget(false), ...extModel() };
   try {
     const r = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const j = await r.json(); if (!r.ok) throw new Error((j.error && j.error.message) || "The model did not answer.");
@@ -1129,13 +1131,19 @@ function agentMenu(a) {
 async function modelMenu(a) {
   try { S.models = await api("/potluck/models"); } catch (e) { S.models = { models: [], canSwitch: false, error: e.message }; }
   const m = S.models, cur = S.server && S.server.model && S.server.model.file;
-  let h = `<h5>Models on your computers</h5>` + (m.models.length ? m.models.map((x, i) => mi("m" + i, esc(x.title || x.file), { on: x.running, check: 1, d: `${gb(x.size)} · on ${esc(x.nodeName)}${x.running ? " · running now" : ""}`, disabled: !m.canSwitch && !x.running })).join("") : `<div class="note">No models are downloaded yet.</div>`);
+  const ext = S.settings.extModel, idx = x => m.models.indexOf(x);
+  const local = m.models.filter(x => !(x.node || "").startsWith("ext:")), others = m.models.filter(x => (x.node || "").startsWith("ext:"));
+  let h = `<h5>Models on your computers</h5>` + (local.length ? local.map(x => mi("m" + idx(x), esc(x.title || x.file), { on: x.running && !ext, check: 1, d: `${gb(x.size)} · on ${esc(x.nodeName)}${x.running ? " · running now" : ""}`, disabled: !m.canSwitch && !x.running })).join("") : `<div class="note">No models are downloaded yet.</div>`);
+  if (others.length) h += `<h5>Your other AI setups</h5>` + others.map(x => mi("m" + idx(x), esc(x.title), { on: ext === x.file, check: 1, d: "from " + esc(x.nodeName) })).join("");
   h += `<hr>` + (running() ? mi("ctx", "Conversation memory", { icon: "chip", d: `${num(ctxSize())} tokens. Change it by reloading the model.`, disabled: !m.canSwitch }) : "");
   h += m.canSwitch ? mi("panel", "Find and download more models", { icon: "plus", d: "Opens the control panel" }) : `<div class="note">Only the computer running Potluck can switch models.</div>`;
   showPop(a, h, v => {
     if (v === "panel") return window.open(S.server.panel + "/#models", "_blank", "noopener");
     if (v === "ctx") return switchSheet(m.models.find(x => x.running) || { file: cur, title: modelTitle(), running: true });
-    const x = m.models[+v.slice(1)]; if (x && !x.running) switchSheet(x);
+    const x = m.models[+v.slice(1)]; if (!x) return;
+    if ((x.node || "").startsWith("ext:")) { S.settings.extModel = x.file; S.settings.extTitle = x.nodeName + ": " + x.title; saveSettings(); drawStatus && drawStatus(); return toast("Chatting with " + x.title + " from " + x.nodeName + "."); }
+    if (S.settings.extModel) { S.settings.extModel = ""; S.settings.extTitle = ""; saveSettings(); drawStatus && drawStatus(); if (x.running) return toast("Back to " + (x.title || x.file) + "."); }
+    if (!x.running) switchSheet(x);
   });
 }
 function switchSheet(x) {

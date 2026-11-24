@@ -157,6 +157,14 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 		case strings.HasPrefix(r.URL.Path, "/potluck/"):
 			http.NotFound(w, r)
 		default:
+			// A model from one of the person's other AI setups goes to that server.
+			if h.connRoute(w, r) {
+				return
+			}
+			if r.Method == http.MethodGet && r.URL.Path == "/v1/models" && len(h.cfg.Get().Connections) > 0 {
+				h.mergedModels(w, r, api)
+				return
+			}
 			if r.Method == http.MethodPost && isModelRequest(r) {
 				h.touch()
 				// The model was let go after a while unused: load it again, then answer.
@@ -245,7 +253,7 @@ func (h *Host) chatModels() []chatModel {
 		}
 		return strings.ToLower(out[i].Title) < strings.ToLower(out[j].Title)
 	})
-	return out
+	return append(out, h.connChatModels()...)
 }
 
 // chatSwitch starts a model that is already on one of the computers.

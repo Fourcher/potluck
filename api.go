@@ -339,6 +339,44 @@ func (app *App) serveUI() error {
 		return map[string]any{"title": m.Title, "file": m.File, "size": m.Size}, nil
 	})
 
+	// The person's other AI setups (LM Studio, Ollama, a router…): list, find, add, remove.
+	api("/api/connections", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		if r.Method == http.MethodGet {
+			var list []map[string]any
+			for _, c := range app.cfg.Get().Connections {
+				ms, err := connList(c, false)
+				e := ""
+				if err != nil {
+					e = err.Error()
+				}
+				list = append(list, map[string]any{"id": c.ID, "name": c.Name, "baseURL": c.BaseURL, "hasKey": c.Key != "", "models": ms, "error": e})
+			}
+			return map[string]any{"connections": list, "found": h.FoundConnections()}, nil
+		}
+		var in struct {
+			Action, ID, Name, BaseURL, Key string
+		}
+		if err := body(r, &in); err != nil {
+			return nil, err
+		}
+		switch in.Action {
+		case "add":
+			c, err := h.AddConnection(in.Name, in.BaseURL, in.Key)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]string{"id": c.ID, "name": c.Name}, nil
+		case "remove":
+			h.RemoveConnection(in.ID)
+			return map[string]bool{"ok": true}, nil
+		}
+		return nil, errors.New("unknown action")
+	})
+
 	api("/api/discover", func(r *http.Request) (any, error) {
 		h, err := needMain()
 		if err != nil {

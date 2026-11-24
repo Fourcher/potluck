@@ -321,11 +321,34 @@ function shelf(list) {
   }).join("");
 }
 
+// The person's other AI setups (connections.go).
+let conns = null, connsLoading = false;
+function loadConns() {
+  if (connsLoading) return; connsLoading = true;
+  api("/api/connections").then(r => { conns = r || { connections: [], found: [] }; }).catch(e => { conns = { connections: [], found: [], error: e.message }; }).finally(() => { connsLoading = false; draw(true); });
+}
+function connsView() {
+  if (conns === null) { loadConns(); return `<h2>Your other AI setups</h2><p class="muted">Looking…</p>`; }
+  const list = (conns.connections || []).map(c => `<div class="file"><span class="q">${esc(c.name)}</span><span class="small muted">${esc(c.baseURL)}${c.hasKey ? " · with key" : ""}</span>
+      <span class="n small">${c.error ? `<span class="badge bad">Not answering</span> <span class="muted">${esc(c.error)}</span>` : `${(c.models || []).length} models: ${esc((c.models || []).slice(0, 4).join(", "))}${(c.models || []).length > 4 ? "…" : ""}`}</span>
+      <button class="btn sm quiet" data-a="connrm" data-id="${esc(c.id)}">Remove</button></div>`).join("");
+  const found = (conns.found || []).map(f => `<p class="small">Found <b>${esc(f.name)}</b> running on this computer. <button class="btn sm" data-a="connadd" data-name="${esc(f.name)}" data-url="${esc(f.baseURL)}">Use its models in Potluck</button></p>`).join("");
+  return `<h2>Your other AI setups</h2>
+    <p class="muted">Use models from LM Studio, Ollama, a router (LiteLLM, OpenRouter) or any OpenAI-compatible server in Potluck's chat, next to your own. Chats go straight to that server.</p>
+    ${conns.error ? `<div class="err">${esc(conns.error)}</div>` : ""}${found}
+    ${list ? `<div class="files">${list}</div>` : ""}
+    <div class="tools" style="margin-top:10px"><input type="text" id="conn-name" placeholder="Name, e.g. OpenRouter" style="width:160px" aria-label="Name">
+      <input type="text" id="conn-url" placeholder="Address, e.g. http://192.168.1.20:1234/v1" style="flex:1;min-width:240px" aria-label="Server address">
+      <input type="password" id="conn-key" placeholder="Key (if it needs one)" style="width:180px" aria-label="Key" autocomplete="off">
+      <button class="btn quiet" data-a="connadd">Add</button></div>`;
+}
+
 function viewModels() {
   if (store.results === null && !store.loading) searchStore();
   const pf = store.source === "pirateface";
   return `<h1>Models</h1>
     ${foundView()}
+    ${connsView()}
     <h2>Get a model</h2>
     <p class="muted">Every size is checked against the computers you have connected right now.</p>
     <div class="tools">
@@ -672,6 +695,12 @@ const actions = {
     const v = k => (document.querySelector(`[data-push=${k}]`) || {}).value || "";
     api("/api/phones", { action: "push", keyPath: v("keyPath").trim(), keyID: v("keyID").trim(), teamID: v("teamID").trim() }).then(() => { toast("Alerts are on. Your phone hears about every question from now on."); loadPhones(); }).catch(e => toast(e.message));
   },
+  connadd(t) {
+    const name = t.dataset.name || $("#conn-name").value, baseURL = t.dataset.url || $("#conn-url").value, key = t.dataset.url ? "" : $("#conn-key").value;
+    if (!baseURL.trim()) return toast("Type the server's address first.");
+    api("/api/connections", { action: "add", name, baseURL, key }).then(r => { toast(`Added ${r.name}. Its models are in the chat's model menu.`); conns = null; draw(true); }).catch(e => toast(e.message));
+  },
+  connrm(t) { if (confirm("Remove this connection? Its models leave Potluck's chat.")) api("/api/connections", { action: "remove", id: t.dataset.id }).then(() => { conns = null; draw(true); }).catch(e => toast(e.message)); },
   copytext(t) { navigator.clipboard.writeText(t.dataset.text).then(() => toast("Copied.")).catch(() => toast(t.dataset.text)); },
   newsharekey() { if (confirm("Make a new key? Devices and apps using the old key stop working until you give them the new one.")) act(() => api("/api/share", { rotate: true })); },
   pushtest() { api("/api/phones", { action: "test" }).then(() => { toast("Test alert sent. Answer it on your phone."); setTimeout(loadPhones, 8000); setTimeout(loadPhones, 30000); }).catch(e => toast(e.message)); },

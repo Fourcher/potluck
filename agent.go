@@ -29,13 +29,14 @@ type Config struct {
 	MainAlts []string `json:"mainAlts,omitempty"` // its other addresses, tried when the usual one goes quiet
 	MainName string   `json:"mainName,omitempty"`
 	// main: the helpers it trusts and the secret that USB kits / join links carry
-	Trusted    map[string]string `json:"trusted,omitempty"` // fingerprint -> name
-	JoinSecret string            `json:"joinSecret,omitempty"`
-	EngineTag  string            `json:"engineTag,omitempty"`
-	ShareChat  bool              `json:"shareChat,omitempty"`  // chat page and API reachable from home network and Tailscale, with ShareKey
-	ShareKey   string            `json:"shareKey,omitempty"`   // the key other devices and apps use
-	HeadChoice string            `json:"headChoice,omitempty"` // "" = automatic
-	LastModel  *ModelRef         `json:"lastModel,omitempty"`
+	Trusted     map[string]string `json:"trusted,omitempty"` // fingerprint -> name
+	JoinSecret  string            `json:"joinSecret,omitempty"`
+	EngineTag   string            `json:"engineTag,omitempty"`
+	ShareChat   bool              `json:"shareChat,omitempty"`   // chat page and API reachable from home network and Tailscale, with ShareKey
+	ShareKey    string            `json:"shareKey,omitempty"`    // the key other devices and apps use
+	Connections []AIConnection    `json:"connections,omitempty"` // the person's other AI setups (connections.go)
+	HeadChoice  string            `json:"headChoice,omitempty"`  // "" = automatic
+	LastModel   *ModelRef         `json:"lastModel,omitempty"`
 	// Known remembers where each model that Potluck downloaded came from, by file name, so
 	// it can be started again the same way from the chat page.
 	Known map[string]ModelRef `json:"known,omitempty"`
