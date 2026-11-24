@@ -342,6 +342,34 @@ func (app *App) serveUI() error {
 		return map[string]string{"file": file}, err
 	})
 
+	api("/api/phones", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		if r.Method == http.MethodGet {
+			return map[string]any{"phones": h.Phones()}, nil
+		}
+		var in struct {
+			Action string `json:"action"` // pair | stop | forget
+			ID     string `json:"id"`
+		}
+		if err := body(r, &in); err != nil {
+			return nil, err
+		}
+		switch in.Action {
+		case "pair":
+			return h.PairingCode()
+		case "stop":
+			h.StopPairing()
+		case "forget":
+			h.ForgetPhone(in.ID)
+		default:
+			return nil, errors.New("unknown action")
+		}
+		return nil, nil
+	})
+
 	api("/api/local", func(r *http.Request) (any, error) {
 		// Settings for using Potluck on this computer: engine, model folders, idle unload,
 		// one-computer mode, and where agent commands start.

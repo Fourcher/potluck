@@ -21,10 +21,11 @@ import (
 )
 
 var (
-	portUI   = 7716 // this computer only: the control panel
-	portLink = 7717 // helpers connect here (encrypted), and discovery (UDP)
-	portJoin = 7715 // "add a computer" web page for the local network
-	portChat = 7720 // this computer only: chat page and OpenAI-compatible API of the running model
+	portUI    = 7716 // this computer only: the control panel
+	portLink  = 7717 // helpers connect here (encrypted), and discovery (UDP)
+	portJoin  = 7715 // "add a computer" web page for the local network
+	portChat  = 7720 // this computer only: chat page and OpenAI-compatible API of the running model
+	portPhone = 7721 // paired phones (encrypted, with a key per phone); only while one is paired
 )
 
 const engineTag = "b12608"
@@ -33,7 +34,7 @@ const engineTag = "b12608"
 // moves every port up by 100. Computers only find each other with the same offset.
 func init() {
 	if n, err := strconv.Atoi(os.Getenv("POTLUCK_PORT_OFFSET")); err == nil && n > 0 && n < 20000 {
-		portUI, portLink, portJoin, portChat = portUI+n, portLink+n, portJoin+n, portChat+n
+		portUI, portLink, portJoin, portChat, portPhone = portUI+n, portLink+n, portJoin+n, portChat+n, portPhone+n
 	}
 }
 
@@ -115,6 +116,14 @@ type Host struct {
 	asleep     *ModelRef // let go after being unused for a while; the next request loads it
 	asleepCtx  int
 	asleepSolo string
+
+	chatAPI    http.Handler // the chat address's handler, which phones reach through phoneHandler
+	pairSecret string       // the one-time secret in the pairing code that is showing
+	pairUntil  time.Time
+	phoneSeen  map[string]time.Time
+	phoneMu    sync.Mutex
+	phoneSrvs  []*http.Server
+	phoneOn    string // the addresses the phone server listens on now
 }
 
 func newHost(a *Agent, id *Identity, cfg *ConfigStore) *Host {
@@ -169,6 +178,7 @@ func (h *Host) Run() error {
 	go h.watchLoop()
 	go h.idleLoop()
 	h.applyShare()
+	go h.phoneLoop()
 	return nil
 }
 
@@ -607,8 +617,9 @@ func (h *Host) applyShare() {
 	}
 	h.mu.Lock()
 	old := h.chatSrv
-	srv := &http.Server{Addr: addr, Handler: h.chatHandler(rp)}
-	h.chatSrv = srv
+	handler := h.chatHandler(rp)
+	srv := &http.Server{Addr: addr, Handler: handler}
+	h.chatSrv, h.chatAPI = srv, handler
 	h.mu.Unlock()
 	go func() {
 		if old != nil {

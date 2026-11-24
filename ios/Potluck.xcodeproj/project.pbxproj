@@ -1,0 +1,347 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		350F91AB645880288AABED1C /* PairView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F35E0FF40C74F0576FBEB727 /* PairView.swift */; };
+		3FED520E5BDF0588C2C64616 /* Sheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88FA9445D5CBB10AA015AEFF /* Sheets.swift */; };
+		4E97C6DF9983911D4BD95311 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9A00FC8EC8EBAF5AC83BE792 /* Assets.xcassets */; };
+		5F4503EFB9CFBD040C01FC07 /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1C2E1B8CA33B2C454687FE /* Markdown.swift */; };
+		AADAEF5A51A57CC74196C23C /* Connection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D3C3CA91009A953EFF5DCD0 /* Connection.swift */; };
+		E021F610D9208B4991C32DC7 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9D3C55FBDFD9BB5141C8F83 /* AppModel.swift */; };
+		E53EBCD3F2C1E861B37969CF /* PotluckApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1D25FBE7784232377B323E9 /* PotluckApp.swift */; };
+		EE766F61F0419ECD2187F7EE /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 452BC50838B40FAE39728BA0 /* ChatView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		2D3C3CA91009A953EFF5DCD0 /* Connection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Connection.swift; sourceTree = "<group>"; };
+		452BC50838B40FAE39728BA0 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		5A1C2E1B8CA33B2C454687FE /* Markdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Markdown.swift; sourceTree = "<group>"; };
+		74195ED9694CDC1F323B3C13 /* Potluck.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Potluck.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		88FA9445D5CBB10AA015AEFF /* Sheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sheets.swift; sourceTree = "<group>"; };
+		9A00FC8EC8EBAF5AC83BE792 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B2BFA04A4B9E09375407F6AF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		E9D3C55FBDFD9BB5141C8F83 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		F1D25FBE7784232377B323E9 /* PotluckApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PotluckApp.swift; sourceTree = "<group>"; };
+		F35E0FF40C74F0576FBEB727 /* PairView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		329303A22BB04D27212786C9 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				74195ED9694CDC1F323B3C13 /* Potluck.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A5D9C982F6FE9DEE754353DC /* Potluck */ = {
+			isa = PBXGroup;
+			children = (
+				E9D3C55FBDFD9BB5141C8F83 /* AppModel.swift */,
+				9A00FC8EC8EBAF5AC83BE792 /* Assets.xcassets */,
+				452BC50838B40FAE39728BA0 /* ChatView.swift */,
+				2D3C3CA91009A953EFF5DCD0 /* Connection.swift */,
+				B2BFA04A4B9E09375407F6AF /* Info.plist */,
+				5A1C2E1B8CA33B2C454687FE /* Markdown.swift */,
+				F35E0FF40C74F0576FBEB727 /* PairView.swift */,
+				F1D25FBE7784232377B323E9 /* PotluckApp.swift */,
+				88FA9445D5CBB10AA015AEFF /* Sheets.swift */,
+			);
+			path = Potluck;
+			sourceTree = "<group>";
+		};
+		C4D384C7768036B3B4AB537F = {
+			isa = PBXGroup;
+			children = (
+				A5D9C982F6FE9DEE754353DC /* Potluck */,
+				329303A22BB04D27212786C9 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		130F296BF795B3108A244B97 /* Potluck */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 69C73ED8557269011F87E8B1 /* Build configuration list for PBXNativeTarget "Potluck" */;
+			buildPhases = (
+				0ADB5F4F0A6511306476406E /* Sources */,
+				879636FF68D424EE0DFE3F7E /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Potluck;
+			packageProductDependencies = (
+			);
+			productName = Potluck;
+			productReference = 74195ED9694CDC1F323B3C13 /* Potluck.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		EEEC4D8D90F6C3A20133F4E3 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					130F296BF795B3108A244B97 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 99E9F8B1B660389E0AD1B2A5 /* Build configuration list for PBXProject "Potluck" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = C4D384C7768036B3B4AB537F;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 329303A22BB04D27212786C9 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				130F296BF795B3108A244B97 /* Potluck */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		879636FF68D424EE0DFE3F7E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4E97C6DF9983911D4BD95311 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		0ADB5F4F0A6511306476406E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E021F610D9208B4991C32DC7 /* AppModel.swift in Sources */,
+				EE766F61F0419ECD2187F7EE /* ChatView.swift in Sources */,
+				AADAEF5A51A57CC74196C23C /* Connection.swift in Sources */,
+				5F4503EFB9CFBD040C01FC07 /* Markdown.swift in Sources */,
+				350F91AB645880288AABED1C /* PairView.swift in Sources */,
+				E53EBCD3F2C1E861B37969CF /* PotluckApp.swift in Sources */,
+				3FED520E5BDF0588C2C64616 /* Sheets.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		04FDD23586DDC204103C83A9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.8.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		08A2B03D0F4C5674E867E29C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Potluck/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Potluck;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Potluck uses the camera to scan the pairing code shown on your computer.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Potluck connects to your own computer on your home network to chat with the AI model running there.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.fourcher.potluck;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		145F0504D7994AF436A37DC4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.8.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		51FC5692E3BC907182391450 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Potluck/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Potluck;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Potluck uses the camera to scan the pairing code shown on your computer.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Potluck connects to your own computer on your home network to chat with the AI model running there.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.fourcher.potluck;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		69C73ED8557269011F87E8B1 /* Build configuration list for PBXNativeTarget "Potluck" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				51FC5692E3BC907182391450 /* Debug */,
+				08A2B03D0F4C5674E867E29C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		99E9F8B1B660389E0AD1B2A5 /* Build configuration list for PBXProject "Potluck" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				04FDD23586DDC204103C83A9 /* Debug */,
+				145F0504D7994AF436A37DC4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = EEEC4D8D90F6C3A20133F4E3 /* Project object */;
+}
