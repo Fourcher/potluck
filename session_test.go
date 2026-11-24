@@ -36,7 +36,10 @@ func (f *scriptModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Unlock()
 	w.Header().Set("Content-Type", "text/event-stream")
-	chunk := func(delta any) { b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": delta}}}); fmt.Fprintf(w, "data: %s\n\n", b) }
+	chunk := func(delta any) {
+		b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": delta}}})
+		fmt.Fprintf(w, "data: %s\n\n", b)
+	}
 	if t, ok := strings.CutPrefix(reply, "text:"); ok {
 		chunk(map[string]any{"content": t})
 	} else {

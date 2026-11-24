@@ -184,7 +184,7 @@ function viewComputers() {
 
 // ---------- phones ----------
 let phones = { list: null, code: null, error: "" };
-function loadPhones() { api("/api/phones").then(r => { phones.list = r.phones || []; if (!phones.list.some(p => p.pairing)) phones.code = null; draw(true); }).catch(e => { phones.error = e.message; draw(true); }); }
+function loadPhones() { api("/api/phones").then(r => { phones.list = r.phones || []; phones.push = r.push; if (!phones.list.some(p => p.pairing)) phones.code = null; draw(true); }).catch(e => { phones.error = e.message; draw(true); }); }
 function phonesView() {
   if (!phones.list || Date.now() - (phones.at || 0) > 15000) { phones.at = Date.now(); phones.list = phones.list || []; loadPhones(); }
   const paired = phones.list.filter(p => !p.pairing);
@@ -202,6 +202,7 @@ function phonesView() {
     ${phones.error ? `<div class="err">${esc(phones.error)}</div>` : ""}
     ${rows ? `<div class="files" style="margin-top:8px">${rows}</div>` : ""}
     ${code || `<p style="margin-top:10px"><button class="btn sm" data-a="phonepair">${paired.length ? "Pair another phone" : "Pair a phone"}</button></p>`}
+    ${paired.length ? pushView() : ""}
   </div>`;
 }
 
@@ -244,6 +245,21 @@ function contView() {
     <textarea data-contpaste rows="4" style="width:100%;margin-top:4px;font:12px/1.4 ui-monospace,Menlo,monospace" placeholder='{"potluckImport": 1, ...}' aria-label="What your AI wrote">${esc(cont.paste || "")}</textarea>
     <p style="margin-top:6px"><button class="btn sm" data-a="contpaste" ${cont.busy ? "disabled" : ""}>Bring it over</button></p>
   </div>`;
+}
+
+// Alerts with answer buttons: the phone hears about every question a task asks (apns.go).
+function pushView() {
+  const p = phones.push || {};
+  return `<h3 style="margin-top:16px">Alerts on your phone</h3>
+    <p class="muted small">When a task needs an answer, Potluck alerts your phone, and you can answer Yes, No or reply from the alert itself. Apple only delivers alerts signed with a push key from the developer account the app was built with: in your Apple developer account, open Certificates, Identifiers &amp; Profiles, then Keys, make a key with "Apple Push Notifications service", and download its .p8 file.</p>
+    ${p.error ? `<div class="err">${esc(p.error)}</div>` : ""}
+    ${p.set ? `<p class="small" style="margin-top:6px">Alerts are on (key ${esc(p.keyID)}, team ${esc(p.teamID)}). <button class="link" data-a="pushoff">Turn alerts off</button></p>` : `
+    <div class="row small" style="margin-top:8px;gap:8px;flex-wrap:wrap">
+      <input data-push="keyPath" placeholder="Full path of the .p8 file" style="flex:2;min-width:240px">
+      <input data-push="keyID" placeholder="Key ID (10 letters)" style="flex:1;min-width:120px">
+      <input data-push="teamID" placeholder="Team ID" style="flex:1;min-width:110px">
+      <button class="btn sm" data-a="pushon">Turn alerts on</button>
+    </div>`}`;
 }
 
 // ---------- main computer: models ----------
@@ -629,6 +645,11 @@ const actions = {
   planlocal(t) { openPlan({ source: "local", node: t.dataset.node, file: t.dataset.file }); },
   phonepair() { phones.error = ""; api("/api/phones", { action: "pair" }).then(r => { phones.code = r; loadPhones(); }).catch(e => { phones.error = e.message; draw(true); }); },
   phonestop() { phones.code = null; api("/api/phones", { action: "stop" }).then(loadPhones).catch(e => toast(e.message)); },
+  pushon() {
+    const v = k => (document.querySelector(`[data-push=${k}]`) || {}).value || "";
+    api("/api/phones", { action: "push", keyPath: v("keyPath").trim(), keyID: v("keyID").trim(), teamID: v("teamID").trim() }).then(() => { toast("Alerts are on. Your phone hears about every question from now on."); loadPhones(); }).catch(e => toast(e.message));
+  },
+  pushoff() { api("/api/phones", { action: "push", keyPath: "" }).then(loadPhones).catch(e => toast(e.message)); },
   phoneforget(t) { if (confirm("Remove this phone? It will need to be paired again to connect.")) api("/api/phones", { action: "forget", id: t.dataset.id }).then(loadPhones).catch(e => toast(e.message)); },
   async usefound(t) {
     try {

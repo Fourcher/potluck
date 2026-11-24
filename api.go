@@ -419,7 +419,15 @@ func (app *App) serveUI() error {
 			return nil, err
 		}
 		if r.Method == http.MethodGet {
-			return map[string]any{"phones": h.Phones()}, nil
+			c := h.cfg.Get()
+			h.mu.Lock()
+			perr := h.pushErr
+			h.mu.Unlock()
+			push := map[string]any{"set": c.Push != nil && c.Push.KeyPath != "", "error": perr}
+			if c.Push != nil {
+				push["keyID"], push["teamID"], push["keyPath"] = c.Push.KeyID, c.Push.TeamID, c.Push.KeyPath
+			}
+			return map[string]any{"phones": h.Phones(), "push": push}, nil
 		}
 		var in struct {
 			Action string `json:"action"` // pair | stop | forget | push
