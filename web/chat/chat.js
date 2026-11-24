@@ -466,7 +466,7 @@ function drawChips() {
   let h = "";
   if (S.cur && S.cur.project && S.cur.project.root) h += `<span class="chip folder" title="${esc(S.cur.project.root)}">${ic("folder")}<span class="n">${esc(S.cur.project.name)}</span><small>${S.proj && S.proj.error ? esc(S.proj.error) : "project" + (S.proj && S.proj.instrFile ? " · follows " + esc(S.proj.instrFile) : "")}</small></span>`;
   if (S.folder) h += `<span class="chip folder" title="${S.folder.kind === "handle" ? "The model can work in this folder, within the permission level you chose." : "A read-only copy of this folder."}">${ic("folder")}<span class="n">${esc(S.folder.name)}</span><small>${S.folder.needsAccess ? "click to reconnect" : S.folder.kind === "snapshot" ? S.folder.files.size + " files, read-only" : "working folder"}</small><button type="button" data-a="detach" title="Remove folder" aria-label="Remove folder">×</button></span>`;
-  h += S.pending.map((f, i) => `<span class="chip ${f.skipped ? "bad" : ""}" title="${esc(f.skipped || (f.pasted ? "Click to put this text back in the message box" : f.name))}"${f.pasted ? ` data-pasted="${i}" style="cursor:pointer"` : ""}>${ic("file")}<span class="n">${esc(f.name)}</span><small>${f.skipped ? "cannot be read" : "about " + num(estTokens(f.text.length)) + " tokens"}</small><button type="button" data-a="unattach" data-i="${i}" title="Remove" aria-label="Remove">×</button></span>`).join("");
+  h += S.pending.map((f, i) => `<span class="chip ${f.skipped ? "bad" : ""}" title="${esc(f.skipped || (f.pasted ? "Click to put this text back in the message box" : f.name))}"${f.pasted ? ` data-pasted="${i}" style="cursor:pointer"` : ""}>${ic("file")}<span class="n">${esc(f.name)}</span><small>${f.skipped ? "cannot be read" : f.image ? "picture" : "about " + num(estTokens(f.text.length)) + " tokens"}</small><button type="button" data-a="unattach" data-i="${i}" title="Remove" aria-label="Remove">×</button></span>`).join("");
   $("#chips").innerHTML = h;
   drawFine();
 }
@@ -513,7 +513,12 @@ function autosize() { const t = $("#input"); t.style.height = "auto"; t.style.he
 const TEXT_LIMIT = 400000;
 async function readAttachment(file) {
   const a = { name: file.webkitRelativePath || file.name, size: file.size, text: "" };
-  if (/^image\//.test(file.type)) { a.skipped = "This model cannot look at pictures."; return a; }
+  if (/^image\//.test(file.type)) {
+    if (!S.server || !S.server.vision) { a.skipped = "The model running now cannot look at pictures. Models loaded with their image add-on can."; return a; }
+    if (file.size > 20 << 20) { a.skipped = "Bigger than 20 MB: too big a picture."; return a; }
+    a.image = await new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = no; r.readAsDataURL(file); });
+    return a;
+  }
   const kind = Extract.kindOf(file.name);
   if (kind) {
     if (file.size > 25 << 20) { a.skipped = "Bigger than 25 MB: too much to read here."; return a; }
@@ -810,8 +815,10 @@ function apiMessages() {
   const out = [{ role: "system", content: systemPrompt() }];
   for (const m of S.cur.messages) {
     if (m.role === "user") {
-      const files = (m.files || []).filter(f => !f.skipped).map(f => `<file name="${f.name}">\n${f.text}\n</file>`).join("\n\n");
-      out.push({ role: "user", content: files ? files + "\n\n" + (m.content || "See the attached file.") : m.content });
+      const files = (m.files || []).filter(f => !f.skipped && !f.image).map(f => `<file name="${f.name}">\n${f.text}\n</file>`).join("\n\n");
+      const text = files ? files + "\n\n" + (m.content || "See the attached file.") : (m.content || "See the picture.");
+      const pics = (m.files || []).filter(f => !f.skipped && f.image);
+      out.push({ role: "user", content: pics.length ? [{ type: "text", text }, ...pics.map(f => ({ type: "image_url", image_url: { url: f.image } }))] : text });
     } else if (m.role === "assistant") {
       const calls = m.calls && m.calls.length ? m.calls : null;
       if (!m.content && !calls) continue;
