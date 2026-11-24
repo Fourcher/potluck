@@ -451,3 +451,13 @@ func TestStreamArgs(t *testing.T) {
 		}
 	}
 }
+
+func TestContextBytesKeyQ8(t *testing.T) {
+	m := &ModelInfo{Layers: 4, KVHeads: []int{8}, KeyLen: 128, ValLen: 128}
+	full := m.ContextTotal(8192)
+	m.KVKeyQ8 = true
+	sq := m.ContextTotal(8192)
+	if !(sq < full && float64(sq)/float64(full) > 0.7 && float64(sq)/float64(full) < 0.8) {
+		t.Fatalf("8-bit keys should take about 77%% of the 16-bit cache: %d vs %d", sq, full)
+	}
+}

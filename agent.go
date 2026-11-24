@@ -269,6 +269,7 @@ type (
 		Items []SeedItem `json:"items"`
 	}
 	StartHeadReq struct {
+		KVKeyQ8 bool       `json:"kvKeyQ8,omitempty"` // the cache's keys in 8 bits (-ctk q8_0): the plan needed the room
 		File    string     `json:"file"`
 		Vision  *ModelPart `json:"vision,omitempty"` // the image add-on to fetch (if not here yet) and load
 		Workers []string   `json:"workers"`          // node ids, in --rpc order
@@ -724,6 +725,9 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	}
 	if in.Split != "" && in.NGL > 0 {
 		args = append(args, "-ts", in.Split)
+	}
+	if in.KVKeyQ8 {
+		args = append(args, "-ctk", "q8_0")
 	}
 	if len(in.ExpertCPU) > 0 {
 		// Keep these layers' expert weights in memory; the rest of each layer goes to the card.

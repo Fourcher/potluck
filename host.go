@@ -941,6 +941,22 @@ func (h *Host) plan(info *ModelInfo, solo string) *Plan { return h.planFor(info,
 // planFor is plan with the head fixed: a model file that is already on a computer has to
 // run from that computer.
 func (h *Host) planFor(info *ModelInfo, solo, head string) *Plan {
+	p := h.planForKV(info, solo, head)
+	// Too big as it is: try again with the conversation memory's keys stored in 8 bits
+	// (about a quarter less memory, close to no loss in quality, and it works on every
+	// device, unlike 8-bit values, which need flash attention).
+	if !p.Fits && !info.KVKeyQ8 && !p.Stream && info.ContextTotal(max(info.PlanCtx, 1)) > 0 {
+		sq := *info
+		sq.KVKeyQ8 = true
+		if q := h.planForKV(&sq, solo, head); q.Fits {
+			q.KVKeyQ8 = true
+			return q
+		}
+	}
+	return p
+}
+
+func (h *Host) planForKV(info *ModelInfo, solo, head string) *Plan {
 	nodes := h.planNodes()
 	if solo == "" {
 		if head == "" {
@@ -1285,7 +1301,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		// on the processor (2 words per second instead of 18.5, measured on the Mac mini).
 		ngl = 999
 	}
-	req := StartHeadReq{File: model.File, Vision: model.Vision, Workers: plan.WorkerOrder, NGL: ngl, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream, DenseBytes: info.denseBytes(),
+	req := StartHeadReq{File: model.File, Vision: model.Vision, Workers: plan.WorkerOrder, NGL: ngl, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream, DenseBytes: info.denseBytes(), KVKeyQ8: plan.KVKeyQ8,
 		ExpertCPU: plan.ExpertCPU,
 		// Every hardware thread only where it measured faster: pooled, with the card holding
 		// the trunk of all the head's layers (3.8 against 3.3 words/s). With whole layers on

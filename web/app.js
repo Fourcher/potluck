@@ -486,7 +486,7 @@ function viewSheet() {
   if (p.fits) {
     const verdict = p.needsPool ? `<div class="banner" style="border-color:var(--ok);background:var(--ok-soft)"><b>Too big for the memory of any one of your computers. Runs across ${p.machines} of them together.</b></div>`
       : `<div class="note">Fits in ${esc(p.shares[0].name)}'s memory, so it runs there${p.machines > 1 ? " with help from the others" : ""}.</div>`;
-    body = `${verdict}${planBar(p)}
+    body = `${verdict}${p.kvKeyQ8 ? `<p class="small muted">To fit, Potluck stores the conversation memory a little more compactly (8-bit keys). Answers are practically the same.</p>` : ""}${planBar(p)}
       <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start">${go}</button></div>
       <p class="muted small">${isLocal ? "The file is already on " + esc(p.shares[0].name) + (p.machines > 1 ? ". Helpers receive their share from it over your network, which is slower the first time than a download." : ", so nothing is downloaded.")
         : "Each computer downloads its own share. The first start takes as long as the download; later starts take a few minutes."}</p>`;

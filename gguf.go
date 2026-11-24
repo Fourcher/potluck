@@ -58,6 +58,7 @@ type ModelInfo struct {
 	Vocab     int    `json:"vocab,omitempty"`
 	PlanCtx   int    `json:"-"` // the context size a plan is being made for
 	WorkSeen  int64  `json:"-"` // the engine's own report of its working memory for this file and size, if known
+	KVKeyQ8   bool   `json:"-"` // plan with the cache's keys in 8 bits (llama.cpp -ctk q8_0), about a quarter smaller
 }
 
 // ubatch is the engine's default batch of tokens per step. A sliding-window layer keeps its
@@ -86,7 +87,12 @@ func (m *ModelInfo) ContextBytes(ctx int) []int64 {
 		if m.LoopCount > 1 && i >= m.LoopStart && i < m.LoopEnd {
 			passes = m.LoopCount
 		}
-		out[i] = int64(passes) * int64(tokens) * int64(heads) * int64(m.KeyLen+m.ValLen) * 2
+		// 16-bit keys and values; 8-bit keys (q8_0: 34 bytes per 32 values) when squeezed.
+		perTok := int64(heads) * int64(m.KeyLen+m.ValLen) * 2
+		if m.KVKeyQ8 {
+			perTok = int64(heads) * (int64(m.KeyLen)*34/32 + int64(m.ValLen)*2)
+		}
+		out[i] = int64(passes) * int64(tokens) * perTok
 	}
 	return out
 }
@@ -500,6 +506,7 @@ type PlanShare struct {
 // Plan is a complete layout of a model across computers.
 type Plan struct {
 	Fits        bool        `json:"fits"`
+	KVKeyQ8     bool        `json:"kvKeyQ8,omitempty"` // fits only with the cache's keys in 8 bits
 	Reason      string      `json:"reason,omitempty"`
 	Head        string      `json:"head"`
 	Shares      []PlanShare `json:"shares"`
