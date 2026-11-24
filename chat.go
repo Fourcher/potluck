@@ -99,6 +99,43 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 				return
 			}
 			writeJSON(w, map[string]bool{"ok": true})
+		case r.URL.Path == "/potluck/context" && r.Method == http.MethodGet:
+			// The imported setup (continuity.go), for this computer's own chat and agent only.
+			if !chatOwner(r) {
+				http.NotFound(w, r)
+				return
+			}
+			writeJSON(w, loadContContext(h.a.dir))
+		case r.URL.Path == "/potluck/skill" && r.Method == http.MethodGet:
+			if !chatOwner(r) {
+				http.NotFound(w, r)
+				return
+			}
+			text, err := readSkill(h.a.dir, r.URL.Query().Get("name"))
+			if err != nil {
+				fail(w, err)
+				return
+			}
+			writeJSON(w, map[string]string{"text": text})
+		case r.URL.Path == "/potluck/import" && r.Method == http.MethodPost:
+			// Another AI on this computer hands over a bundle (the panel's "bring your setup" prompt).
+			if !chatOwner(r) || r.Header.Get("X-Potluck") != "1" {
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "only programs on this computer can import, with the header X-Potluck: 1"})
+				return
+			}
+			raw, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<20))
+			c, err := bundleFound(raw)
+			if err != nil {
+				fail(w, err)
+				return
+			}
+			src, err := saveContinuity(h.a.dir, []*contFound{c})
+			if err != nil {
+				fail(w, err)
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "imported": src[len(src)-1]})
 		case r.URL.Path == "/potluck/ai" && r.Method == http.MethodGet:
 			// How another AI can use Potluck: the same text the control panel copies.
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")

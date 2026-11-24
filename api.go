@@ -356,6 +356,63 @@ func (app *App) serveUI() error {
 		return map[string]string{"text": aiMemory(), "guide": h.aiGuide()}, nil
 	})
 
+	// Bringing an existing AI setup over (continuity.go). Works on any role: it only reads
+	// this computer's own files and writes into Potluck's data folder.
+	var contScan []*contFound
+	var contMu sync.Mutex
+	api("/api/continuity", func(r *http.Request) (any, error) {
+		home, _ := os.UserHomeDir()
+		if r.Method == http.MethodGet {
+			return map[string]any{"have": loadContContext(app.dir), "prompt": continuityPrompt(), "folders": suggestFolders(app.dir, home)}, nil
+		}
+		var in struct {
+			Action  string   `json:"action"` // scan | import | bundle | forget
+			Folders []string `json:"folders"`
+			IDs     []string `json:"ids"`
+			Text    string   `json:"text"`
+		}
+		if err := body(r, &in); err != nil {
+			return nil, err
+		}
+		contMu.Lock()
+		defer contMu.Unlock()
+		switch in.Action {
+		case "scan":
+			contScan = scanContinuity(home, in.Folders)
+			var out []ContSource
+			for _, c := range contScan {
+				out = append(out, c.count())
+			}
+			return map[string]any{"found": out}, nil
+		case "import":
+			want := map[string]bool{}
+			for _, id := range in.IDs {
+				want[id] = true
+			}
+			var pick []*contFound
+			for _, c := range contScan {
+				if want[c.src.ID] {
+					pick = append(pick, c)
+				}
+			}
+			if len(pick) == 0 {
+				return nil, errors.New("nothing chosen to import: look for your setup first")
+			}
+			src, err := saveContinuity(app.dir, pick)
+			return map[string]any{"sources": src}, err
+		case "bundle":
+			c, err := bundleFound([]byte(in.Text))
+			if err != nil {
+				return nil, err
+			}
+			src, err := saveContinuity(app.dir, []*contFound{c})
+			return map[string]any{"sources": src}, err
+		case "forget":
+			return map[string]bool{"ok": true}, os.RemoveAll(contDir(app.dir))
+		}
+		return nil, errors.New("unknown action")
+	})
+
 	api("/api/phones", func(r *http.Request) (any, error) {
 		h, err := needMain()
 		if err != nil {

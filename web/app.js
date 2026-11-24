@@ -178,7 +178,8 @@ function viewComputers() {
         <button class="btn" data-a="kit">Make setup kit</button></div>
         <p class="small" id="kitmsg">${esc(kit.msg)}</p></div>
     </div>
-    ${phonesView()}`;
+    ${phonesView()}
+    ${contView()}`;
 }
 
 // ---------- phones ----------
@@ -201,6 +202,47 @@ function phonesView() {
     ${phones.error ? `<div class="err">${esc(phones.error)}</div>` : ""}
     ${rows ? `<div class="files" style="margin-top:8px">${rows}</div>` : ""}
     ${code || `<p style="margin-top:10px"><button class="btn sm" data-a="phonepair">${paired.length ? "Pair another phone" : "Pair a phone"}</button></p>`}
+  </div>`;
+}
+
+
+// ---------- bringing an existing AI setup over (continuity.go) ----------
+
+let cont = { data: null, at: 0, found: null, pick: {}, busy: "", msg: "", err: "", showPrompt: false, folders: null };
+function loadCont() { return api("/api/continuity").then(d => { cont.data = d; cont.at = Date.now(); if (!cont.folders) cont.folders = (d.folders || []).join("\n"); draw(); }).catch(e => { cont.err = e.message; draw(); }); }
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+function contCounts(s) {
+  const parts = [];
+  if (s.profile) parts.push(plural(s.profile, "instruction file", "instruction files"));
+  if (s.memories) parts.push(plural(s.memories, "memory", "memories"));
+  if (s.skills) parts.push(plural(s.skills, "skill", "skills"));
+  if (s.projects) parts.push(plural(s.projects, "project", "projects"));
+  if (s.connectors) parts.push(plural(s.connectors, "connector", "connectors"));
+  if (s.rules) parts.push(plural(s.rules, "permission rule", "permission rules"));
+  return parts.join(", ") || "nothing";
+}
+function contView() {
+  if (!cont.data && Date.now() - cont.at > 10000) { cont.at = Date.now(); loadCont(); }
+  const d = cont.data || {}, have = d.have || {}, srcs = have.sources || [];
+  const haveRows = srcs.map(s => `<div class="file"><span class="q">${esc(s.name)}</span><span></span><span class="n muted small">${esc(contCounts(s))} · brought over ${new Date(s.imported).toLocaleString()}</span><span></span></div>`).join("");
+  const found = cont.found ? (cont.found.length ? `<div class="files" style="margin-top:8px">${cont.found.map(s => `<label class="file" style="cursor:pointer"><span class="q"><input type="checkbox" data-contpick="${esc(s.id)}" ${cont.pick[s.id] !== false ? "checked" : ""}> ${esc(s.name)}</span><span></span><span class="n muted small">${esc(contCounts(s))}${s.path ? " · " + esc(s.path) : ""}</span><span></span></label>`).join("")}</div>
+      <p style="margin-top:8px"><button class="btn sm" data-a="contimport" ${cont.busy ? "disabled" : ""}>Bring these over</button></p>` : `<p class="muted small" style="margin-top:8px">No Claude Code, Claude Desktop, Codex or Cursor setup and no projects found. Add the folder where you keep your projects above, or use your AI's help below.</p>`) : "";
+  return `<h2>Bring your AI setup over</h2><div class="card">
+    <p class="small">Start where you left off: Potluck brings over your instructions, memories, skills, projects and connectors from the AI you use now, and its chat and agent use them from then on.</p>
+    ${srcs.length ? `<div class="files" style="margin-top:8px">${haveRows}</div><p class="muted small" style="margin-top:6px">${plural((have.projects || []).length, "project", "projects")} and ${plural((have.skills || []).length, "skill", "skills")} ready. <button class="link" data-a="contforget">Forget everything brought over</button></p>` : ""}
+    ${cont.err ? `<div class="err">${esc(cont.err)}</div>` : ""}${cont.msg ? `<div class="note">${esc(cont.msg)}</div>` : ""}
+    <h3 style="margin-top:14px">1. Let Potluck look on this computer</h3>
+    <p class="muted small">It reads Claude Code, Claude Desktop, Codex and Cursor's own files. Nothing leaves this computer. It also finds projects in the folders below (one per line): folders with a CLAUDE.md, AGENTS.md or a git repository.</p>
+    <textarea data-contfolders rows="3" style="width:100%;margin-top:6px;font:12px/1.4 ui-monospace,Menlo,monospace" aria-label="Folders with projects">${esc(cont.folders || "")}</textarea>
+    <p style="margin-top:6px"><button class="btn sm" data-a="contscan" ${cont.busy ? "disabled" : ""}>${cont.busy === "scan" ? "Looking…" : "Look for my setup"}</button></p>
+    ${found}
+    <h3 style="margin-top:14px">2. Bring over what your AI knows</h3>
+    <p class="muted small">Some things live only in your AI's account (ChatGPT's memory, for example). Copy this prompt into a chat with your AI: it gathers what it knows about you and your work and hands it to Potluck, or gives you something to paste below.</p>
+    <p style="margin-top:6px"><button class="btn sm" data-a="contcopy">${cont.copied ? "Copied ✓" : "Copy the prompt"}</button> <button class="btn sm ghost" data-a="contshow">${cont.showPrompt ? "Hide it" : "Show it"}</button></p>
+    ${cont.showPrompt ? `<textarea readonly rows="14" onclick="this.select()" style="width:100%;margin-top:8px;font:12px/1.45 ui-monospace,Menlo,monospace" aria-label="Prompt for your AI">${esc(d.prompt || "")}</textarea>` : ""}
+    <p class="muted small" style="margin-top:10px">Paste what your AI wrote:</p>
+    <textarea data-contpaste rows="4" style="width:100%;margin-top:4px;font:12px/1.4 ui-monospace,Menlo,monospace" placeholder='{"potluckImport": 1, ...}' aria-label="What your AI wrote">${esc(cont.paste || "")}</textarea>
+    <p style="margin-top:6px"><button class="btn sm" data-a="contpaste" ${cont.busy ? "disabled" : ""}>Bring it over</button></p>
   </div>`;
 }
 
@@ -629,6 +671,36 @@ const actions = {
     loadAI();
   },
   aishow() { ai.open = !ai.open; draw(true); },
+  contscan() {
+    const t = $("[data-contfolders]"); if (t) cont.folders = t.value;
+    cont.busy = "scan"; cont.err = cont.msg = ""; draw(true);
+    api("/api/continuity", { action: "scan", folders: (cont.folders || "").split("\n").map(x => x.trim()).filter(Boolean) })
+      .then(r => { cont.found = r.found || []; cont.pick = {}; }).catch(e => { cont.err = e.message; }).finally(() => { cont.busy = ""; draw(true); });
+  },
+  contimport() {
+    const ids = (cont.found || []).map(s => s.id).filter(id => { const b = document.querySelector(`[data-contpick="${CSS.escape(id)}"]`); return b ? b.checked : true; });
+    cont.busy = "import"; draw(true);
+    api("/api/continuity", { action: "import", ids }).then(() => { cont.found = null; cont.msg = "Brought over. Potluck's chat and agent use it from the next message."; return loadCont(); })
+      .catch(e => { cont.err = e.message; }).finally(() => { cont.busy = ""; draw(true); });
+  },
+  contpaste() {
+    const t = $("[data-contpaste]"), text = t ? t.value.trim() : ""; if (!text) { cont.err = "Paste what your AI wrote first."; draw(true); return; }
+    cont.busy = "paste"; cont.err = cont.msg = ""; draw(true);
+    api("/api/continuity", { action: "bundle", text }).then(() => { cont.paste = ""; cont.msg = "Brought over from your AI."; return loadCont(); })
+      .catch(e => { cont.err = e.message; }).finally(() => { cont.busy = ""; draw(true); });
+  },
+  async contcopy() {
+    if (!cont.data) await loadCont();
+    const text = (cont.data && cont.data.prompt) || ""; let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch (e) {
+      const t = document.createElement("textarea"); t.value = text; t.style.cssText = "position:fixed;top:-1000px"; document.body.appendChild(t); t.select();
+      try { ok = document.execCommand("copy"); } catch (e2) { ok = false; } t.remove();
+    }
+    if (!ok) { cont.showPrompt = true; draw(true); toast("Your browser blocked copying. Select the text and copy it."); return; }
+    cont.copied = true; draw(true); toast("Copied. Paste it into a chat with your AI."); setTimeout(() => { cont.copied = false; draw(true); }, 3000);
+  },
+  contshow() { cont.showPrompt = !cont.showPrompt; draw(true); },
+  contforget() { if (confirm("Forget everything brought over from your earlier AI setup? Your original files are not touched.")) api("/api/continuity", { action: "forget" }).then(() => { cont.msg = ""; return loadCont(); }).catch(e => toast(e.message)); },
   tohf(t) { store.source = "hf"; store.q = t.dataset.repo.split("/").pop(); store.results = null; draw(true); },
 };
 
@@ -639,6 +711,8 @@ document.addEventListener("click", e => {
 $("#tabs").addEventListener("click", e => { const b = e.target.closest("button[data-tab]"); if (b) actions.tab(b); });
 document.addEventListener("input", e => {
   holdUntil = Date.now() + 2500;
+  if (e.target.matches("[data-contfolders]")) cont.folders = e.target.value;
+  if (e.target.matches("[data-contpaste]")) cont.paste = e.target.value;
   if (e.target.matches("[data-c=pedal]")) { const b = $("[data-pedal]", e.target.closest(".limits")); b.textContent = `${e.target.value}% · ${pedalWord(+e.target.value)}`; }
 });
 document.addEventListener("change", e => {

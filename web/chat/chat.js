@@ -89,6 +89,9 @@ async function poll() {
   try { S.server = await api("/potluck/state"); } catch { S.server = { phase: "offline", error: "Potluck is not answering." }; }
   if (running() && (was !== "running" || !S.props)) { try { S.props = await (await fetch("/props")).json(); } catch { S.props = null; } }
   if (!running()) S.props = null;
+  // The setup the user brought over from their earlier AI (Computers > Bring your AI setup
+  // over). Only this computer's own browser gets it.
+  if (S.server.owner && (!S.ctxAt || Date.now() - S.ctxAt > 60000)) { S.ctxAt = Date.now(); try { S.ctx = await api("/potluck/context"); } catch { S.ctx = null; } }
   drawStatus();
   if (was !== S.server.phase && S.cur && !S.cur.messages.length && !S.gen) drawThread(); // the greeting says whether a model is ready
   pollTimer = setTimeout(poll, running() ? 12000 : 3000);
@@ -183,6 +186,7 @@ function toolLabel(c, res) {
     search_files: [`Searching your folder for ${q}`, `Searched your folder for ${q}`, `Asked to search your folder for ${q}`],
     write_file: [`Writing ${p}`, `Wrote ${p}`, `Asked to write ${p}`],
     run_command: [`Running <span class="path">${esc(shortCmd(a.command))}</span>`, `Ran <span class="path">${esc(shortCmd(a.command))}</span>`, `Asked to run <span class="path">${esc(shortCmd(a.command))}</span>`],
+    use_skill: [`Loading the skill <span class="path">${esc(a.name || "")}</span>`, `Loaded the skill <span class="path">${esc(a.name || "")}</span>`, `Asked to load the skill <span class="path">${esc(a.name || "")}</span>`],
     run_applescript: [`Driving an app: <span class="path">${esc(shortCmd(a.script))}</span>`, `Drove an app: <span class="path">${esc(shortCmd(a.script))}</span>`, `Asked to drive an app: <span class="path">${esc(shortCmd(a.script))}</span>`],
   }[c.name] || [`Using ${esc(c.name)}`, `Used ${esc(c.name)}`, `Asked to use ${esc(c.name)}`];
   return forms[!res ? 0 : res.state === "ok" ? 1 : 2];
@@ -373,6 +377,7 @@ async function runOnComputer(kind, command, dir, timeout) {
 const TOOLS = {
   async run_command(a) { return runOnComputer("shell", a.command, a.folder, a.timeout_seconds); },
   async run_applescript(a) { return runOnComputer("applescript", a.script, "", a.timeout_seconds); },
+  async use_skill(a) { const r = await api("/potluck/skill?name=" + encodeURIComponent(a.name || "")); return r.text; },
   async list_files(a) {
     const list = await folderWalk(a.path || "");
     if (!list.length) return "(no files here)";
@@ -418,6 +423,7 @@ function toolSpecs() {
     if (mac) agent.push(fn("run_applescript", "Run an AppleScript on the user's Mac to control apps: open documents, read or change what an app shows (Finder, Safari, Mail, Notes, Music, System Events for clicks and keystrokes). macOS asks the user once per app before allowing it.",
       { script: { type: "string", description: "The AppleScript source" }, timeout_seconds: { type: "integer" } }, ["script"]));
   }
+  if (S.ctx && (S.ctx.skills || []).length) agent.push(fn("use_skill", "Load one of the user's skills (listed in your instructions) and get its full instructions.", { name: { type: "string", description: "The skill's name" } }, ["name"]));
   if (!S.folder || S.folder.needsAccess || S.settings.perm === "none") return agent.length ? agent : null;
   const t = [...agent,
     fn("list_files", "List the files in the user's folder, or in a subfolder of it.", { path: { type: "string", description: "Subfolder, relative to the folder. Leave out for everything." } }),
@@ -461,6 +467,10 @@ function askRun(call) {
 }
 async function runTool(call) {
   const c = S.cur;
+  if (call.name === "use_skill") { // reads only Potluck's own copy of the user's skills
+    try { let a = {}; try { a = JSON.parse(call.args || "{}"); } catch { } return { state: "ok", content: await TOOLS.use_skill(a) }; }
+    catch (e) { return { state: "error", content: "Could not load that skill: " + (e.message || e) }; }
+  }
   if (call.name.startsWith("run_")) {
     if (!TOOLS[call.name] || !agentOn()) return { state: "denied", content: "Agent mode is off, so nothing can be run." };
     if (S.settings.agent !== "auto" && !c.grants.run) {
@@ -488,12 +498,21 @@ function systemPrompt() {
   const s = S.settings, p = ["You are a helpful assistant. You run privately on the user's own computers through an app called Potluck."];
   if (STYLES[s.style].text) p.push(STYLES[s.style].text);
   if (s.instructions.trim()) p.push("The user's standing instructions:\n" + s.instructions.trim());
+  // Imported text gets about a quarter of the model's context (4 characters a token), so it
+  // never crowds out the conversation on a small model.
+  const budget = Math.max(2000, ctxSize()), cx = S.ctx || {}, cap = (t, n) => { n = Math.min(n, budget * 0.5); return t.length > n ? t.slice(0, n) + "\n(… shortened; the rest is in Potluck's continuity folder)" : t; };
+  if ((cx.profile || "").trim()) p.push("What the user brought over from their earlier AI setup: who they are and how they like to work. Treat it as their standing preferences.\n\n" + cap(cx.profile.trim(), 16000));
+  if ((cx.memory || "").trim()) p.push("Things you remember about the user:\n\n" + cap(cx.memory.trim(), 12000));
+  if ((cx.skills || []).length) p.push("Skills the user has set up. When a request matches one, load it with use_skill and follow it:\n" + cx.skills.slice(0, budget >= 16000 ? 60 : 15).map(k => `- ${k.name}: ${k.description || ""}`).join("\n"));
+  if (agentOn() && (cx.projects || []).length) p.push("The user's projects (folder paths on this computer), most recent first. When they name one, work in its folder and read its CLAUDE.md or AGENTS.md first if it has one:\n" + cx.projects.slice(0, budget >= 16000 ? 40 : 10).map(q => `- ${q.name}: ${q.path}${q.instructions ? " (instructions: " + q.instructions + ")" : ""}`).join("\n"));
   if (S.cur.summary) p.push("This conversation continues an earlier one. Summary of the earlier part:\n" + S.cur.summary);
   if (agentOn()) {
     const os = { darwin: "macOS", windows: "Windows", linux: "Linux" }[S.server.os] || S.server.os || "the computer";
     p.push(`Agent mode is on. You can act on the user's ${os} computer with run_command${S.server.os === "darwin" ? " and run_applescript" : ""}. Commands start in ${S.server.agentDir || "the agent folder"} unless you give a folder. ` +
       `Work in small steps: run something, read the result, then decide the next step. Prefer commands that only look before ones that change things. ` +
-      `Before anything that deletes, overwrites, sends, buys or cannot be undone, stop and ask the user in your reply instead of running it. When you are done, say plainly what you did and what you found.`);
+      (S.settings.agent === "auto"
+        ? `The user has chosen to let you act without asking, so carry out what they ask, changes included. When you are done, say plainly what you did and what you found.`
+        : `Before anything that deletes, overwrites, sends, buys or cannot be undone, stop and ask the user in your reply instead of running it. When you are done, say plainly what you did and what you found.`));
   }
   if (S.folder && toolSpecs() && toolSpecs().some(t => t.function.name === "list_files")) p.push(`The user has shared a folder named "${S.folder.name}". Use the tools to look at${S.folder.kind === "handle" ? " or change" : ""} files in it when that helps. Paths are relative to that folder. Do not guess what a file contains: read it.`);
   return p.join("\n\n");
