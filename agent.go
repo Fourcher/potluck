@@ -38,6 +38,9 @@ type Config struct {
 	// Known remembers where each model that Potluck downloaded came from, by file name, so
 	// it can be started again the same way from the chat page.
 	Known map[string]ModelRef `json:"known,omitempty"`
+	// WorkSeen: the engine's working memory per device, as it reported it after loading,
+	// by "file@context size" (planning uses it instead of an estimate from then on).
+	WorkSeen map[string]int64 `json:"workSeen,omitempty"`
 	// Profiles: each computer's last benchmark, by computer. Measured: speeds seen on real
 	// runs, newest first.
 	Profiles map[string]*Profile `json:"profiles,omitempty"`

@@ -1003,6 +1003,10 @@ func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 	h.mu.Unlock()
 	if running {
 		h.Stop()
+		// The computers report their free memory every few seconds; planning straight away
+		// would count the old model as still there (seen: a 23.5 GB model planned to read
+		// 34 GB from disk on a computer with 27 GB free).
+		time.Sleep(12 * time.Second)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.mu.Lock()
@@ -1063,6 +1067,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 	}
 	h.mu.Lock()
 	info.PlanCtx = ctxSize // plans count the context cache for this size
+	info.WorkSeen = h.cfg.Get().WorkSeen[model.File+"@"+strconv.Itoa(ctxSize)]
 	h.lastInfo = info
 	h.mu.Unlock()
 
@@ -1278,6 +1283,14 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			if st.Ready {
 				// Trust, but verify: the engine's own report must show the helpers holding
 				// something when the plan gave them layers.
+				if w := workReported(st.FullLog); w > 0 {
+					h.cfg.Update(func(c *Config) {
+						if c.WorkSeen == nil {
+							c.WorkSeen = map[string]int64{}
+						}
+						c.WorkSeen[model.File+"@"+strconv.Itoa(ctxSize)] = w
+					})
+				}
 				if helperLayers > 0 && st.HeadLog != "" && !engineUsedHelpers(st.FullLog) {
 					err := errors.New("the AI engine loaded the model without the helpers, which does not match the plan. Please report this; the technical details below show what it did")
 					done(err)
@@ -1509,4 +1522,21 @@ func (h *Host) Test() error {
 		h.mu.Unlock()
 	}()
 	return nil
+}
+
+var workLine = regexp.MustCompile(`(\S+) compute buffer size =\s+([\d.]+) MiB`)
+
+// workReported is the largest working memory the engine reserved on one device (graphics cards
+// and helpers; the processor's own is small), from its load report.
+func workReported(log string) int64 {
+	var most float64
+	for _, m := range workLine.FindAllStringSubmatch(log, -1) {
+		if m[1] == "CPU" {
+			continue
+		}
+		if v, err := strconv.ParseFloat(m[2], 64); err == nil && v > most {
+			most = v
+		}
+	}
+	return int64(most * (1 << 20))
 }

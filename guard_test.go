@@ -191,3 +191,15 @@ func TestExpertPattern(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkReported(t *testing.T) {
+	log := "sched_reserve: RPC0[127.0.0.1:63435] compute buffer size =   206.20 MiB\nsched_reserve:      CUDA0 compute buffer size =  3358.68 MiB\nsched_reserve:        CPU compute buffer size =   177.27 MiB\n"
+	if got, f := workReported(log), 3358.68; got != int64(f*(1<<20)) {
+		t.Fatalf("%d", got)
+	}
+	m := inkling()
+	m.WorkSeen = 3358 << 20
+	if m.WorkBytes() < 3358<<20 {
+		t.Fatal("a measured working memory must replace the estimate")
+	}
+}

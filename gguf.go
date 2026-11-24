@@ -57,6 +57,7 @@ type ModelInfo struct {
 	LoopCount int    `json:"loopCount,omitempty"`
 	Vocab     int    `json:"vocab,omitempty"`
 	PlanCtx   int    `json:"-"` // the context size a plan is being made for
+	WorkSeen  int64  `json:"-"` // the engine's own report of its working memory for this file and size, if known
 }
 
 // ubatch is the engine's default batch of tokens per step. A sliding-window layer keeps its
@@ -103,6 +104,9 @@ func (m *ModelInfo) ContextTotal(ctx int) int64 {
 // the scores for every word of the vocabulary for a batch of tokens. Never less than the
 // 600 MB measured on small models.
 func (m *ModelInfo) WorkBytes() int64 {
+	if m.WorkSeen > 0 { // measured on an earlier load: far better than any estimate
+		return max(m.WorkSeen+m.WorkSeen/10, perDeviceOverhead)
+	}
 	w := int64(m.Vocab) * ubatch * 4 * 2
 	if w < perDeviceOverhead {
 		return perDeviceOverhead
@@ -941,7 +945,13 @@ func planSolo(m *ModelInfo, n PlanNode) *Plan {
 	if n.Unified {
 		inMemory = n.GPUBytes
 	}
-	need := int64(cpu)*layer + m.OtherBytes + perDeviceOverhead
+	need := m.OtherBytes + perDeviceOverhead
+	for l := 0; l < cpu && l < m.Layers; l++ { // each layer's own size and cache, not the largest one's
+		need += m.LayerBytes[l]
+		if l < len(kv) {
+			need += kv[l]
+		}
+	}
 	if n.Unified {
 		need = p.ModelBytes + p.ContextBytes + perDeviceOverhead
 	}
