@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,8 +35,8 @@ type Policy struct {
 
 // Grants are standing yeses given during a session ("yes, and don't ask again").
 type Grants struct {
-	Read, Write, Run bool
-	Connectors       map[string]bool
+	Read, Write, Run, Browser bool
+	Connectors                map[string]bool
 }
 
 type SMsg struct {
@@ -343,6 +344,21 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 			return "", nil
 		}
 		kind, title, detail = "read", "Look at the project's files?", call.Name+" "+call.Args
+	case strings.HasPrefix(call.Name, "browser_"):
+		if pol.Commands == "auto" || g.Browser || call.Name == "browser_read" || call.Name == "browser_screenshot" {
+			return "", nil
+		}
+		kind = "browser"
+		switch call.Name {
+		case "browser_open":
+			title, detail = "Open this page in the browser?", str("url")
+		case "browser_click":
+			title, detail = "Click this on the page?", fmt.Sprint("[", args["ref"], "]")
+		case "browser_type":
+			title, detail = "Type this into the page?", fmt.Sprint("[", args["ref"], "] ", trimTo(str("text"), 500))
+		default:
+			title, detail = "Use the browser?", call.Name
+		}
 	case strings.HasPrefix(call.Name, "mcp__"):
 		server := strings.SplitN(strings.TrimPrefix(call.Name, "mcp__"), "__", 2)[0]
 		if g.Connectors[server] || pol.Commands == "auto" {
@@ -368,6 +384,8 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 			s.Grants.Write, s.Grants.Read = true, true
 		case "read":
 			s.Grants.Read = true
+		case "browser":
+			s.Grants.Browser = true
 		case "connector":
 			if s.Grants.Connectors == nil {
 				s.Grants.Connectors = map[string]bool{}

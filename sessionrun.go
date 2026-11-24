@@ -187,7 +187,7 @@ func (st *sessionStore) tools(ctx context.Context, s *Session) []toolSpec {
 		spec("ask_user", "Ask the user something only they can decide. They may be away; they can answer from their phone. Offer a clear yes/no question where you can.",
 			`{"type":"object","properties":{"question":{"type":"string"}},"required":["question"]}`),
 		spec("request_permissions", "Ask the user once, up front, to approve what this task will need, so it is not held up later.",
-			`{"type":"object","properties":{"reason":{"type":"string","description":"One or two sentences: what you are about to do"},"commands":{"type":"boolean","description":"Run commands without asking"},"file_changes":{"type":"boolean","description":"Change and create files without asking"},"connectors":{"type":"array","items":{"type":"string"},"description":"Connectors to use without asking"},"apps":{"type":"array","items":{"type":"string"},"description":"Apps you will control (macOS asks once per app; this asks now)"}},"required":["reason"]}`),
+			`{"type":"object","properties":{"reason":{"type":"string","description":"One or two sentences: what you are about to do"},"commands":{"type":"boolean","description":"Run commands without asking"},"file_changes":{"type":"boolean","description":"Change and create files without asking"},"browser":{"type":"boolean","description":"Use the web browser without asking"},"connectors":{"type":"array","items":{"type":"string"},"description":"Connectors to use without asking"},"apps":{"type":"array","items":{"type":"string"},"description":"Apps you will control (macOS asks once per app; this asks now)"}},"required":["reason"]}`),
 	}
 	if runtime.GOOS == "darwin" {
 		t = append(t, spec("run_applescript", "Run an AppleScript to control apps on the user's Mac (Finder, Safari, Mail, Notes, System Events for clicks and keystrokes).",
@@ -200,6 +200,15 @@ func (st *sessionStore) tools(ctx context.Context, s *Session) []toolSpec {
 			spec("search_files", "Find lines in the project's files containing some text, or matching /a regular expression/.", `{"type":"object","properties":{"query":{"type":"string"},"pattern":{"type":"string"}},"required":["query"]}`),
 			spec("edit_file", "Replace exact text in a file. old must match the file exactly (copied from read_file, without the line numbers) and be unique unless all is true.", `{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"},"all":{"type":"boolean"}},"required":["path","old","new"]}`),
 			spec("write_file", "Create a file in the project, or replace its whole content.", `{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`))
+	}
+	if findBrowser() != "" {
+		t = append(t,
+			spec("browser_open", "Open a web page in Potluck's browser window and get it back as text, with every link, button and field numbered.", `{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}`),
+			spec("browser_read", "Read the page that is open now (after it changed), with the numbers of what you can use.", `{"type":"object","properties":{}}`),
+			spec("browser_click", "Click a link, button or box on the page, by its number from the page text.", `{"type":"object","properties":{"ref":{"type":"integer"}},"required":["ref"]}`),
+			spec("browser_type", "Type into a field on the page, by its number; submit presses Enter afterwards.", `{"type":"object","properties":{"ref":{"type":"integer"},"text":{"type":"string"},"submit":{"type":"boolean"}},"required":["ref","text"]}`),
+			spec("browser_back", "Go back to the previous page.", `{"type":"object","properties":{}}`),
+			spec("browser_screenshot", "Save a picture of the page (for the user to look at).", `{"type":"object","properties":{}}`))
 	}
 	if cx := loadContContext(st.host.a.dir); len(cx.Skills) > 0 {
 		t = append(t, spec("use_skill", "Load one of the user's skills (listed in your instructions) and get its full instructions.", `{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`))
@@ -513,6 +522,8 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 			return projectFS(FSReq{Op: op, Root: root, Path: str("path"), Glob: str("pattern"), Query: str("query"), Start: num("start_line"), Max: num("max_lines"), Content: str("content"), Old: str("old"), New: str("new"), All: b})
 		case "use_skill":
 			return readSkill(st.host.a.dir, str("name"))
+		case "browser_open", "browser_read", "browser_click", "browser_type", "browser_back", "browser_screenshot":
+			return browserTool(ctx, st.host.a.dir, call.Name, args)
 		case "ask_user":
 			ans, err := st.ask(ctx, s, "ask", str("question"), "")
 			if err != nil {
@@ -558,6 +569,10 @@ func (st *sessionStore) requestPermissions(ctx context.Context, s *Session, args
 	var items []string
 	cmd, _ := args["commands"].(bool)
 	files, _ := args["file_changes"].(bool)
+	web, _ := args["browser"].(bool)
+	if web {
+		items = append(items, "• use the web browser without asking (open pages, click, type)")
+	}
 	if cmd {
 		items = append(items, "• run commands without asking")
 	}
@@ -600,6 +615,7 @@ func (st *sessionStore) requestPermissions(ctx context.Context, s *Session, args
 	}
 	s.mu.Lock()
 	s.Grants.Run = s.Grants.Run || cmd
+	s.Grants.Browser = s.Grants.Browser || web
 	s.Grants.Write = s.Grants.Write || files
 	s.Grants.Read = true
 	for _, n := range conns {
