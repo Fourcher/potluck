@@ -689,6 +689,10 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 			nums[i] = strconv.Itoa(l)
 		}
 		args = append(args, "-ot", `blk\.(`+strings.Join(nums, "|")+`)\.ffn_[a-z_]*exps=CPU`)
+		// And work on them where they are. By default the engine copies experts kept in memory
+		// to the card for long prompts, and reserves room for that on the card: 15.9 GB for
+		// Inkling 2 at 32k on a 4 GB card (measured), so the model could not start at all.
+		args = append(args, "--no-op-offload")
 	}
 	// The helpers must be named before the device list: the engine only knows the names
 	// RPC0, RPC1, ... once it has read --rpc.
