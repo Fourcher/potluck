@@ -176,7 +176,7 @@ func (h *Host) chatState(owner bool) map[string]any {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c := h.cluster
-	out := map[string]any{"version": version, "phase": c.Phase, "error": c.Error, "steps": c.Steps, "owner": owner, "ctx": h.lastCtx, "pauseWhy": h.pauseWhy}
+	out := map[string]any{"version": version, "phase": c.Phase, "error": c.Error, "steps": c.Steps, "owner": owner, "ctx": h.lastCtx, "pauseWhy": h.pauseWhy, "vision": h.vision}
 	if c.Phase == "idle" && h.asleep != nil {
 		// Let go after a while unused; the next message loads it again.
 		out["phase"], c.Model = "resting", h.asleep

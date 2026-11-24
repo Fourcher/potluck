@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -63,12 +64,18 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 		if len(msg.Calls) == 0 {
 			return
 		}
+		var pics []string
 		for _, call := range msg.Calls {
 			if ctx.Err() != nil {
 				return
 			}
 			res := st.runTool(ctx, s, call)
+			pics = append(pics, res.Images...)
+			res.Images = nil
 			st.addMsg(s, res)
+		}
+		if len(pics) > 0 { // a tool result cannot carry a picture: hand it over right after
+			st.addMsg(s, SMsg{Role: "user", Content: "(The screenshot you asked for.)", Images: pics})
 		}
 		s.mu.Lock()
 		s.Steps++
@@ -187,7 +194,7 @@ func (st *sessionStore) tools(ctx context.Context, s *Session) []toolSpec {
 		spec("ask_user", "Ask the user something only they can decide. They may be away; they can answer from their phone. Offer a clear yes/no question where you can.",
 			`{"type":"object","properties":{"question":{"type":"string"}},"required":["question"]}`),
 		spec("request_permissions", "Ask the user once, up front, to approve what this task will need, so it is not held up later.",
-			`{"type":"object","properties":{"reason":{"type":"string","description":"One or two sentences: what you are about to do"},"commands":{"type":"boolean","description":"Run commands without asking"},"file_changes":{"type":"boolean","description":"Change and create files without asking"},"browser":{"type":"boolean","description":"Use the web browser without asking"},"connectors":{"type":"array","items":{"type":"string"},"description":"Connectors to use without asking"},"apps":{"type":"array","items":{"type":"string"},"description":"Apps you will control (macOS asks once per app; this asks now)"}},"required":["reason"]}`),
+			`{"type":"object","properties":{"reason":{"type":"string","description":"One or two sentences: what you are about to do"},"commands":{"type":"boolean","description":"Run commands without asking"},"file_changes":{"type":"boolean","description":"Change and create files without asking"},"browser":{"type":"boolean","description":"Use the web browser without asking"},"screen":{"type":"boolean","description":"Look at the screen and use the mouse and keyboard without asking"},"connectors":{"type":"array","items":{"type":"string"},"description":"Connectors to use without asking"},"apps":{"type":"array","items":{"type":"string"},"description":"Apps you will control (macOS asks once per app; this asks now)"}},"required":["reason"]}`),
 	}
 	if runtime.GOOS == "darwin" {
 		t = append(t, spec("run_applescript", "Run an AppleScript to control apps on the user's Mac (Finder, Safari, Mail, Notes, System Events for clicks and keystrokes).",
@@ -209,6 +216,17 @@ func (st *sessionStore) tools(ctx context.Context, s *Session) []toolSpec {
 			spec("browser_type", "Type into a field on the page, by its number; submit presses Enter afterwards.", `{"type":"object","properties":{"ref":{"type":"integer"},"text":{"type":"string"},"submit":{"type":"boolean"}},"required":["ref","text"]}`),
 			spec("browser_back", "Go back to the previous page.", `{"type":"object","properties":{}}`),
 			spec("browser_screenshot", "Save a picture of the page (for the user to look at).", `{"type":"object","properties":{}}`))
+	}
+	st.host.mu.Lock()
+	sees := st.host.vision
+	st.host.mu.Unlock()
+	if sees {
+		t = append(t,
+			spec("screen_look", "Take a screenshot of the user's screen and look at it. Its points are the points to click.", `{"type":"object","properties":{}}`),
+			spec("screen_click", "Click at a point on the screen (from the latest screenshot).", `{"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"},"button":{"type":"string","enum":["left","right"]},"clicks":{"type":"integer","description":"2 for a double click"}},"required":["x","y"]}`),
+			spec("screen_type", "Type text into whatever has the keyboard focus.", `{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}`),
+			spec("screen_key", "Press keys, e.g. enter, tab, escape, cmd+s, ctrl+shift+t.", `{"type":"object","properties":{"keys":{"type":"string"}},"required":["keys"]}`),
+			spec("screen_scroll", "Scroll at a point: positive amount scrolls down, negative up.", `{"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"},"amount":{"type":"integer"}},"required":["x","y"]}`))
 	}
 	if cx := loadContContext(st.host.a.dir); len(cx.Skills) > 0 {
 		t = append(t, spec("use_skill", "Load one of the user's skills (listed in your instructions) and get its full instructions.", `{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`))
@@ -279,9 +297,29 @@ func (st *sessionStore) apiMessages(s *Session) []map[string]any {
 	out := []map[string]any{{"role": "system", "content": st.systemPrompt(s)}}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, m := range s.Messages {
+	lastPic := -1 // only the newest picture is sent: each one costs many tokens
+	for i, m := range s.Messages {
+		if len(m.Images) > 0 {
+			lastPic = i
+		}
+	}
+	for i, m := range s.Messages {
 		switch m.Role {
 		case "user":
+			if len(m.Images) > 0 {
+				if i != lastPic {
+					out = append(out, map[string]any{"role": "user", "content": m.Content + " (an earlier screenshot was here)"})
+					continue
+				}
+				parts := []map[string]any{{"type": "text", "text": m.Content}}
+				for _, p := range m.Images {
+					if uri, err := imageDataURI(p); err == nil {
+						parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]string{"url": uri}})
+					}
+				}
+				out = append(out, map[string]any{"role": "user", "content": parts})
+				continue
+			}
 			out = append(out, map[string]any{"role": "user", "content": m.Content})
 		case "assistant":
 			a := map[string]any{"role": "assistant", "content": m.Content}
@@ -524,6 +562,12 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 			return readSkill(st.host.a.dir, str("name"))
 		case "browser_open", "browser_read", "browser_click", "browser_type", "browser_back", "browser_screenshot":
 			return browserTool(ctx, st.host.a.dir, call.Name, args)
+		case "screen_look", "screen_click", "screen_type", "screen_key", "screen_scroll":
+			text, pic, err := screenTool(ctx, st.host.a.dir, call.Name, args)
+			if pic != "" {
+				res.Images = []string{pic}
+			}
+			return text, err
 		case "ask_user":
 			ans, err := st.ask(ctx, s, "ask", str("question"), "")
 			if err != nil {
@@ -570,6 +614,10 @@ func (st *sessionStore) requestPermissions(ctx context.Context, s *Session, args
 	cmd, _ := args["commands"].(bool)
 	files, _ := args["file_changes"].(bool)
 	web, _ := args["browser"].(bool)
+	scr, _ := args["screen"].(bool)
+	if scr {
+		items = append(items, "• look at the screen and use the mouse and keyboard without asking (macOS will ask you for Screen Recording and Accessibility now)")
+	}
 	if web {
 		items = append(items, "• use the web browser without asking (open pages, click, type)")
 	}
@@ -616,6 +664,7 @@ func (st *sessionStore) requestPermissions(ctx context.Context, s *Session, args
 	s.mu.Lock()
 	s.Grants.Run = s.Grants.Run || cmd
 	s.Grants.Browser = s.Grants.Browser || web
+	s.Grants.Screen = s.Grants.Screen || scr
 	s.Grants.Write = s.Grants.Write || files
 	s.Grants.Read = true
 	for _, n := range conns {
@@ -634,6 +683,10 @@ func (st *sessionStore) requestPermissions(ctx context.Context, s *Session, args
 		st.keepGrants(proj.Root, &g)
 	}
 	// Ask macOS's own questions now, while the person is here, instead of in the middle of the night.
+	if scr && runtime.GOOS == "darwin" {
+		_, _, _, _ = screenshot(ctx, filepath.Join(st.host.a.dir, "screen-shots"))                                   // Screen Recording
+		_, _ = screenRun(ctx, "osascript", "-e", `tell application "System Events" to get name of first process`) // Accessibility / Automation
+	}
 	var primed []string
 	if runtime.GOOS == "darwin" {
 		for _, app := range apps {

@@ -102,6 +102,7 @@ type Host struct {
 	sessOnce sync.Once
 	sess     *sessionStore // agent sessions (sessions.go)
 	pushErr  string        // the last problem sending a phone alert
+	vision   bool          // the running model can see images
 	guardWhy string        // why the guard stopped the model, shown instead of "stopped"
 	pending  map[string]*Pending
 	tunnels  map[string]chan net.Conn
@@ -1067,6 +1068,9 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 	}
 	h.mu.Lock()
 	info.PlanCtx = ctxSize // plans count the context cache for this size
+	if model.Vision != nil {
+		info.OtherBytes += model.Vision.Size // the image add-on is held by the computer running the model
+	}
 	info.WorkSeen = h.cfg.Get().WorkSeen[model.File+"@"+strconv.Itoa(ctxSize)]
 	h.lastInfo = info
 	h.mu.Unlock()
@@ -1263,7 +1267,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		// on the processor (2 words per second instead of 18.5, measured on the Mac mini).
 		ngl = 999
 	}
-	req := StartHeadReq{File: model.File, Workers: plan.WorkerOrder, NGL: ngl, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream, DenseBytes: info.denseBytes(),
+	req := StartHeadReq{File: model.File, Vision: model.Vision, Workers: plan.WorkerOrder, NGL: ngl, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream, DenseBytes: info.denseBytes(),
 		ExpertCPU: plan.ExpertCPU,
 		// Every hardware thread only where it measured faster: pooled, with the card holding
 		// the trunk of all the head's layers (3.8 against 3.3 words/s). With whole layers on
@@ -1283,6 +1287,9 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			if st.Ready {
 				// Trust, but verify: the engine's own report must show the helpers holding
 				// something when the plan gave them layers.
+				h.mu.Lock()
+				h.vision = st.Vision
+				h.mu.Unlock()
 				if w := workReported(st.FullLog); w > 0 {
 					h.cfg.Update(func(c *Config) {
 						if c.WorkSeen == nil {
@@ -1398,6 +1405,7 @@ func (h *Host) Stop() {
 	h.stopAll()
 	h.mu.Lock()
 	h.cluster = ClusterState{Phase: "idle"}
+	h.vision = false
 	h.mu.Unlock()
 }
 

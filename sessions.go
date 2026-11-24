@@ -35,8 +35,8 @@ type Policy struct {
 
 // Grants are standing yeses given during a session ("yes, and don't ask again").
 type Grants struct {
-	Read, Write, Run, Browser bool
-	Connectors                map[string]bool
+	Read, Write, Run, Browser, Screen bool
+	Connectors                        map[string]bool
 }
 
 type SMsg struct {
@@ -45,8 +45,9 @@ type SMsg struct {
 	Reasoning string      `json:"reasoning,omitempty"`
 	Calls     []SToolCall `json:"calls,omitempty"`
 	CallID    string      `json:"callId,omitempty"`
-	Name      string      `json:"name,omitempty"`  // tool messages: which tool
-	State     string      `json:"state,omitempty"` // tool messages: ok | error | denied
+	Name      string      `json:"name,omitempty"`   // tool messages: which tool
+	State     string      `json:"state,omitempty"`  // tool messages: ok | error | denied
+	Images    []string    `json:"images,omitempty"` // user messages: pictures for a model that can see (file paths)
 	At        time.Time   `json:"at"`
 }
 
@@ -359,6 +360,23 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 		default:
 			title, detail = "Use the browser?", call.Name
 		}
+	case strings.HasPrefix(call.Name, "screen_"):
+		if pol.Commands == "auto" || g.Screen {
+			return "", nil
+		}
+		kind = "screen"
+		switch call.Name {
+		case "screen_look":
+			title = "Look at your screen?"
+		case "screen_click":
+			title, detail = "Click on your screen?", fmt.Sprintf("at %v, %v", args["x"], args["y"])
+		case "screen_type":
+			title, detail = "Type on your screen?", trimTo(str("text"), 500)
+		case "screen_key":
+			title, detail = "Press keys?", str("keys")
+		default:
+			title = "Scroll on your screen?"
+		}
 	case strings.HasPrefix(call.Name, "mcp__"):
 		server := strings.SplitN(strings.TrimPrefix(call.Name, "mcp__"), "__", 2)[0]
 		if g.Connectors[server] || pol.Commands == "auto" {
@@ -386,6 +404,8 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 			s.Grants.Read = true
 		case "browser":
 			s.Grants.Browser = true
+		case "screen":
+			s.Grants.Screen = true
 		case "connector":
 			if s.Grants.Connectors == nil {
 				s.Grants.Connectors = map[string]bool{}

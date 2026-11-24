@@ -116,6 +116,7 @@ type Agent struct {
 	gpuDev    string // the engine's name for this computer's graphics card, "" if none is used
 	rpc, head *proc
 	guard     *GuardEvent // the guard's last stop (guard.go)
+	vision    bool        // the model running here was loaded with its image add-on
 	rpcPort   int
 	apiPort   int
 	listeners []net.Listener
@@ -260,11 +261,12 @@ type (
 		Items []SeedItem `json:"items"`
 	}
 	StartHeadReq struct {
-		File    string   `json:"file"`
-		Workers []string `json:"workers"` // node ids, in --rpc order
-		NGL     int      `json:"ngl"`
-		Split   string   `json:"split"`
-		Ctx     int      `json:"ctx"`
+		File    string     `json:"file"`
+		Vision  *ModelPart `json:"vision,omitempty"` // the image add-on to fetch (if not here yet) and load
+		Workers []string   `json:"workers"`          // node ids, in --rpc order
+		NGL     int        `json:"ngl"`
+		Split   string     `json:"split"`
+		Ctx     int        `json:"ctx"`
 		// RPCDevices is how many devices the helpers offer in total (a helper with a
 		// graphics card offers two).
 		RPCDevices int `json:"rpcDevices"`
@@ -295,6 +297,8 @@ type (
 		// Guard: the last time the guard stopped an engine here to keep this computer from
 		// freezing, and why (see guard.go).
 		Guard *GuardEvent `json:"guard,omitempty"`
+		// Vision: the model running here can see images.
+		Vision bool `json:"vision,omitempty"`
 	}
 )
 
@@ -638,6 +642,17 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	if _, err := os.Stat(model); err != nil {
 		return nil, errors.New("the model file is not on this computer")
 	}
+	// The image add-on: from the model's repository, or one lying next to a model file found on
+	// this computer (LM Studio and others keep them together).
+	mmproj := ""
+	if in.Vision != nil && in.Vision.URL != "" {
+		dst := filepath.Join(a.dir, "models", filepath.Base(in.Vision.File))
+		if err := downloadFile(context.Background(), in.Vision.URL, dst, in.Vision.Size, in.Vision.SHA256, 8, nil); err == nil {
+			mmproj = dst
+		}
+	} else if found, _ := filepath.Glob(filepath.Join(filepath.Dir(model), "mmproj*.gguf")); len(found) > 0 {
+		mmproj = found[0]
+	}
 	// One local port per helper. The engine connects to these; each connection is carried
 	// to that helper through the main computer's encrypted link.
 	var rpcList []string
@@ -679,6 +694,16 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 		"--host", "127.0.0.1", "--port", strconv.Itoa(api), "-fit", "off", "-ngl", strconv.Itoa(in.NGL), "-lv", "4",
 		// Name the model in API answers by its file name, not the full path on this disk.
 		"--alias", strings.TrimSuffix(filepath.Base(model), ".gguf")}
+	if mmproj != "" {
+		args = append(args, "--mmproj", mmproj)
+		a.mu.Lock()
+		a.vision = true
+		a.mu.Unlock()
+	} else {
+		a.mu.Lock()
+		a.vision = false
+		a.mu.Unlock()
+	}
 	if in.Split != "" && in.NGL > 0 {
 		args = append(args, "-ts", in.Split)
 	}
@@ -790,7 +815,7 @@ func (a *Agent) startStream(in StartHeadReq) (any, error) {
 // Status reports what is running here.
 func (a *Agent) Status() AgentStatus {
 	a.mu.Lock()
-	s := AgentStatus{RPC: a.rpc.Running(), Head: a.head.Running(), Msg: a.status, Done: a.done, Total: a.total, Guard: a.guard}
+	s := AgentStatus{RPC: a.rpc.Running(), Head: a.head.Running(), Msg: a.status, Done: a.done, Total: a.total, Guard: a.guard, Vision: a.vision}
 	if len(a.links) > 0 {
 		s.Links = map[string]string{}
 		for k, v := range a.links {

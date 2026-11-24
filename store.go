@@ -27,6 +27,9 @@ type ModelRef struct {
 	Title  string      `json:"title"`
 	Parts  []ModelPart `json:"parts,omitempty"` // every file, when the model comes as several
 	Node   string      `json:"node,omitempty"`  // local: the computer whose disk holds the file
+	// Vision is the model's image add-on (an "mmproj" file from the same repository), loaded
+	// with it on the computer running the model so it can see pictures and screenshots.
+	Vision *ModelPart `json:"vision,omitempty"`
 }
 
 // ModelPart is one file of a model that is split across several.
@@ -315,6 +318,19 @@ func resolveModel(ctx context.Context, m *ModelRef) error {
 			return "https://huggingface.co/" + m.Repo + "/resolve/main/" + (&url.URL{Path: path}).EscapedPath()
 		}
 		if tree, err := hfTree(m.Repo); err == nil {
+			m.Vision = nil
+			for _, pref := range []string{"f16", "bf16", ""} { // full precision first: it is small
+				for _, e := range tree {
+					low := strings.ToLower(e.Path)
+					if m.Vision == nil && strings.Contains(low, "mmproj") && strings.HasSuffix(low, pref+".gguf") {
+						sha := ""
+						if e.LFS != nil {
+							sha = e.LFS.OID
+						}
+						m.Vision = &ModelPart{File: e.Path[strings.LastIndex(e.Path, "/")+1:], URL: hfURL(e.Path), Size: e.Size, SHA256: sha}
+					}
+				}
+			}
 			key := splitRe.ReplaceAllString(m.File, ".gguf")
 			split := key != m.File
 			m.Parts, m.Size = nil, 0
