@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -30,6 +31,15 @@ type CrewMember struct {
 	Error    string    `json:"error,omitempty"`
 	Since    time.Time `json:"since"`
 	bytes    int64     // memory it holds on its computer
+}
+
+// CrewSaved is a crew member as kept in the settings, so it comes back when Potluck or its
+// computer restarts (engines stop with Potluck; the person's choice of crew should not).
+type CrewSaved struct {
+	Name  string   `json:"name"`
+	Node  string   `json:"node"`
+	Model ModelRef `json:"model"`
+	Ctx   int      `json:"ctx"`
 }
 
 var crewNameClean = regexp.MustCompile(`[^a-z0-9]+`)
@@ -112,6 +122,10 @@ func (h *Host) StartCrew(name, node string, model ModelRef, ctxSize int) (string
 	}
 	h.crew[name] = c
 	h.mu.Unlock()
+	h.cfg.Update(func(cf *Config) {
+		cf.Crew = slices.DeleteFunc(cf.Crew, func(s CrewSaved) bool { return s.Name == name })
+		cf.Crew = append(cf.Crew, CrewSaved{Name: name, Node: node, Model: model, Ctx: ctxSize})
+	})
 	go func() {
 		err := h.startCrew(c)
 		h.mu.Lock()
@@ -221,6 +235,9 @@ func (h *Host) StopCrew(name string) error {
 	c := h.crew[name]
 	delete(h.crew, name)
 	h.mu.Unlock()
+	h.cfg.Update(func(cf *Config) {
+		cf.Crew = slices.DeleteFunc(cf.Crew, func(s CrewSaved) bool { return s.Name == name })
+	})
 	if c == nil {
 		return errors.New("no crew member by that name")
 	}
@@ -264,5 +281,58 @@ func (h *Host) crewWatch() {
 			}
 			h.mu.Unlock()
 		}
+	}
+}
+
+// crewKeep brings saved crew members back: after Potluck restarts, after their computer
+// restarts, or when their computer comes back to lending. A member that fails three times in a
+// row (out of memory, a broken file) is left stopped with its error, not retried forever; it
+// gets three more tries when its computer reconnects.
+func (h *Host) crewKeep() {
+	type tries struct {
+		fails int
+		seen  time.Time // the failure already counted (by when that start began)
+		last  time.Time
+	}
+	state := map[string]*tries{}
+	online := map[string]bool{}
+	time.Sleep(30 * time.Second)
+	for {
+		for _, s := range h.cfg.Get().Crew {
+			t := state[s.Name]
+			if t == nil {
+				t = &tries{}
+				state[s.Name] = t
+			}
+			h.mu.Lock()
+			n := h.nodes[s.Node]
+			up := n != nil && n.Online
+			if up && !online[s.Node] {
+				t.fails = 0 // the computer came (back) online: worth trying again
+			}
+			online[s.Node] = up
+			var phase string
+			var since time.Time
+			if c := h.crew[s.Name]; c != nil {
+				phase, since = c.Phase, c.Since
+			}
+			h.mu.Unlock()
+			switch {
+			case phase == "running" && time.Since(since) > 10*time.Minute:
+				t.fails = 0
+				continue
+			case phase == "starting" || phase == "running":
+				continue
+			case phase == "error" && !since.Equal(t.seen):
+				t.fails++
+				t.seen = since
+			}
+			if !up || t.fails >= 3 || time.Since(t.last) < 2*time.Minute {
+				continue
+			}
+			t.last = time.Now()
+			_, _ = h.StartCrew(s.Name, s.Node, s.Model, s.Ctx) // a refusal (busy, not lending) is tried again later
+		}
+		time.Sleep(30 * time.Second)
 	}
 }

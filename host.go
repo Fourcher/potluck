@@ -205,6 +205,7 @@ func (h *Host) Run() error {
 	go h.shareLoop()
 	go h.helperLoop()
 	go h.crewWatch()
+	go h.crewKeep()
 	return nil
 }
 

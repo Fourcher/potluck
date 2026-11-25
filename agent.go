@@ -58,6 +58,8 @@ type Config struct {
 	// EnginePath: "" = use an engine found on this computer when it is new enough and the
 	// model runs here alone; "potluck" = always Potluck's own; else that llama-server.
 	EnginePath string `json:"enginePath,omitempty"`
+	// Crew: the crew members the person started (crew.go), brought back after a restart.
+	Crew []CrewSaved `json:"crew,omitempty"`
 	// HFKey: the person's own Hugging Face key, for gated models (hfkey.go). Main only.
 	HFKey  string `json:"hfKey,omitempty"`
 	Single bool   `json:"single,omitempty"` // set up for one computer
