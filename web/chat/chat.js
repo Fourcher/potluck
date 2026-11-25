@@ -1151,8 +1151,8 @@ function switchSheet(x) {
   sheet(`<h3>${x.running ? "Reload" : "Switch to"} ${esc(x.title || x.file)}</h3>
     <p class="muted">${x.running ? "Reloading takes a minute or two." : "The model that is running now is stopped first. Loading takes a few minutes; you can watch the progress above the chat."} Chats are kept.</p>
     <label class="f" for="sw-ctx">Conversation memory</label>
-    <select id="sw-ctx">${[4096, 8192, 16384, 32768].map(n => `<option value="${n}" ${n === cur ? "selected" : ""}>${num(n)} tokens${n === 4096 ? " (normal)" : n === 8192 ? " (long)" : n === 16384 ? " (very long)" : " (longest, needs more memory)"}</option>`).join("")}</select>
-    <p class="muted small">A longer memory fits bigger files and longer chats, and uses more of each computer's memory.</p>
+    <select id="sw-ctx"><option value="0" selected>Automatic: as long as fits without slowing down</option>${[8192, 16384, 32768, 65536, 131072].map(n => `<option value="${n}">${num(n)} tokens</option>`).join("")}</select>
+    <p class="muted small">A longer memory fits bigger files and longer chats, and uses more of each computer's memory. Now: ${num(cur)} tokens.</p>
     <div class="foot"><button class="btn ghost" data-a="close">Cancel</button><button class="btn" data-a="do-switch">${x.running ? "Reload" : "Switch"}</button></div>`,
     { "do-switch": async () => { const ctx = +$("#sw-ctx").value; closeSheet(); try { await api("/potluck/switch", { file: x.file, node: x.node || "", ctx }); toast("Loading " + (x.title || x.file) + "…"); poll(); } catch (e) { toast("Could not switch: " + e.message); } } });
 }

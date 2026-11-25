@@ -158,7 +158,7 @@ func (st *sessionStore) runHelperTool(ctx context.Context, s *Session, name stri
 				solo = p.Head
 			}
 		}
-		if err := h.Start(m, 8192, solo); err != nil {
+		if err := h.Start(m, 0, solo); err != nil { // 0: chosen to fit (autoCtx)
 			return "", err
 		}
 		return fmt.Sprintf("Started: downloading %s %s (%s), then loading it %s. This takes a while; get_status shows the progress.", repo, f.Quant, humanBytes(f.Size), how), nil

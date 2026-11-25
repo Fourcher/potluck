@@ -60,13 +60,12 @@ func (h *Host) QuickStart(ctx context.Context) (ModelRef, error) {
 	if err != nil {
 		return ModelRef{}, errors.New("could not read that model: " + err.Error())
 	}
-	const quickCtx = 8192
-	info.PlanCtx = quickCtx
+	info.PlanCtx = 8192 // judged at the usual size; the start picks the size that fits
 	solo := ""
 	if f.Verdict == "one" {
 		if p := h.bestSolo(info, ""); p != nil {
 			solo = p.Head
 		}
 	}
-	return m, h.Start(m, quickCtx, solo)
+	return m, h.Start(m, 0, solo) // 0: the conversation memory is chosen to fit (autoCtx)
 }

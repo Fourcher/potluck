@@ -481,7 +481,7 @@ function viewSheet() {
   const p = sheet.plan, solo = sheet.solo, stream = sheet.stream, m = sheet.model, info = sheet.info;
   const isLocal = m.source === "local";
   const go = isLocal ? "Run it" : "Download and run";
-  const ctx = `<label class="small">Conversation memory <select id="ctx"><option value="4096">Short (4,096 tokens)</option><option value="8192" selected>Normal (8,192)</option><option value="16384">Very long (16,384)</option></select></label>`;
+  const ctx = `<label class="small">Conversation memory <select id="ctx"><option value="0" selected>Automatic (as long as fits without slowing down)</option><option value="8192">8,192 tokens</option><option value="16384">16,384</option><option value="32768">32,768</option><option value="65536">65,536</option></select></label>`;
   let body;
   if (p.fits) {
     const verdict = p.needsPool ? `<div class="banner" style="border-color:var(--ok);background:var(--ok-soft)"><b>Too big for the memory of any one of your computers. Runs across ${p.machines} of them together.</b></div>`
@@ -717,13 +717,13 @@ const actions = {
   planurl() { const u = $("#url").value.trim(); if (u) openPlan({ source: "url", url: u }); },
   closesheet(t, e) { if (e.target.closest("[data-stop]") && !e.target.closest("[data-a=closesheet]:not(.sheet)")) return; sheet = null; draw(true); },
   start(t) {
-    const m = sheet.model, ctx = +($("#ctx") ? $("#ctx").value : 4096), solo = t.dataset.solo || "";
+    const m = sheet.model, ctx = +($("#ctx") ? $("#ctx").value : 0), solo = t.dataset.solo || "";
     sheet = null; tab = "run"; location.hash = tab;
     act(() => api("/api/start", { ...m, ctx, solo }));
   },
   again() {
     const c = S.main.cluster, m = c.model || S.main.lastModel;
-    if (m) { logText = ""; act(() => api("/api/start", { ...m, ctx: S.main.lastCtx || 8192, solo: c.plan && c.plan.stream ? "stream:" + c.plan.head : c.plan && c.plan.solo ? c.plan.head : "" })); }
+    if (m) { logText = ""; act(() => api("/api/start", { ...m, ctx: S.main.lastCtx || 0, solo: c.plan && c.plan.stream ? "stream:" + c.plan.head : c.plan && c.plan.solo ? c.plan.head : "" })); }
   },
   stop() { logText = ""; act(() => api("/api/stop", {})); },
   test() { act(() => api("/api/test", {})); },

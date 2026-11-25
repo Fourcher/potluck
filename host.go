@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -940,6 +941,55 @@ func (h *Host) plan(info *ModelInfo, solo string) *Plan { return h.planFor(info,
 
 // planFor is plan with the head fixed: a model file that is already on a computer has to
 // run from that computer.
+// autoCtx picks the conversation memory when the person has not chosen one: 32k tokens
+// (room for an agent task's tools, files and history) when that fits without the disk, less
+// only when it does not, and more when the plan stays exactly as it is (same placement on the
+// same computers, so no speed is lost), up to what the model was trained for.
+func (h *Host) autoCtx(info *ModelInfo, file, solo, head string) int {
+	const floor = 32768
+	try := func(c int) *Plan {
+		m := *info
+		m.PlanCtx = c
+		m.WorkSeen = h.cfg.Get().WorkSeen[workKey(file, c)]
+		return h.planFor(&m, solo, head)
+	}
+	good := func(p *Plan) bool { return p.Fits && p.Overflow == 0 }
+	limit := info.CtxTrain
+	if limit <= 0 {
+		limit = floor
+	}
+	best, bestPlan := 0, (*Plan)(nil)
+	for _, c := range []int{floor, 16384, 8192} {
+		if c > limit {
+			continue
+		}
+		if p := try(c); good(p) {
+			best, bestPlan = c, p
+			break
+		}
+	}
+	if best == 0 {
+		return min(8192, limit) // nothing fits well; the plan at the usual size says why
+	}
+	if best < floor {
+		return best
+	}
+	for c := floor * 2; c <= limit && c <= 1<<18; c *= 2 {
+		p := try(c)
+		if !good(p) || !samePlacement(p, bestPlan) {
+			break
+		}
+		best = c
+	}
+	return best
+}
+
+// samePlacement: the two plans put the same layers on the same devices in the same way.
+func samePlacement(a, b *Plan) bool {
+	return a.Head == b.Head && a.NGL == b.NGL && a.KVKeyQ8 == b.KVKeyQ8 && a.CardTrunk == b.CardTrunk &&
+		slices.Equal(a.WorkerOrder, b.WorkerOrder) && slices.Equal(a.DevLayers, b.DevLayers) && slices.Equal(a.ExpertCPU, b.ExpertCPU)
+}
+
 func (h *Host) planFor(info *ModelInfo, solo, head string) *Plan {
 	p := h.planForKV(info, solo, head)
 	// Too big as it is: try again with the conversation memory's keys stored in 8 bits
@@ -1100,7 +1150,11 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 	if err != nil {
 		return fmt.Errorf("could not read the model: %w", err)
 	}
+	if ctxSize <= 0 {
+		ctxSize = h.autoCtx(info, model.File, solo, model.Node)
+	}
 	h.mu.Lock()
+	h.lastCtx = ctxSize
 	info.PlanCtx = ctxSize // plans count the context cache for this size
 	if model.Vision != nil {
 		info.OtherBytes += model.Vision.Size // the image add-on is held by the computer running the model

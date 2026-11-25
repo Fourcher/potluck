@@ -276,9 +276,9 @@ func (h *Host) chatSwitch(file, node string, ctx int) error {
 		return errors.New("which model?")
 	}
 	switch ctx {
-	case 4096, 8192, 16384, 32768:
+	case 4096, 8192, 16384, 32768, 65536, 131072:
 	default:
-		ctx = 4096
+		ctx = 0 // chosen to fit (autoCtx)
 	}
 	// A model Potluck downloaded itself is started the way it was first started, so that
 	// helpers fetch their own share instead of receiving it over the local network.
