@@ -90,6 +90,11 @@ type Session struct {
 	mu          sync.Mutex
 	cancel      context.CancelFunc
 	subs        map[chan SEvent]bool
+	// saveMu keeps one save at a time from snapshot to rename (two could land in the wrong
+	// order); deleted, under it, stops a run that is still ending from writing a deleted task
+	// back to disk.
+	saveMu  sync.Mutex
+	deleted bool
 }
 
 type ProjectRef struct {
@@ -135,6 +140,11 @@ func newSessionStore(h *Host, data string) *sessionStore {
 }
 
 func (st *sessionStore) save(s *Session) {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	if s.deleted {
+		return
+	}
 	s.mu.Lock()
 	b, err := json.MarshalIndent(s, "", " ")
 	s.mu.Unlock()

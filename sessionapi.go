@@ -114,8 +114,18 @@ func (st *sessionStore) handle(w http.ResponseWriter, r *http.Request, mutate bo
 		Answer   string `json:"answer"`
 		Policy   Policy `json:"policy"`
 	}
+	// Only reading the task and following it may be a GET: every action changes something,
+	// so it must come as a POST, which carries the chat page's header check above.
+	if action != "" && action != "events" && r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "send this as a POST"})
+		return
+	}
 	if r.Method == http.MethodPost {
-		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&in)
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&in); err != nil && (action == "message" || action == "answer" || action == "policy") {
+			fail(w, errors.New("could not read the request: "+err.Error()))
+			return
+		}
 	}
 	var err error
 	switch {
@@ -154,7 +164,10 @@ func (st *sessionStore) handle(w http.ResponseWriter, r *http.Request, mutate bo
 		st.mu.Lock()
 		delete(st.sessions, s.ID)
 		st.mu.Unlock()
+		s.saveMu.Lock()
+		s.deleted = true // the run still ending saves nothing more
 		err = removeFile(st.dir, s.ID+".json")
+		s.saveMu.Unlock()
 	default:
 		err = errors.New("unknown action")
 	}

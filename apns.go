@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -196,7 +197,10 @@ func (h *Host) apnsSend(env, token, jwt, topic, collapse string, payload []byte)
 	if env == "development" {
 		host = "https://api.sandbox.push.apple.com"
 	}
-	req, _ := http.NewRequest("POST", host+"/3/device/"+token, bytes.NewReader(payload))
+	req, err := http.NewRequest("POST", host+"/3/device/"+url.PathEscape(token), bytes.NewReader(payload))
+	if err != nil {
+		return 0, nil, err
+	}
 	req.Header.Set("authorization", "bearer "+jwt)
 	req.Header.Set("apns-topic", topic)
 	req.Header.Set("apns-push-type", "alert")

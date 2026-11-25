@@ -16,6 +16,7 @@ package main
 // pairing code is showing, and only on home-network and Tailscale addresses.
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
@@ -26,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,6 +48,8 @@ type PhoneKey struct {
 // phoneAPI: the only paths a phone may use besides /phone/*. Everything else on the chat
 // address (the chat page, /potluck/run, /potluck/switch) stays out of reach.
 var phoneAPI = map[string]bool{"/v1/chat/completions": true, "/v1/models": true, "/potluck/state": true, "/potluck/models": true}
+
+var pushTokenRe = regexp.MustCompile(`^[0-9a-fA-F]{64,200}$`)
 
 func hashKey(k string) string {
 	s := sha256.Sum256([]byte(k))
@@ -224,6 +228,11 @@ func (h *Host) phoneHandler() http.Handler {
 				fail(w, err)
 				return
 			}
+			// Apple's device tokens are hex; anything else would end up in the push address.
+			if !pushTokenRe.MatchString(in.Token) || (in.Env != "development" && in.Env != "production") {
+				fail(w, errors.New("that is not a push token from Apple"))
+				return
+			}
 			h.cfg.Update(func(c *Config) {
 				p := c.Phones[id]
 				p.PushToken, p.PushEnv = in.Token, in.Env
@@ -231,7 +240,9 @@ func (h *Host) phoneHandler() http.Handler {
 			})
 			writeJSON(w, map[string]bool{"ok": true})
 		case phoneAPI[r.URL.Path] && chat != nil:
-			chat.ServeHTTP(w, r)
+			// Under the same rules as any other device: Potluck's own models only, never the
+			// person's (often paid) external AI connections, which stay with this computer.
+			chat.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sharedReq{}, true)))
 		default:
 			http.NotFound(w, r)
 		}
