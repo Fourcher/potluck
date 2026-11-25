@@ -9,6 +9,7 @@ package main
 // which models are on disk, and switching models. Switching is only for this computer.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -78,17 +79,7 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 		case r.URL.Path == "/potluck/state" && r.Method == http.MethodGet:
 			writeJSON(w, h.chatState(chatOwner(r)))
 		case r.URL.Path == "/potluck/models" && r.Method == http.MethodGet:
-			ms := h.chatModels()
-			if isShared(r) {
-				own := ms[:0:0]
-				for _, m := range ms {
-					if !strings.HasPrefix(m.File, "ext:") {
-						own = append(own, m)
-					}
-				}
-				ms = own
-			}
-			writeJSON(w, map[string]any{"models": ms, "canSwitch": chatOwner(r)})
+			writeJSON(w, map[string]any{"models": h.visibleModels(isShared(r)), "canSwitch": chatOwner(r)})
 		case r.URL.Path == "/potluck/switch" && r.Method == http.MethodPost:
 			if !chatOwner(r) || r.Header.Get("X-Potluck") != "1" {
 				w.WriteHeader(http.StatusForbidden)
@@ -151,7 +142,7 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 			// How another AI can use Potluck: the same text the control panel copies.
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
-			_, _ = io.WriteString(w, h.aiGuide())
+			_, _ = io.WriteString(w, h.aiGuide(chatOwner(r), isShared(r)))
 		case strings.HasPrefix(r.URL.Path, "/potluck/sessions") || r.URL.Path == "/potluck/questions":
 			if !chatOwner(r) {
 				http.NotFound(w, r)
@@ -167,6 +158,18 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 		case strings.HasPrefix(r.URL.Path, "/potluck/"):
 			http.NotFound(w, r)
 		default:
+			// Read a request's body once, with a limit, so every step below sees all of it
+			// and one that is too big is refused as such (not cut short and sent on).
+			if r.Body != nil && r.Method == http.MethodPost {
+				raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxChatBody))
+				if err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusRequestEntityTooLarge)
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "Potluck: the request is bigger than 64 MB"}})
+					return
+				}
+				r.Body, r.ContentLength = io.NopCloser(bytes.NewReader(raw)), int64(len(raw))
+			}
 			// One thinking switch for every client (thinking.go).
 			thinkingRequest(w, r)
 			// The Potluck helper's own small model, on this computer only.
@@ -230,6 +233,22 @@ func (h *Host) chatState(owner bool) map[string]any {
 }
 
 // chatModels lists the complete model files on every connected computer.
+// visibleModels is the model list a request may see: a shared device sees Potluck's own
+// models only, never the person's external AI connections (often paid, and theirs alone).
+func (h *Host) visibleModels(shared bool) []chatModel {
+	ms := h.chatModels()
+	if !shared {
+		return ms
+	}
+	own := ms[:0:0]
+	for _, m := range ms {
+		if !strings.HasPrefix(m.File, "ext:") {
+			own = append(own, m)
+		}
+	}
+	return own
+}
+
 func (h *Host) chatModels() []chatModel {
 	h.mu.Lock()
 	var running string
@@ -293,3 +312,6 @@ func (h *Host) chatSwitch(file, node string, ctx int) error {
 	}
 	return h.Start(ref, ctx, "")
 }
+
+// maxChatBody: the largest chat request accepted (a long conversation with pictures).
+const maxChatBody = 64 << 20

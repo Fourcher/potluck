@@ -10,9 +10,9 @@ import (
 // the like) so it can use Potluck's model directly. It is written from live state, so the
 // addresses, model names and context size in it are the real ones. The same text is served at
 // /potluck/ai on the chat address, which the AI can read again later for fresh details.
-func (h *Host) aiGuide() string {
-	st := h.chatState(true)
-	models := h.chatModels()
+func (h *Host) aiGuide(owner, fromShare bool) string {
+	st := h.chatState(owner)
+	models := h.visibleModels(fromShare)
 	base := "http://127.0.0.1:" + strconv.Itoa(portChat)
 	shared := ""
 	if h.cfg.Get().ShareChat {

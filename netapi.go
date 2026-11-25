@@ -114,8 +114,14 @@ func (h *Host) shareHandler() http.Handler {
 				q := r.URL.Query()
 				q.Del("key")
 				r.URL.RawQuery = q.Encode()
-				http.Redirect(w, r, r.URL.String(), http.StatusSeeOther)
-				return
+				// A page opened from the link: reload it without the key in the address. A
+				// request from an app (a POST) would lose its body to a redirect: let it
+				// through with the key it brought.
+				if r.Method == http.MethodGet || r.Method == http.MethodHead {
+					http.Redirect(w, r, r.URL.String(), http.StatusSeeOther)
+					return
+				}
+				r.Header.Set("Authorization", "Bearer "+k)
 			}
 		}
 		if !h.shareAllowed(r) {

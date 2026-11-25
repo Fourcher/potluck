@@ -76,9 +76,16 @@ func (app *App) setRole(role string) error {
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Potluck could not write its answer: " + err.Error()})
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(append(b, '\n'))
 }
 
 func fail(w http.ResponseWriter, err error) {
@@ -100,14 +107,7 @@ func (app *App) serveUI() error {
 
 	api := func(path string, fn func(r *http.Request) (any, error)) {
 		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-			// Only pages served by this app may call the API: blocks other websites from
-			// poking at it through the browser.
-			host, _, _ := net.SplitHostPort(r.Host)
-			if host != "127.0.0.1" && host != "localhost" {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-			if r.Method != http.MethodGet && r.Header.Get("X-Potluck") != "1" {
+			if !panelAllowed(r) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
@@ -532,7 +532,7 @@ func (app *App) serveUI() error {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]string{"text": aiMemory(), "guide": h.aiGuide()}, nil
+		return map[string]string{"text": aiMemory(), "guide": h.aiGuide(true, false)}, nil
 	})
 
 	// Bringing an existing AI setup over (continuity.go). Works on any role: it only reads
@@ -925,4 +925,17 @@ func (app *App) state() map[string]any {
 		out["hasToken"] = app.token != nil
 	}
 	return out
+}
+
+// panelAllowed: only Potluck's own panel page may call the panel's API. The address must be
+// this computer's (blocks a rebound domain name), and every request, reading ones included,
+// must carry the X-Potluck header: a web page on another site cannot add it without the
+// browser first asking this server, which never agrees. Without it any page the person opens
+// could stop, unpair or quit Potluck with a plain link or image (several actions need no body).
+func panelAllowed(r *http.Request) bool {
+	host, _, _ := net.SplitHostPort(r.Host)
+	if host != "127.0.0.1" && host != "localhost" {
+		return false
+	}
+	return r.Header.Get("X-Potluck") == "1"
 }

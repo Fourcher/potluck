@@ -99,7 +99,9 @@ func main() {
 	// Already running? Just bring up its window.
 	if c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(portUI), 400*time.Millisecond); err == nil {
 		c.Close()
-		if res, err := (&http.Client{Timeout: 2 * time.Second}).Get(ui + "/api/state"); err == nil {
+		req, _ := http.NewRequest("GET", ui+"/api/state", nil)
+		req.Header.Set("X-Potluck", "1")
+		if res, err := (&http.Client{Timeout: 2 * time.Second}).Do(req); err == nil {
 			res.Body.Close()
 			fmt.Println("Potluck is already running. Opening its control panel.")
 			if desktopShow != nil {

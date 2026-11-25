@@ -15,7 +15,7 @@ let disk = { data: null, loading: false, sums: {} };   // what Potluck keeps on 
 let found = { data: null, loading: false, deep: false, error: "" };   // models other apps keep on this computer
 
 async function api(path, body) {
-  const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify(body) };
+  const opt = body === undefined ? { headers: { "X-Potluck": "1" } } : { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify(body) };
   const r = await fetch(path, opt);
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || "Something went wrong.");
