@@ -1711,9 +1711,16 @@ func (h *Host) stopAll() {
 		go func(id string) {
 			defer wg.Done()
 			// "stop" answers once the engines have exited; the inventory after it is fresh.
-			if h.call(id, "stop", nil, nil, 60*time.Second) == nil {
-				h.refreshNode(id)
+			if err := h.call(id, "stop", nil, nil, 60*time.Second); err != nil {
+				// Its engine may still hold memory there: say so on its card.
+				h.mu.Lock()
+				if n := h.nodes[id]; n != nil {
+					n.Status = "Could not stop its AI engine: " + err.Error()
+				}
+				h.mu.Unlock()
+				return
 			}
+			h.refreshNode(id)
 		}(id)
 	}
 	wg.Wait()

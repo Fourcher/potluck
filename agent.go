@@ -844,6 +844,9 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	}
 	api, err := freePort()
 	if err != nil {
+		for _, l := range listeners {
+			l.Close()
+		}
 		return nil, err
 	}
 	info := a.Info()

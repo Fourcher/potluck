@@ -59,10 +59,16 @@ func (h *Host) guardTripped(id string, ev *GuardEvent, plan *Plan) {
 	}
 	next := ""
 	var ceil *memCeiling
-	if held > 0 && plan.LayerBytes > 0 && held > plan.LayerBytes {
-		// One layer less than what it could not hold, for six hours.
-		ceil = &memCeiling{Bytes: held - plan.LayerBytes, Until: time.Now().Add(6 * time.Hour)}
-		next = fmt.Sprintf(" Next time Potluck gives %s at most %s (it ran out holding %s); start the model again to try.", name, humanBytes(ceil.Bytes), humanBytes(held))
+	if held > 0 && plan.LayerBytes > 0 {
+		// One layer less than what it could not hold, for six hours. It ran out holding a
+		// single layer: it gets none (otherwise the next start gives it the same and it runs
+		// out again).
+		ceil = &memCeiling{Bytes: max(0, held-plan.LayerBytes), Until: time.Now().Add(6 * time.Hour)}
+		if ceil.Bytes > 0 {
+			next = fmt.Sprintf(" Next time Potluck gives %s at most %s (it ran out holding %s); start the model again to try.", name, humanBytes(ceil.Bytes), humanBytes(held))
+		} else {
+			next = fmt.Sprintf(" For the next six hours Potluck leaves %s out of this model (it ran out holding a single part of it).", name)
+		}
 	}
 	h.guardWhy = fmt.Sprintf("%s: %s. Potluck stopped the model so %s would not freeze.%s", name, ev.Why, name, next)
 	h.mu.Unlock()

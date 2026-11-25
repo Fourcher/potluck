@@ -55,8 +55,9 @@ func (h *Host) QuickStart(ctx context.Context) (ModelRef, error) {
 		}
 	}
 	seen := map[string]bool{}
-	reached := false
+	reached, fitted := false, false
 	var smallest int64
+	var lastErr error // a lookup that failed for a model that would have fitted
 	for _, repo := range repos {
 		if seen[repo] {
 			continue
@@ -80,12 +81,15 @@ func (h *Host) QuickStart(ctx context.Context) (ModelRef, error) {
 		if !ok {
 			continue
 		}
+		fitted = true
 		m := ModelRef{Source: "hf", Repo: repo, File: f.File}
 		if err := resolveModel(ctx, &m); err != nil {
+			lastErr = err
 			continue
 		}
 		info, err := h.modelInfo(ctx, &m)
 		if err != nil {
+			lastErr = err
 			continue
 		}
 		info.PlanCtx = 8192 // judged at the usual size; the start picks the size that fits
@@ -96,6 +100,12 @@ func (h *Host) QuickStart(ctx context.Context) (ModelRef, error) {
 			}
 		}
 		return m, h.Start(m, 0, solo) // 0: the conversation memory is chosen to fit (autoCtx)
+	}
+	if ctx.Err() != nil {
+		return ModelRef{}, errors.New("looking for a model that fits took too long; try again")
+	}
+	if fitted && lastErr != nil {
+		return ModelRef{}, fmt.Errorf("a model that fits was found, but could not be read: %w", lastErr)
 	}
 	if !reached {
 		return ModelRef{}, errors.New("could not reach Hugging Face to fetch the model list. Check the internet connection and try again")

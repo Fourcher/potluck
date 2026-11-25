@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Policy is what a session may do without asking.
@@ -226,8 +227,8 @@ func (st *sessionStore) send(s *Session, text string) error {
 
 func titleOf(text string, p *ProjectRef) string {
 	t := strings.Join(strings.Fields(text), " ")
-	if len(t) > 48 {
-		t = t[:46] + "…"
+	if r := []rune(t); len(r) > 48 {
+		t = string(r[:46]) + "…" // whole characters, never half of one
 	}
 	if p != nil {
 		return p.Name + ": " + t
@@ -304,11 +305,15 @@ func (st *sessionStore) ask(ctx context.Context, s *Session, kind, title, detail
 	case <-ctx.Done():
 		ans = "no"
 	}
+	// A question is never changed once shown (watchers read it without the lock): the
+	// answered one is a copy.
+	done := *q
+	done.Answer = ans
 	s.mu.Lock()
-	q.Answer, s.Question = ans, nil
+	s.Question = nil
 	s.mu.Unlock()
 	s.setStatus("working", "")
-	s.emit(SEvent{Type: "question", Question: q})
+	s.emit(SEvent{Type: "question", Question: &done})
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}
@@ -434,11 +439,15 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 	return "The user did not allow that, and said: " + ans, nil
 }
 
+// trimTo keeps about n bytes of s, ending on a whole character.
 func trimTo(s string, n int) string {
-	if len(s) > n {
-		return s[:n] + "\n…"
+	if len(s) <= n {
+		return s
 	}
-	return s
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "\n…"
 }
 
 // projectGrants are approvals kept for a project across sessions.

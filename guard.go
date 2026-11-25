@@ -39,7 +39,9 @@ type GuardEvent struct {
 
 func (a *Agent) guardLoop() {
 	bad := 0
-	logOffsets := map[string]int64{}
+	// How far each engine's log has been read, by engine (not by file name: a new engine
+	// writes a new log at the same path, and must be read from its start).
+	logOffsets := map[*proc]int64{}
 	for {
 		time.Sleep(time.Second)
 		a.mu.Lock()
@@ -55,8 +57,17 @@ func (a *Agent) guardLoop() {
 		}
 		if !rpc.Running() && !head.Running() && !auxUp {
 			bad = 0
-			logOffsets = map[string]int64{}
+			clear(logOffsets)
 			continue
+		}
+		live := map[*proc]bool{rpc: true, head: true}
+		for _, p := range aux {
+			live[p] = true
+		}
+		for p := range logOffsets { // forget engines that are gone
+			if !live[p] {
+				delete(logOffsets, p)
+			}
 		}
 		// 1. An engine says an allocation failed: stop it now. On a Mac a graphics chip that
 		// runs out of memory can take the window server down with it if it keeps trying.
@@ -64,7 +75,7 @@ func (a *Agent) guardLoop() {
 			if p == nil || !p.Running() {
 				continue
 			}
-			if line := newOOMLine(p.logPath, logOffsets); line != "" {
+			if line := newOOMLine(p, logOffsets); line != "" {
 				a.guardStop("the AI engine ran out of memory (" + line + ")")
 				bad = 0
 				break
@@ -74,7 +85,7 @@ func (a *Agent) guardLoop() {
 		// way; one that runs out is stopped on its own, leaving the main model alone.
 		for name, p := range aux {
 			if p.Running() {
-				if line := newOOMLine(p.logPath, logOffsets); line != "" {
+				if line := newOOMLine(p, logOffsets); line != "" {
 					a.guardStopAux(name, "it ran out of memory ("+line+")")
 				}
 			}
@@ -124,8 +135,8 @@ func (a *Agent) guardStopAux(name, why string) {
 }
 
 // newOOMLine returns the first out-of-memory line written to the log since the last look.
-func newOOMLine(path string, offsets map[string]int64) string {
-	f, err := os.Open(path)
+func newOOMLine(p *proc, offsets map[*proc]int64) string {
+	f, err := os.Open(p.logPath)
 	if err != nil {
 		return ""
 	}
@@ -134,7 +145,7 @@ func newOOMLine(path string, offsets map[string]int64) string {
 	if err != nil {
 		return ""
 	}
-	from := offsets[path]
+	from := offsets[p]
 	if st.Size() < from {
 		from = 0 // a new log
 	}
@@ -143,7 +154,7 @@ func newOOMLine(path string, offsets map[string]int64) string {
 	}
 	buf := make([]byte, st.Size()-from)
 	n, _ := f.ReadAt(buf, from)
-	offsets[path] = from + int64(n)
+	offsets[p] = from + int64(n)
 	for _, line := range strings.Split(string(buf[:n]), "\n") {
 		if oomInLog.MatchString(line) {
 			line = strings.TrimSpace(line)

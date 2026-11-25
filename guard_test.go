@@ -65,20 +65,28 @@ func TestPlanCountsContext(t *testing.T) {
 
 func TestOOMLine(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "head.log")
-	off := map[string]int64{}
-	_ = os.WriteFile(p, []byte("load_tensors: offloaded 49/49 layers\nsrv  all slots are idle\n"), 0o644)
+	path := filepath.Join(dir, "head.log")
+	p := &proc{logPath: path}
+	off := map[*proc]int64{}
+	_ = os.WriteFile(path, []byte("load_tensors: offloaded 49/49 layers\nsrv  all slots are idle\n"), 0o644)
 	if l := newOOMLine(p, off); l != "" {
 		t.Fatalf("false alarm on a normal log: %q", l)
 	}
-	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
-	_, _ = f.WriteString("E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)\n")
+	oom := "E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)\n"
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	_, _ = f.WriteString(oom)
 	f.Close()
 	if l := newOOMLine(p, off); l == "" {
 		t.Fatal("missed the Metal out-of-memory line from the Mac mini crash")
 	}
 	if l := newOOMLine(p, off); l != "" {
 		t.Fatal("reported the same line twice")
+	}
+	// A new engine at the same path, whose log has already grown past the old one's end
+	// before the guard looks: read from its start (found by the self-review).
+	_ = os.WriteFile(path, []byte(strings.Repeat("load_tensors: a long line of loading noise\n", 4)+oom), 0o644)
+	if l := newOOMLine(&proc{logPath: path}, off); l == "" {
+		t.Fatal("missed the new engine's out-of-memory line")
 	}
 }
 
