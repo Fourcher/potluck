@@ -14,7 +14,16 @@ Version 1.11.0. Measured on 17 November 2026: a 36.6 GB, 122-billion-parameter m
 - **Windows** (10 and 11): download [Potluck-windows.exe](https://github.com/Fourcher/potluck/releases/latest/download/Potluck-windows.exe) and open it. It installs itself for you (no administrator needed), adds Start menu and desktop shortcuts, and opens its own window, with an icon by the clock. Remove it in Settings > Apps. Not yet signed for Windows, so the first time Windows says "Windows protected your PC": click "More info", then "Run anyway".
 - **Linux**: `curl -fsSL https://github.com/Fourcher/potluck/releases/latest/download/install.sh | sh` installs it for your user in `~/.local/bin`, checks it against the release checksums, adds it to the applications menu and starts it.
 
-No account, nothing to pay, nothing sent anywhere but your own computers (and Hugging Face, for downloads).
+No account and nothing to pay. Your chats, files and prompts stay on your own computers. Potluck itself only contacts these places, and only to fetch things, never to send what you do:
+
+- **Hugging Face** (huggingface.co): model lists and downloads.
+- **GitHub** (github.com, api.github.com, raw.githubusercontent.com): the AI engine (llama.cpp) when a computer first needs it, the daily list of recommended models, and the check for a newer Potluck.
+- **Debian's package mirror** (deb.debian.org), on Alpine Linux only: the system libraries the engine needs there.
+- **Apple's push service**, only if you turn on phone alerts: the alert text goes from your main computer to your own iPhone.
+- **PirateFace** (pirateface.co), only when you search it in the Models tab.
+- Any AI service you add yourself under "Your other AI setups" (OpenRouter, say), only for chats you send to it.
+
+Dictation in the chat uses your browser's own speech recognition, which on some browsers runs on the browser maker's servers.
 
 ## How you use it
 
