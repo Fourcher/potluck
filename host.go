@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -30,7 +31,11 @@ var (
 	portShare = 7722 // other devices and apps, with the share key; only while sharing is on
 )
 
-const engineTag = "b12608"
+// engineTag is the llama.cpp release every computer installs. b12728 (2026-11-25) over b12608:
+// Inkling 2's tokenizer fixed (ignore_merges: code such as "kwargs" was split into the wrong
+// pieces), its tool-call parser rewritten, NVFP4 files run with their scales, prompt reading
+// faster, DSpark drafts supported. Measured on LLMOS: same writing speed (5.9 words/s).
+const engineTag = "b12728"
 
 // For trying a build next to a Potluck that is already running: POTLUCK_PORT_OFFSET=100
 // moves every port up by 100. Computers only find each other with the same offset.
@@ -152,6 +157,7 @@ type Host struct {
 	crew       map[string]*CrewMember // extra models on other computers (crew.go), under mu
 	// startGen numbers each start (and each stop); a start's progress and cleanup only touch
 	// the cluster while its number is current. startDone closes when that start's work ends.
+	inflight  atomic.Int64 // model requests being answered or waiting their turn (chat.go)
 	startGen  int
 	startDone chan struct{}
 	shareMu   sync.Mutex
@@ -166,7 +172,7 @@ func newHost(a *Agent, id *Identity, cfg *ConfigStore) *Host {
 			c.JoinSecret = randomHex(8)
 		}
 		// The engine version follows the program: a new Potluck brings the engine it was
-		// tested with (b12608 for Inkling 2 models), and every computer installs the same one.
+		// tested with (b12728 for Inkling 2 models), and every computer installs the same one.
 		c.EngineTag = engineTag
 	})
 	setHFKey(cfg.Get().HFKey)

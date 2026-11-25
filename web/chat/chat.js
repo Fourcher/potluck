@@ -983,6 +983,13 @@ async function generate() {
     for (let round = 0; round < rounds; round++) {
       const msg = { id: uid(), role: "assistant", content: "", reasoning: "", t: Date.now() };
       c.messages.push(msg); S.gen.msg = msg; S.gen.note = round ? "Reading what it found…" : (c.messages.length > 2 || !toolSpecs() ? "Reading your message…" : "Reading your message and how to use your folder…");
+      // The model answers one conversation at a time: if nothing comes back soon, say whether
+      // another one (someone else in the house, an agent task) is ahead of this one.
+      const waitFor = S.gen;
+      setTimeout(async () => {
+        if (S.gen !== waitFor || !msg || msg.content || msg.reasoning || extModel().model) return;
+        try { const st = await api("/potluck/state"); if (S.gen === waitFor && !msg.content && !msg.reasoning && st.busy > 1) { S.gen.note = "Another conversation is being answered first. Yours is next."; drawLive(); } } catch { }
+      }, 4000);
       drawThread(); scrollDown(true);
       let finish;
       try { finish = await (directRoute(!!toolSpecs()) ? streamDirect : streamOnce)(msg, abort.signal); }

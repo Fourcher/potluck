@@ -78,6 +78,7 @@ func (h *Host) quickChoice(ctx context.Context) (QuickChoice, error) {
 	reached, fitted := false, false
 	var smallest int64
 	var lastErr error // a lookup that failed for a model that would have fitted
+	var planErr error // the planner turned down a model that fitted by size
 	for _, repo := range repos {
 		if seen[repo] {
 			continue
@@ -118,6 +119,11 @@ func (h *Host) quickChoice(ctx context.Context) (QuickChoice, error) {
 			if p := h.bestSolo(info, ""); p != nil {
 				solo = p.Head
 			}
+		} else if p := h.plan(info, ""); !p.Fits {
+			// The size check only adds memory up; the planner knows what cannot be split (a
+			// looped model's repeated layers stay on one computer). Try the next pick.
+			planErr = errors.New(p.Reason)
+			continue
 		}
 		blurb := ""
 		if c := h.catalog(); c != nil {
@@ -131,6 +137,9 @@ func (h *Host) quickChoice(ctx context.Context) (QuickChoice, error) {
 	}
 	if ctx.Err() != nil {
 		return QuickChoice{}, errors.New("looking for a model that fits took too long; try again")
+	}
+	if fitted && lastErr == nil && planErr != nil {
+		return QuickChoice{}, fmt.Errorf("the recommended models that fit by size cannot be laid out on the computers connected now: %w", planErr)
 	}
 	if fitted && lastErr != nil {
 		return QuickChoice{}, fmt.Errorf("a model that fits was found, but could not be read: %w", lastErr)

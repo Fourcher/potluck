@@ -185,6 +185,8 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 				return
 			}
 			if r.Method == http.MethodPost && isModelRequest(r) {
+				h.inflight.Add(1)
+				defer h.inflight.Add(-1)
 				h.touch()
 				// The model was let go after a while unused: load it again, then answer.
 				if err := h.wake(15 * time.Minute); err != nil {
@@ -203,7 +205,8 @@ func (h *Host) chatState(owner bool) map[string]any {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c := h.cluster
-	out := map[string]any{"version": version, "phase": c.Phase, "error": c.Error, "steps": c.Steps, "owner": owner, "ctx": h.lastCtx, "pauseWhy": h.pauseWhy, "vision": h.vision}
+	out := map[string]any{"version": version, "phase": c.Phase, "error": c.Error, "steps": c.Steps, "owner": owner, "ctx": h.lastCtx, "pauseWhy": h.pauseWhy, "vision": h.vision,
+		"busy": h.inflight.Load()} // requests the model is working on now (it answers one at a time)
 	if c.Phase == "idle" && h.asleep != nil {
 		// Let go after a while unused; the next message loads it again.
 		out["phase"], c.Model = "resting", h.asleep
