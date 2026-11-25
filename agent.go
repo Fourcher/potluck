@@ -251,6 +251,7 @@ func freePort() (int, error) {
 //   - pooled, the card holding the trunk of the head's layers: all threads 3.8 vs 3.3 words/s;
 //   - pooled with whole layers on the processor or the disk in play: all threads slower
 //     (1.1 to 1.8 against 2.3 to 2.8).
+//
 // On a 4 fast + 8 slow core laptop the fast cores' 8 threads beat all 12 (14% writing, 24%
 // reading), so slow cores are never counted.
 func threadsFor(info NodeInfo, all bool) int {
@@ -331,6 +332,8 @@ type (
 		// AllThreads: every hardware thread of the fast cores instead of one per core, where
 		// that measured faster (see threadsFor).
 		AllThreads bool `json:"allThreads,omitempty"`
+		// Sampling: the maker's settings the model file leaves out, as engine flags (sampling.go).
+		Sampling []string `json:"sampling,omitempty"`
 	}
 	AgentStatus struct {
 		RPC     bool   `json:"rpc"`
@@ -767,6 +770,7 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 		args = append(args, "-ts", in.Split)
 	}
 	args = append(args, placementArgs(in.NGL, in.ExpertCPU, in.KVKeyQ8)...)
+	args = append(args, safeSampling(in.Sampling)...)
 	// The helpers must be named before the device list: the engine only knows the names
 	// RPC0, RPC1, ... once it has read --rpc.
 	if len(rpcList) > 0 {

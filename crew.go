@@ -194,7 +194,7 @@ func (h *Host) startCrew(c *CrewMember) error {
 	if ngl > info.EngineLayers() {
 		ngl = 999
 	}
-	if err := h.call(c.Node, "start_aux", StartAuxReq{Name: c.Name, File: model.File, Ctx: c.Ctx, NGL: ngl, ExpertCPU: plan.ExpertCPU, KVKeyQ8: plan.KVKeyQ8}, nil, time.Minute); err != nil {
+	if err := h.call(c.Node, "start_aux", StartAuxReq{Name: c.Name, File: model.File, Ctx: c.Ctx, NGL: ngl, ExpertCPU: plan.ExpertCPU, KVKeyQ8: plan.KVKeyQ8, Sampling: samplingArgs(info)}, nil, time.Minute); err != nil {
 		return err
 	}
 	for deadline := time.Now().Add(30 * time.Minute); time.Now().Before(deadline); time.Sleep(3 * time.Second) {

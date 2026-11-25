@@ -59,6 +59,9 @@ type ModelInfo struct {
 	PlanCtx   int    `json:"-"` // the context size a plan is being made for
 	WorkSeen  int64  `json:"-"` // the engine's own report of its working memory for this file and size, if known
 	KVKeyQ8   bool   `json:"-"` // plan with the cache's keys in 8 bits (llama.cpp -ctk q8_0), about a quarter smaller
+	// FileSampling: the sampling settings the file itself carries (general.sampling.*), which
+	// the engine applies on its own (see sampling.go).
+	FileSampling map[string]bool `json:"-"`
 }
 
 // ubatch is the engine's default batch of tokens per step. A sliding-window layer keeps its
@@ -360,6 +363,7 @@ func parseGGUFPart(buf []byte, fileSize int64, layersHint int) (*ModelInfo, erro
 	m := &ModelInfo{FileSize: fileSize}
 	m.Name, _ = kv["general.name"].(string)
 	m.Arch, _ = kv["general.architecture"].(string)
+	m.FileSampling = fileSampling(kv)
 	if v, ok := kv[m.Arch+".block_count"].(uint64); ok {
 		m.Layers = int(v)
 	}

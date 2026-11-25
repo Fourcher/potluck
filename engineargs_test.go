@@ -40,3 +40,17 @@ func TestPlacementArgs(t *testing.T) {
 		t.Fatalf("processor only: %q", s)
 	}
 }
+
+func TestSamplingArgs(t *testing.T) {
+	// The Inkling files on hand carry only general.sampling.temp; the rest comes from the table.
+	m := &ModelInfo{Arch: "inkling2_loop", FileSampling: map[string]bool{"temp": true}}
+	if got := strings.Join(samplingArgs(m), " "); got != "--min-p 0 --top-k 0 --top-p 1" {
+		t.Fatalf("inkling: %q", got)
+	}
+	if got := samplingArgs(&ModelInfo{Arch: "llama"}); len(got) != 0 {
+		t.Fatalf("unknown family should add nothing: %v", got)
+	}
+	if got := strings.Join(safeSampling([]string{"--temp", "0.6", "--rpc", "x", "--top-k", "abc"}), " "); got != "--temp 0.6" {
+		t.Fatalf("safeSampling: %q", got)
+	}
+}

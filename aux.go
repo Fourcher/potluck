@@ -26,8 +26,9 @@ type StartAuxReq struct {
 	NGL     int    `json:"ngl,omitempty"`     // layers on the graphics card; 0 = processor only
 	Threads int    `json:"threads,omitempty"` // 0 = a few (helper) or the same as the main model (crew)
 	// ExpertCPU and KVKeyQ8 are the plan's, as for the main model (placementArgs).
-	ExpertCPU []int `json:"expertCPU,omitempty"`
-	KVKeyQ8   bool  `json:"kvKeyQ8,omitempty"`
+	ExpertCPU []int    `json:"expertCPU,omitempty"`
+	KVKeyQ8   bool     `json:"kvKeyQ8,omitempty"`
+	Sampling  []string `json:"sampling,omitempty"` // as for the main model (sampling.go)
 }
 
 type AuxStatus struct {
@@ -93,6 +94,7 @@ func (a *Agent) startAux(in StartAuxReq) (any, error) {
 		"--host", "127.0.0.1", "--port", strconv.Itoa(port), "-fit", "off", "-lv", "4", "--jinja", "--no-webui",
 		"--alias", name}
 	args = append(args, placementArgs(in.NGL, in.ExpertCPU, in.KVKeyQ8)...)
+	args = append(args, safeSampling(in.Sampling)...)
 	if base := strings.ToLower(rt); in.NGL == 0 && (strings.Contains(base, "cuda") || strings.Contains(base, "vulkan")) {
 		args = append(args, "-dev", "none")
 	}

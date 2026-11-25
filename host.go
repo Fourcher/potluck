@@ -1316,7 +1316,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 	}
 	h.mu.Unlock()
 	req := StartHeadReq{File: model.File, Vision: model.Vision, Workers: plan.WorkerOrder, NGL: ngl, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream, DenseBytes: info.denseBytes(), KVKeyQ8: plan.KVKeyQ8,
-		ExpertCPU: plan.ExpertCPU,
+		ExpertCPU: plan.ExpertCPU, Sampling: samplingArgs(info),
 		// Every hardware thread except where it measured slower: the disk in play, or pooled with
 		// whole layers on the head's processor (see threadsFor).
 		AllThreads: plan.Overflow == 0 && !(!plan.Solo && len(plan.Shares) > 0 && plan.Shares[0].CPULayers > 0)}
