@@ -83,21 +83,10 @@ func (h *Host) recommended() string {
 	return recommendedRepo
 }
 
-// recommendedRepo is the model Potluck suggests first (starred in the model store).
+// recommendedRepo is the model Potluck suggests first when no catalog can be read at all; the
+// catalog built into Potluck (catalog/models.json, made from catalog/picks.json) always has
+// picks, so this is a last resort, not a second list to keep in step.
 const recommendedRepo = "AtomicChat/Inkling-2-Mini-Uncensored-GGUF"
-
-// featured is the starting shelf: the recommended model, then popular open models from small
-// to very large.
-var featured = []struct{ Repo, Blurb string }{
-	{recommendedRepo, "Our pick to start with: Inkling 2 Mini, 26 billion parameters, whose smallest size runs on a 12 GB laptop. This version has had its refusals removed: it answers what it is asked."},
-	{"unsloth/gemma-4-12B-it-GGUF", "Small and quick. Runs on almost anything."},
-	{"unsloth/Qwen3.8-27B-GGUF", "Strong all-rounder."},
-	{"unsloth/gemma-4-26B-A4B-it-GGUF", "Fast for its size: only part of it runs per word."},
-	{"unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF", "Fast mixture-of-experts model, good first test."},
-	{"unsloth/Qwen3.6-35B-A3B-GGUF", "Good at tools and agent work."},
-	{"NousResearch/Hermes-4.3-36B-GGUF", "Large general model."},
-	{"unsloth/Qwen3.5-122B-A10B-GGUF", "Very large. Needs several computers pooled together."},
-}
 
 var (
 	treeCache   = map[string][]hfEntry{}
@@ -251,11 +240,6 @@ func (h *Host) storeSearch(source, q string) ([]StoreModel, error) {
 		for _, p := range cat.Picks {
 			out = append(out, StoreModel{Source: "hf", Repo: p.Repo, Blurb: p.Blurb, GoodFor: p.GoodFor, Sources: p.Sources, Section: "pick", Recommended: p.Repo == rec})
 		}
-		if len(out) == 0 {
-			for _, f := range featured {
-				out = append(out, StoreModel{Source: "hf", Repo: f.Repo, Blurb: f.Blurb, Section: "pick", Recommended: f.Repo == rec})
-			}
-		}
 		var wg sync.WaitGroup
 		for i := range out {
 			wg.Add(1)
@@ -289,7 +273,7 @@ func (h *Host) storeSearch(source, q string) ([]StoreModel, error) {
 	}
 	out := make([]StoreModel, 0, len(res))
 	for _, r := range res {
-		out = append(out, StoreModel{Source: "hf", Repo: r.ID, Downloads: r.Downloads, Likes: r.Likes, Recommended: r.ID == recommendedRepo})
+		out = append(out, StoreModel{Source: "hf", Repo: r.ID, Downloads: r.Downloads, Likes: r.Likes, Recommended: r.ID == h.recommended()})
 	}
 	return out, nil
 }

@@ -54,9 +54,6 @@ func (h *Host) QuickStart(ctx context.Context) (ModelRef, error) {
 			repos = append(repos, p.Repo)
 		}
 	}
-	for _, f := range featured {
-		repos = append(repos, f.Repo)
-	}
 	seen := map[string]bool{}
 	reached := false
 	var smallest int64
