@@ -475,6 +475,11 @@ function planBar(plan) {
   return `<div class="plan" role="img" aria-label="How the model's layers are spread over the computers">${segs.join("")}</div><div class="legend">${legend.join("")}</div><p class="muted small">Striped parts sit on a graphics card, out of ${total} layers in all.${plan.cardTrunk ? " For this kind of model the card holds the part of each layer that is used for every word, and memory holds the rest." : ""}</p>`;
 }
 
+// details tucks the technical picture (which computer holds which layers) behind a click.
+function details(inner) {
+  return `<details class="small" style="margin-top:10px"><summary>Details: how it is split between your computers</summary>${inner}</details>`;
+}
+
 function viewSheet() {
   if (!sheet) return "";
   if (sheet.loading) return `<div class="sheet"><div class="card"><p>Reading the model's blueprint and working out a layout…</p></div></div>`;
@@ -486,7 +491,7 @@ function viewSheet() {
   if (p.fits) {
     const verdict = p.needsPool ? `<div class="banner" style="border-color:var(--ok);background:var(--ok-soft)"><b>Too big for the memory of any one of your computers. Runs across ${p.machines} of them together.</b></div>`
       : `<div class="note">Fits in ${esc(p.shares[0].name)}'s memory, so it runs there${p.machines > 1 ? " with help from the others" : ""}.</div>`;
-    body = `${verdict}${p.kvKeyQ8 ? `<p class="small muted">To fit, Potluck stores the conversation memory a little more compactly (8-bit keys). Answers are practically the same.</p>` : ""}${planBar(p)}
+    body = `${verdict}${p.kvKeyQ8 ? `<p class="small muted">To fit, Potluck stores the conversation memory a little more compactly. Answers are practically the same.</p>` : ""}${details(planBar(p))}
       <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start">${go}</button></div>
       <p class="muted small">${isLocal ? "The file is already on " + esc(p.shares[0].name) + (p.machines > 1 ? ". Helpers receive their share from it over your network, which is slower the first time than a download." : ", so nothing is downloaded.")
         : "Each computer downloads its own share. The first start takes as long as the download; later starts take a few minutes."}</p>`;
@@ -499,7 +504,7 @@ function viewSheet() {
   } else if (solo && solo.fits) {
     body = `<div class="note"><b>Does not fit in your computers' pooled memory.</b> ${esc(p.reason)}</div>
       <h2 style="font-size:16px">It can still run on ${esc(solo.shares[0].name)}${solo.overflow > 0 ? ", with help from its disk" : ""}</h2>
-      <p class="muted small">${solo.overflow > 0 ? `About ${gb(solo.overflow)} of it will not fit in memory and is read from disk as needed. Fine with an SSD, slow with a hard disk.` : "It needs nearly all the memory this computer has; close big apps first if it is slow."}</p>${planBar(solo)}
+      <p class="muted small">${solo.overflow > 0 ? `About ${gb(solo.overflow)} of it will not fit in memory and is read from disk as needed. Fine with an SSD, slow with a hard disk.` : "It needs nearly all the memory this computer has; close big apps first if it is slow."}</p>${details(planBar(solo))}
       <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start" data-solo="${esc(solo.head)}">${go} on ${esc(solo.shares[0].name)}</button></div>`;
   } else if (stream && stream.fits) {
     body = `<div class="note"><b>Too big for your computers' memory, pooled or alone.</b> ${esc(p.reason)}</div>`;
@@ -518,7 +523,7 @@ function viewSheet() {
   }
   return `<div class="sheet" data-a="closesheet"><div class="card" data-stop>
     <div class="row spread"><h1 style="font-size:21px">${esc(m.title || m.file)}</h1><button class="link" data-a="closesheet">Close</button></div>
-    <p class="muted small">${gb(m.size)} · ${info.layers} layers · ${esc(isLocal ? "already on one of your computers" : m.repo || "direct link")}${m.parts && m.parts.length > 1 ? ` · comes as ${m.parts.length} files` : ""}</p>
+    <p class="muted small">${gb(m.size)} · ${esc(isLocal ? "already on one of your computers" : m.repo || "direct link")}</p>
     ${body}
   </div></div>`;
 }
