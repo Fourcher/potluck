@@ -33,8 +33,8 @@ func TestPlacementArgs(t *testing.T) {
 	if !strings.Contains(s, `-ot blk\.(0|1|22)\.ffn_[a-z_]*exps=CPU`) || !slices.Contains(a, "q8_0") {
 		t.Fatalf("placement flags: %s", s)
 	}
-	if slices.Contains(a, "--no-op-offload") {
-		t.Fatalf("op offload should stay on (measured faster and it fits): %s", s)
+	if !slices.Contains(a, "--no-op-offload") {
+		t.Fatalf("experts kept in memory must be worked on there (op offload fills memory at 32k): %s", s)
 	}
 	if s := strings.Join(placementArgs(0, nil, false), " "); s != "-ngl 0" {
 		t.Fatalf("processor only: %q", s)

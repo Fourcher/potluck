@@ -287,16 +287,18 @@ func placementArgs(ngl int, expertCPU []int, kvKeyQ8 bool) []string {
 		// Any ffn_...exps tensor, as isExpertTensor counts them: models fuse them differently
 		// (Inkling 2 has ffn_gate_up_exps; a pattern for up/down/gate alone left two thirds of
 		// its experts on a 4 GB card, 15 GB in all).
-		//
-		// The engine still uses the card for long prompts, copying the experts over as it
-		// goes ("op offload"). Measured on a 4 GB card with Inkling 2 at 32k: it fits (3.8 GB
-		// used) and reads prompts 2.2 times as fast (27.7 vs 12.6 tokens/s) as working on
-		// the processor with --no-op-offload.
 		nums := make([]string, len(expertCPU))
 		for i, l := range expertCPU {
 			nums[i] = strconv.Itoa(l)
 		}
 		args = append(args, "-ot", `blk\.(`+strings.Join(nums, "|")+`)\.ffn_[a-z_]*exps=CPU`)
+		// And work on them where they are. By default the engine copies experts kept in memory
+		// to the card for long prompts ("op offload") and reserves room for that on the card:
+		// 14 GB for Inkling 2 at 32k (measured on a 4 GB card). Windows' NVIDIA driver then
+		// quietly spills it into system memory, which filled a 30 GB computer and had it
+		// reading 6,500 pages a second from disk, the card idle. Short benchmarks hide this
+		// (22.8 vs 15.1 tokens/s reading at an 8k depth, where it still fits).
+		args = append(args, "--no-op-offload")
 	}
 	return args
 }
