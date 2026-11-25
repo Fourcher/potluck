@@ -63,10 +63,26 @@ function readLimits(box) {
   return { enabled: v("enabled").checked, pedal: +v("pedal").value, schedOn: v("schedOn").checked, schedStart: v("schedStart").value, schedEnd: v("schedEnd").value };
 }
 
-function progress(msg, done, total) {
+// rateOf follows a download's bytes between polls to say how fast it goes and how long is left
+// (smoothed, so one slow moment doesn't swing the estimate).
+const rates = {};
+function rateOf(key, done, total) {
+  const now = Date.now(), r = rates[key];
+  if (!r || done < r.done || total !== r.total) { rates[key] = { done, total, t: now, bps: 0 }; return ""; }
+  if (now - r.t >= 1500 && done > r.done) {
+    const bps = (done - r.done) * 1000 / (now - r.t);
+    r.bps = r.bps ? r.bps * 0.7 + bps * 0.3 : bps; r.done = done; r.t = now;
+  } else if (now - r.t > 20000 && done === r.done) return " · waiting for data…";
+  if (!r.bps || total <= done) return "";
+  const left = (total - done) / r.bps;
+  const t = left < 90 ? Math.max(1, Math.round(left)) + " s" : left < 5400 ? Math.round(left / 60) + " min" : (left / 3600).toFixed(1) + " h";
+  return ` · ${(r.bps / 1048576).toFixed(r.bps < 10485760 ? 1 : 0)} MB/s · ${t} left`;
+}
+function progress(msg, done, total, key) {
   if (!msg) return `<div class="status"></div>`;
   const pct = total > 0 ? Math.min(100, Math.round(done * 100 / total)) : -1;
-  return `<div class="status">${esc(msg)}${pct >= 0 ? ` · ${pct}%${total > 1048576 ? " of " + gb(total) : ""}` : ""}${pct >= 0 ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ""}</div>`;
+  const rate = pct >= 0 && pct < 100 && total > 1048576 ? rateOf(key || msg.replace(/[\d.,%]+/g, ""), done, total) : "";
+  return `<div class="status">${esc(msg)}${pct >= 0 ? ` · ${pct}%${total > 1048576 ? " of " + gb(total) : ""}${rate}` : ""}${pct >= 0 ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ""}</div>`;
 }
 
 // ---------- first run ----------
@@ -140,7 +156,7 @@ function nodeCard(n) {
     ${specs(i)}
     <div class="lend">${lend}</div>${slow}${profileLine(n)}
     ${limitsUI(i.id, L, n.isMain)}
-    ${progress(n.status, n.done, n.total)}
+    ${progress(n.status, n.done, n.total, n.info.id)}
     ${n.prepareErr ? `<div class="err small">Its AI engine could not be set up: ${esc(n.prepareErr)}. Potluck tries again by itself, waiting longer each time.</div>` : ""}
     <div class="row small" style="margin-top:6px"><button class="link" data-a="rename" data-id="${esc(i.id)}" data-name="${esc(i.name)}">Rename</button>
       ${n.isMain ? "" : `<button class="link" data-a="forget" data-id="${esc(i.id)}" data-name="${esc(i.name)}">Remove</button>`}</div>
@@ -618,7 +634,7 @@ function viewRunMain() {
   }
   const title = c.model ? esc(c.model.title || c.model.file) : "Model";
   const steps = `<ul class="steps">${(c.steps || []).map(s => `<li class="${esc(s.state)}">${esc(s.text)}</li>`).join("")}</ul>`;
-  const nodes = m.nodes.filter(n => n.role).map(n => `<div class="card"><div class="row spread"><h3>${esc(n.info.name)}</h3><span class="badge ok">${n.role === "head" ? "Runs the model" : "Holds part of it"}</span></div>${progress(n.status, n.done, n.total)}</div>`).join("");
+  const nodes = m.nodes.filter(n => n.role).map(n => `<div class="card"><div class="row spread"><h3>${esc(n.info.name)}</h3><span class="badge ok">${n.role === "head" ? "Runs the model" : "Holds part of it"}</span></div>${progress(n.status, n.done, n.total, n.info.id)}</div>`).join("");
   if (c.phase === "starting" || c.phase === "stopping") {
     return `<h1>${c.phase === "stopping" ? "Stopping" : "Getting " + title + " ready"}</h1>${steps}
       ${c.plan && c.plan.fits ? planBar(c.plan) : ""}<div class="grid" style="margin-top:16px">${nodes}</div>

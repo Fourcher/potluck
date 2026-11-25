@@ -14,9 +14,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -181,11 +183,11 @@ func downloadFile(ctx context.Context, u, dest string, size int64, sha string, s
 	}
 	f, err := os.OpenFile(dest+".part", os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		return err
+		return fileErr(err, dest, size)
 	}
 	defer f.Close()
 	if err := f.Truncate(size); err != nil {
-		return fmt.Errorf("not enough disk space for %s: %w", humanBytes(size), err)
+		return fileErr(err, dest, size)
 	}
 	var got atomic.Int64
 	queue := make(chan int, nChunks)
@@ -273,13 +275,13 @@ func downloadFile(ctx context.Context, u, dest string, size int64, sha string, s
 	wg.Wait()
 	close(stop)
 	if firstErr != nil {
-		return firstErr
+		return fileErr(firstErr, dest, size)
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 	if err := f.Sync(); err != nil {
-		return err
+		return fileErr(err, dest, size)
 	}
 	f.Close()
 	if sha != "" {
@@ -296,7 +298,7 @@ func downloadFile(ctx context.Context, u, dest string, size int64, sha string, s
 		}
 	}
 	if err := os.Rename(dest+".part", dest); err != nil {
-		return err
+		return fileErr(err, dest, size)
 	}
 	_ = os.Remove(stateFile)
 	note := "verified"
@@ -562,4 +564,28 @@ func seedOne(ctx context.Context, u, cacheDir string, it SeedItem, j int, buf []
 		return "", n, err
 	}
 	return name, n, nil
+}
+
+// fileErr says what went wrong with a download's file on disk and what to do about it; other
+// errors (the network) pass through unchanged.
+func fileErr(err error, dest string, size int64) error {
+	if err == nil {
+		return nil
+	}
+	dir := filepath.Dir(dest)
+	var errno syscall.Errno
+	isErrno := errors.As(err, &errno)
+	switch {
+	case errors.Is(err, syscall.ENOSPC) || (isErrno && runtime.GOOS == "windows" && (errno == 112 || errno == 39)):
+		return fmt.Errorf("the disk holding %s is full: the model needs %s. Free some space (or delete models you no longer use under Models) and start it again", dir, humanBytes(size))
+	case errors.Is(err, syscall.EFBIG) || (size > 4<<30 && strings.Contains(strings.ToLower(err.Error()), "too large")):
+		return fmt.Errorf("the drive holding %s cannot store files over 4 GB (it is formatted FAT32). Keep Potluck's folder on a drive formatted APFS, NTFS or exFAT", dir)
+	case isErrno && runtime.GOOS == "windows" && (errno == 32 || errno == 33):
+		return fmt.Errorf("another program is holding %s open, often antivirus checking it. Wait a minute and start again, or exclude Potluck's folder from scanning", filepath.Base(dest))
+	case isErrno && runtime.GOOS == "windows" && errno == 206:
+		return fmt.Errorf("the path %s is too long for Windows. Move Potluck's folder closer to the top of the drive", dest)
+	case errors.Is(err, os.ErrPermission):
+		return fmt.Errorf("Potluck may not write in %s: check that folder's permissions", dir)
+	}
+	return err
 }

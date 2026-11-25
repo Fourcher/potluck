@@ -97,9 +97,25 @@ async function poll() {
   if (S.server.owner && (!S.ctxAt || Date.now() - S.ctxAt > 60000)) { S.ctxAt = Date.now(); try { S.ctx = await api("/potluck/context"); } catch { S.ctx = null; } drawProjects(); }
   drawStatus();
   if (was !== S.server.phase && S.cur && !S.cur.messages.length && !S.gen) drawThread(); // the greeting says whether a model is ready
+  // A message written before the model was ready goes out now.
+  if (running() && S.cur && S.cur.queued && !S.gen && !S.compacting) {
+    S.cur.queued = false;
+    const last = S.cur.messages[S.cur.messages.length - 1];
+    if (last && last.role === "user") generate(); else saveChat(S.cur);
+  }
   pollTimer = setTimeout(poll, running() ? 12000 : 3000);
 }
 
+// eta: speed and time left for a download, smoothed between polls.
+const etas = {};
+function eta(key, done, total) {
+  const now = Date.now(), r = etas[key];
+  if (!r || done < r.done || r.total !== total) { etas[key] = { done, total, t: now, bps: 0 }; return ""; }
+  if (now - r.t >= 1500 && done > r.done) { const bps = (done - r.done) * 1000 / (now - r.t); r.bps = r.bps ? r.bps * 0.7 + bps * 0.3 : bps; r.done = done; r.t = now; }
+  if (!r.bps) return "";
+  const left = (total - done) / r.bps;
+  return ` · ${left < 90 ? Math.max(1, Math.round(left)) + " s" : left < 5400 ? Math.round(left / 60) + " min" : (left / 3600).toFixed(1) + " h"} left`;
+}
 function drawStatus() {
   const s = S.server || {}, chipEl = $("#cluster-chip"), b = $("#banner");
   const helpers = (s.nodes || []).filter(n => n.role === "worker").length;
@@ -119,11 +135,11 @@ function drawStatus() {
     b.hidden = false; b.className = s.phase === "error" || s.phase === "offline" ? "bad" : "";
     if (s.phase === "starting") {
       const steps = (s.steps || []).map(x => `<li class="${esc(x.state)}">${esc(x.text)}</li>`).join("");
-      const prog = (s.nodes || []).filter(n => n.total > 0).map(n => `<div class="small">${esc(n.name)}: ${esc(n.status || "")}<div class="bar"><i style="width:${Math.min(100, 100 * n.done / n.total).toFixed(1)}%"></i></div></div>`).join("");
-      b.innerHTML = `<b>Getting ${esc(modelTitle() || "the model")} ready.</b> You can type your message meanwhile.<ul class="steps">${steps}</ul>${prog}`;
+      const prog = (s.nodes || []).filter(n => n.total > 0).map(n => `<div class="small">${esc(n.name)}: ${esc(n.status || "")}${n.total > 1048576 && n.done < n.total ? ` · ${Math.round(100 * n.done / n.total)}%${eta(n.name, n.done, n.total)}` : ""}<div class="bar"><i style="width:${Math.min(100, 100 * n.done / n.total).toFixed(1)}%"></i></div></div>`).join("");
+      b.innerHTML = `<b>Getting ${esc(modelTitle() || "the model")} ready.</b> ${S.cur && S.cur.queued ? "Your message is saved and goes out as soon as it is ready." : "You can write your message now: it goes out as soon as the model is ready."}<ul class="steps">${steps}</ul>${prog}`;
     } else if (s.phase === "error") b.innerHTML = `<b>The model could not start.</b> ${esc(s.error || "")} ${s.owner ? `<button class="btn small ghost" data-a="models">Choose a model</button>` : ""}`;
     else if (s.phase === "offline") b.innerHTML = `<b>Potluck is not answering.</b> Check that it is still open on the main computer.`;
-    else b.innerHTML = `<b>No model is running.</b> ${esc(s.pauseWhy || "")} ${s.owner ? `<button class="btn small" data-a="models">Choose a model</button>` : "Ask the person who runs Potluck to start one."}`;
+    else b.innerHTML = `<b>No model is running.</b> ${S.cur && S.cur.queued ? "Your message is saved and goes out once one starts. " : ""}${esc(s.pauseWhy || "")} ${s.owner ? `<button class="btn small" data-a="models">Choose a model</button>` : "Ask the person who runs Potluck to start one."}`;
   }
   drawTools();
 }
@@ -433,7 +449,7 @@ function drawThread() {
       const next = c.messages[i + 1], endOfTurn = !next || next.role === "user";
       const live = S.gen && S.gen.msg === m;
       h += `<div class="msg assistant ${endOfTurn && i > lastUser ? "last" : ""}" data-i="${i}"><div class="body">${assistantHTML(m, live)}</div>${(m.calls || []).map(cl => toolCard(cl, results[cl.id])).join("")}` +
-        (m.error ? `<div class="err">${esc(m.error)}</div>` : "") +
+        (m.error ? `<div class="err">${esc(m.error)}${m.overflow ? ` <button class="btn small" data-a="compact-retry">Summarize and continue</button>` : ""}</div>` : "") +
         (live ? `<div class="waiting" data-wait>${m.content || m.reasoning ? "" : `<span class="spin"></span><span>${esc(S.gen.note || "Reading your message…")}</span>`}</div>` :
           endOfTurn ? `<div class="acts"><button class="icon" data-a="copy-msg" title="Copy" aria-label="Copy">${ic("copy")}</button><button class="icon" data-a="retry" title="Try again" aria-label="Try again">${ic("retry")}</button><button class="icon" data-a="speak" title="Read aloud" aria-label="Read aloud">${ic("speak")}</button><span class="stat">${esc(statLine(m.stats))}</span></div>` : "") + `</div>`;
     }
@@ -951,7 +967,13 @@ function addUsage(st) {
 }
 async function generate() {
   const c = S.cur;
-  if (!running()) { toast("No model is ready yet. Your message is kept; press Send again once one is running."); return; }
+  if (!running()) {
+    // Kept and sent by itself as soon as a model is ready (poll), instead of making the person
+    // come back and press Send again.
+    c.queued = true; await saveChat(c); drawStatus();
+    toast(S.server && S.server.phase === "starting" ? "Saved. It goes out as soon as the model is ready." : "Saved. Start a model and it goes out by itself.");
+    return;
+  }
   if (S.folder && S.folder.needsAccess && !(await reconnectFolder())) return toast("Click the folder chip to reconnect your folder first.");
   const abort = new AbortController();
   S.gen = { abort, chatId: c.id, msg: null, note: "" };
@@ -966,7 +988,9 @@ async function generate() {
       try { finish = await (directRoute(!!toolSpecs()) ? streamDirect : streamOnce)(msg, abort.signal); }
       catch (e) {
         if (abort.signal.aborted) { msg.stats = { ...(msg.stats || {}), stopped: true }; if (!msg.content && !msg.reasoning) c.messages.pop(); break; }
-        msg.error = e.message || String(e); break;
+        msg.error = e.message || String(e);
+        if (/context|exceed|too long|n_ctx/i.test(msg.error)) { msg.error = "This chat no longer fits in the model's memory."; msg.overflow = true; }
+        break;
       }
       addUsage(msg.stats);
       if (!msg.calls.length || finish !== "tool_calls") break;
@@ -1037,16 +1061,36 @@ function editMessage(i) {
   el.innerHTML = `<div class="edit-box"><textarea>${esc(m.content)}</textarea><div class="row"><button class="btn small ghost" data-a="edit-cancel">Cancel</button><button class="btn small" data-a="edit-save" data-i="${i}">Send again</button></div></div>`;
   const ta = $("textarea", el); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
 }
-async function compact() {
+// compact summarizes the chat into a fresh one; with resend, the last message (the one that no
+// longer fitted) is asked again there.
+async function compact(resend) {
   const c = S.cur; if (S.gen || !c.messages.length) return toast("There is nothing to summarize yet.");
+  let again = null;
+  if (resend) {
+    const i = c.messages.map(m => m.role).lastIndexOf("user");
+    if (i >= 0) { again = c.messages[i]; c.messages = c.messages.slice(0, i); }
+  }
   if (!running()) return toast("No model is running.");
   S.compacting = true; drawStatus();
-  const body = { messages: [...apiMessages(), { role: "user", content: "Summarize our conversation so far for your own later use. Keep every fact, decision, name, number and open question that matters, in compact notes. Do not add anything new." }], stream: false, ...thinking(false), ...extModel() };
+  const ask = { role: "user", content: "Summarize our conversation so far for your own later use. Keep every fact, decision, name, number and open question that matters, in compact notes. Do not add anything new." };
+  // The chat may itself be too long to summarize in one go: try it whole, then with tool
+  // results and long messages cut short, then only its most recent part.
+  const cut = (n) => m => ({ ...m, content: typeof m.content === "string" && m.content.length > n ? m.content.slice(0, n) + " […]" : m.content });
+  const full = apiMessages(), [sys, ...rest] = full;
+  const tries = [full, [sys, ...rest.map(cut(1500))], [sys, ...rest.slice(-24).map(cut(800))]];
   try {
-    const r = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    const j = await r.json(); if (!r.ok) throw new Error((j.error && j.error.message) || "The model did not answer.");
+    let j;
+    for (let t = 0; t < tries.length; t++) {
+      const body = { messages: [...tries[t], ask], stream: false, ...thinking(false), ...extModel() };
+      const r = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      j = await r.json();
+      if (r.ok) break;
+      const why = (j.error && j.error.message) || "The model did not answer.";
+      if (!/context|exceed|too long|n_ctx/i.test(why) || t === tries.length - 1) throw new Error(why);
+    }
     const n = newChat(); n.summary = j.choices[0].message.content; n.title = (c.title || "Chat") + " (continued)"; n.titled = true;
     S.cur = n; S.folder = null; S.pending = []; await saveChat(n); drawAll(); toast("Continuing in a fresh chat with the summary.");
+    if (again) { n.messages.push({ id: uid(), role: "user", content: again.content, files: again.files, t: Date.now() }); n.title = c.title + " (continued)"; await saveChat(n); drawAll(); S.compacting = false; drawStatus(); return generate(); }
   } catch (e) { toast("Could not summarize: " + e.message); }
   S.compacting = false; drawStatus();
 }
@@ -1429,6 +1473,7 @@ function wire() {
       copyText(S.cur.messages.slice(j, i + 1).filter(x => x.role === "assistant" && x.content).map(x => x.content).join("\n\n"));
     }
     else if (a === "retry") retry();
+    else if (a === "compact-retry") compact(true);
     else if (a === "speak") speakText(m.content);
     else if (a === "edit-msg") editMessage(i);
     else if (a === "edit-cancel") drawThread();

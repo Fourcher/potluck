@@ -1,8 +1,12 @@
 package main
 
 import (
+	"errors"
+	"os"
 	"slices"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -149,5 +153,21 @@ func TestNameHelpers(t *testing.T) {
 	r.nameHelpers([]string{"127.0.0.1:5001", "127.0.0.1:5002"}, []string{"a", "b"})
 	if r.Devices[0].Node != "" || r.Devices[1].Node != "a" || r.Devices[2].Node != "b" {
 		t.Fatalf("%+v", r.Devices)
+	}
+}
+
+func TestFileErrSaysWhatToDo(t *testing.T) {
+	cases := map[error]string{
+		&os.PathError{Op: "write", Path: "/d/m.gguf.part", Err: syscall.ENOSPC}:   "is full",
+		&os.PathError{Op: "truncate", Path: "/d/m.gguf.part", Err: syscall.EFBIG}: "over 4 GB",
+		&os.PathError{Op: "open", Path: "/d/m.gguf.part", Err: os.ErrPermission}:  "may not write",
+	}
+	for in, want := range cases {
+		if got := fileErr(in, "/d/m.gguf", 8<<30).Error(); !strings.Contains(got, want) {
+			t.Errorf("%v: %q", in, got)
+		}
+	}
+	if e := errors.New("Hugging Face answered 503"); fileErr(e, "/d/m.gguf", 1) != e {
+		t.Fatal("a network error must pass through")
 	}
 }

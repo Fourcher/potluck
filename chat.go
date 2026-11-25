@@ -180,8 +180,8 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 			if h.connRoute(w, r) {
 				return
 			}
-			if r.Method == http.MethodGet && r.URL.Path == "/v1/models" && (len(h.cfg.Get().Connections) > 0 || len(h.CrewList()) > 0) && !isShared(r) {
-				h.mergedModels(w, r, api)
+			if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+				h.mergedModels(w, r, api, !isShared(r))
 				return
 			}
 			if r.Method == http.MethodPost && isModelRequest(r) {
