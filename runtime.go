@@ -529,10 +529,14 @@ func (a *Agent) startProc(name, rtDir, bin string, args []string, restart, lowPr
 	build := func() *exec.Cmd {
 		cmd := a.engineCmd(bin, args...)
 		cmd.Stdout, cmd.Stderr = logf, logf
+		tieToParent(cmd)
 		return cmd
 	}
 	first := make(chan error, 1)
 	go func() {
+		// The engine is tied to the thread that starts it on Linux (tieToParent), so this
+		// goroutine keeps its thread for the engine's whole life.
+		runtime.LockOSThread()
 		defer close(p.done)
 		defer logf.Close()
 		for i := 0; ; i++ {
@@ -552,6 +556,7 @@ func (a *Agent) startProc(name, rtDir, bin string, args []string, restart, lowPr
 			// and Potluck's guard still get their turn instead of freezing behind the engine.
 			// lowPrio (a pedal below 100%) used to be the only case; it now changes nothing.
 			_ = lowPrio
+			adoptEngine(cmd.Process.Pid)
 			lowerPriority(cmd.Process.Pid)
 			lastResort(cmd.Process.Pid)
 			noteEngine(cmd.Process.Pid, cmd.Path)

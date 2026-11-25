@@ -56,6 +56,10 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "__engine-guard" {
+		runEngineGuard(os.Args[2:])
+		return
+	}
 	if desktopBefore != nil && desktopBefore() {
 		return
 	}
