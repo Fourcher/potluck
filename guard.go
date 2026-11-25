@@ -44,13 +44,21 @@ func (a *Agent) guardLoop() {
 		time.Sleep(time.Second)
 		a.mu.Lock()
 		rpc, head := a.rpc, a.head
+		aux := map[string]*proc{}
+		for name, e := range a.aux {
+			aux[name] = e.proc
+		}
 		a.mu.Unlock()
-		if !rpc.Running() && !head.Running() {
+		auxUp := false
+		for _, p := range aux {
+			auxUp = auxUp || p.Running()
+		}
+		if !rpc.Running() && !head.Running() && !auxUp {
 			bad = 0
 			logOffsets = map[string]int64{}
 			continue
 		}
-		// 1. The engine says an allocation failed: stop it now. On a Mac a graphics chip that
+		// 1. An engine says an allocation failed: stop it now. On a Mac a graphics chip that
 		// runs out of memory can take the window server down with it if it keeps trying.
 		for _, p := range []*proc{rpc, head} {
 			if p == nil || !p.Running() {
@@ -62,16 +70,56 @@ func (a *Agent) guardLoop() {
 				break
 			}
 		}
-		// 2. The system as a whole has run out of memory and stays out.
+		// The extra engines (the Potluck helper's model, crew members) are watched the same
+		// way; one that runs out is stopped on its own, leaving the main model alone.
+		for name, p := range aux {
+			if p.Running() {
+				if line := newOOMLine(p.logPath, logOffsets); line != "" {
+					a.guardStopAux(name, "it ran out of memory ("+line+")")
+				}
+			}
+		}
+		// 2. The system as a whole has run out of memory and stays out: stop the main model's
+		// engines, or the extra engines when they are all that is running.
 		if critical, detail := memoryCritical(); critical {
 			bad++
 			if bad >= guardSustain {
-				a.guardStop("this computer ran out of memory (" + detail + ")")
+				if rpc.Running() || head.Running() {
+					a.guardStop("this computer ran out of memory (" + detail + ")")
+				} else {
+					for name, p := range aux {
+						if p.Running() {
+							a.guardStopAux(name, "this computer ran out of memory ("+detail+")")
+						}
+					}
+				}
 				bad = 0
 			}
 		} else {
 			bad = 0
 		}
+	}
+}
+
+// guardStopAux stops one extra engine and notes why in its log and the guard's.
+func (a *Agent) guardStopAux(name, why string) {
+	a.mu.Lock()
+	e := a.aux[name]
+	a.mu.Unlock()
+	if e != nil {
+		if f, err := os.OpenFile(e.proc.logPath, os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+			fmt.Fprintf(f, "\n[potluck] the guard stopped this engine: %s\n", why)
+			f.Close()
+		}
+	}
+	if e != nil {
+		// Stopped but kept, so its status says it is down and why (its log's last line).
+		e.proc.Stop()
+	}
+	_ = os.MkdirAll(filepath.Join(a.dir, "logs"), 0o755)
+	if f, err := os.OpenFile(filepath.Join(a.dir, "logs", "guard.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+		fmt.Fprintf(f, "%s stopped the %s engine: %s\n", time.Now().Format(time.RFC3339), name, why)
+		f.Close()
 	}
 }
 

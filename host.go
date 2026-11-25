@@ -198,6 +198,7 @@ func (h *Host) Run() error {
 	go h.phoneLoop()
 	go h.shareLoop()
 	go h.helperLoop()
+	go h.crewWatch()
 	return nil
 }
 

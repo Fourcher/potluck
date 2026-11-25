@@ -238,3 +238,31 @@ func (h *Host) crewChatModels() []chatModel {
 	}
 	return out
 }
+
+// crewWatch notices a crew member whose engine has stopped (the guard ended it, it crashed
+// for good, its computer restarted) and says so, instead of listing it as running.
+func (h *Host) crewWatch() {
+	for range time.Tick(15 * time.Second) {
+		for _, c := range h.CrewList() {
+			if c.Phase != "running" {
+				continue
+			}
+			var st AuxStatus
+			if err := h.call(c.Node, "aux_status", map[string]string{"name": c.Name}, &st, 20*time.Second); err != nil {
+				continue // the computer may be briefly unreachable; its own status shows that
+			}
+			if st.Running {
+				continue
+			}
+			why := "its engine stopped"
+			if st.Log != "" {
+				why += ": " + st.Log
+			}
+			h.mu.Lock()
+			if m := h.crew[c.Name]; m != nil && m.Phase == "running" {
+				m.Phase, m.Error = "error", why
+			}
+			h.mu.Unlock()
+		}
+	}
+}
