@@ -167,6 +167,8 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 		case strings.HasPrefix(r.URL.Path, "/potluck/"):
 			http.NotFound(w, r)
 		default:
+			// One thinking switch for every client (thinking.go).
+			thinkingRequest(w, r)
 			// The Potluck helper's own small model, on this computer only.
 			if !isShared(r) && h.helperRoute(w, r) {
 				return

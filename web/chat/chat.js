@@ -807,16 +807,10 @@ function systemPrompt() {
   if (S.folder && toolSpecs() && toolSpecs().some(t => t.function.name === "list_files")) p.push(`The user has shared a folder named "${S.folder.name}". Use the tools to look at${S.folder.kind === "handle" ? " or change" : ""} files in it when that helps. Paths are relative to that folder. Do not guess what a file contains: read it.`);
   return p.join("\n\n");
 }
-// thinkingKwargs tells the model's chat template whether to think first. Qwen-style
-// templates take enable_thinking; others (Inkling 2) take a reasoning effort, where "none"
-// keeps the thinking as short as the model allows.
-// A budget is the only reliable stop for models that think whatever they are told (Inkling 2):
-// none when thinking is off, a few thousand tokens when on, then the engine asks for the answer.
-function thinkBudget(on = !!S.settings.thinking) {
-  return on ? { reasoning_budget_tokens: 4096, reasoning_budget_message: "Time to stop thinking and give the answer." } : { reasoning_budget_tokens: 1 }; // not 0: some model files loop on their markers with 0
-}
-function thinkingKwargs(on = !!S.settings.thinking) {
-  return { enable_thinking: on, reasoning_effort: on ? "high" : "none" };
+// Potluck's one thinking switch: Potluck turns it into what the loaded model reads (its
+// template's effort level or enable_thinking), with a generous budget only as a backstop.
+function thinking(on = !!S.settings.thinking) {
+  return { thinking: on ? "high" : "off" };
 }
 function apiMessages() {
   const out = [{ role: "system", content: systemPrompt() }];
@@ -861,7 +855,7 @@ function parseToolCalls(raw) {
   return calls;
 }
 async function streamDirect(msg, signal) {
-  const s = S.settings, tools = toolSpecs(), body = { messages: apiMessages(), chat_template_kwargs: thinkingKwargs(false), ...thinkBudget(false) };
+  const s = S.settings, tools = toolSpecs(), body = { messages: apiMessages(), ...thinking(false) };
   if (tools) body.tools = tools;
   const fail = async r => { let t = await r.text(); try { const j = JSON.parse(t); t = (j.error && (j.error.message || j.error)) || t; } catch { } return String(t); };
   const tr = await fetch("/apply-template", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
@@ -906,7 +900,7 @@ async function streamDirect(msg, signal) {
 }
 async function streamOnce(msg, signal) {
   const s = S.settings, tools = toolSpecs();
-  const body = { messages: apiMessages(), stream: true, stream_options: { include_usage: true }, cache_prompt: true, chat_template_kwargs: thinkingKwargs(), ...thinkBudget(), ...extModel() };
+  const body = { messages: apiMessages(), stream: true, stream_options: { include_usage: true }, cache_prompt: true, ...thinking(), ...extModel() };
   if (tools) body.tools = tools;
   if (s.temperature !== "" && !isNaN(+s.temperature)) body.temperature = +s.temperature;
   if (s.maxTokens !== "" && +s.maxTokens > 0) body.max_tokens = +s.maxTokens;
@@ -1047,7 +1041,7 @@ async function compact() {
   const c = S.cur; if (S.gen || !c.messages.length) return toast("There is nothing to summarize yet.");
   if (!running()) return toast("No model is running.");
   S.compacting = true; drawStatus();
-  const body = { messages: [...apiMessages(), { role: "user", content: "Summarize our conversation so far for your own later use. Keep every fact, decision, name, number and open question that matters, in compact notes. Do not add anything new." }], stream: false, chat_template_kwargs: thinkingKwargs(false), ...thinkBudget(false), ...extModel() };
+  const body = { messages: [...apiMessages(), { role: "user", content: "Summarize our conversation so far for your own later use. Keep every fact, decision, name, number and open question that matters, in compact notes. Do not add anything new." }], stream: false, ...thinking(false), ...extModel() };
   try {
     const r = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const j = await r.json(); if (!r.ok) throw new Error((j.error && j.error.message) || "The model did not answer.");

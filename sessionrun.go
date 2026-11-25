@@ -407,14 +407,9 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 	}
 	body := map[string]any{
 		"model": model, "stream": true, "messages": st.apiMessages(s), "tools": st.tools(ctx, s),
-		"stream_options":       map[string]bool{"include_usage": true},
-		"chat_template_kwargs": map[string]any{"enable_thinking": thinking, "reasoning_effort": map[bool]string{true: "high", false: "none"}[thinking]},
+		"stream_options": map[string]bool{"include_usage": true},
+		"thinking":       map[bool]string{true: "high", false: "off"}[thinking], // Potluck's one switch (thinking.go)
 	}
-	// Some models (Inkling 2) think at length whatever the template is told; a budget is the
-	// only reliable stop: none when thinking is off, a few thousand tokens when it is on, then
-	// the engine tells the model to answer. Measured: 12000 tokens of thinking and no answer
-	// without it; 16 tokens and no thinking with a budget of 0.
-	thinkBudget(body, thinking)
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://127.0.0.1:"+strconv.Itoa(portChat)+"/v1/chat/completions", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
@@ -575,8 +570,7 @@ func (st *sessionStore) compactIfNeeded(ctx context.Context, s *Session) error {
 	sum := map[string]any{"model": model, "messages": []map[string]string{
 		{"role": "system", "content": "Summarise this work log for the assistant that continues it: the task, what was done, what was found, files changed, decisions, and what is left. Be complete and specific; it replaces the log."},
 		{"role": "user", "content": trimTo(b.String(), ctxTok*2)},
-	}, "chat_template_kwargs": map[string]any{"enable_thinking": false, "reasoning_effort": "none"}}
-	thinkBudget(sum, false)
+	}, "thinking": "off"}
 	body, _ := json.Marshal(sum)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://127.0.0.1:"+strconv.Itoa(portChat)+"/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -827,18 +821,6 @@ func (st *sessionStore) requestPermissions(ctx context.Context, s *Session, args
 	return out + ".", nil
 }
 
-// thinkBudget caps a request's thinking (see complete).
-func thinkBudget(body map[string]any, on bool) {
-	if on {
-		body["reasoning_budget_tokens"] = 4096
-		body["reasoning_budget_message"] = "Time to stop thinking and give the answer."
-	} else {
-		// 1, not 0: a budget of exactly 0 makes some model files (Inkling 2 Mini IQ2_M,
-		// measured on 2026-11-24) repeat their own markers instead of answering. 1 is as fast.
-		body["reasoning_budget_tokens"] = 1
-	}
-}
-
 // delegate runs one sub-task on a crew member and returns its answer.
 func (st *sessionStore) delegate(ctx context.Context, member, task string) (string, error) {
 	c := st.host.crewMember(member)
@@ -852,9 +834,8 @@ func (st *sessionStore) delegate(ctx context.Context, member, task string) (stri
 		return "", fmt.Errorf("no running crew member called %q (running: %s)", member, strings.Join(names, ", "))
 	}
 	body := map[string]any{"model": "crew:" + c.Name, "stream": false,
-		"messages":             []map[string]string{{"role": "user", "content": task}},
-		"chat_template_kwargs": map[string]any{"enable_thinking": false, "reasoning_effort": "none"}}
-	thinkBudget(body, false)
+		"messages": []map[string]string{{"role": "user", "content": task}},
+		"thinking": "off"}
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://127.0.0.1:"+strconv.Itoa(portChat)+"/v1/chat/completions", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
