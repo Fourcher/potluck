@@ -83,14 +83,18 @@ func TestOOMLine(t *testing.T) {
 }
 
 func TestCeiling(t *testing.T) {
-	h := &Host{memCeil: map[string]memCeiling{"a": {Bytes: 10 << 30, Until: time.Now().Add(time.Hour)}}}
+	h := &Host{cfg: loadConfig(t.TempDir())}
+	set := func(c memCeiling) {
+		h.cfg.Update(func(cf *Config) { cf.Ceilings = map[string]memCeiling{"a": c} })
+	}
+	set(memCeiling{Bytes: 10 << 30, Until: time.Now().Add(time.Hour)})
 	if c, g := h.capByCeiling("a", 12<<30, 2<<30); c+g != 10<<30 || g != 2<<30 {
 		t.Fatalf("cap: cpu %d gpu %d", c, g)
 	}
 	if c, g := h.capByCeiling("b", 12<<30, 0); c != 12<<30 || g != 0 {
 		t.Fatal("a computer that never ran out must not be limited")
 	}
-	h.memCeil["a"] = memCeiling{Bytes: 1, Until: time.Now().Add(-time.Second)}
+	set(memCeiling{Bytes: 1, Until: time.Now().Add(-time.Second)})
 	if c, _ := h.capByCeiling("a", 12<<30, 0); c != 12<<30 {
 		t.Fatal("an expired ceiling still applies")
 	}

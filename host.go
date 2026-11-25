@@ -104,7 +104,6 @@ type Host struct {
 	// tunnel) while holding any of them. TestLockOrder exercises the paths that share them.
 	mu             sync.Mutex
 	nodes          map[string]*Node
-	memCeil        map[string]memCeiling // per computer, after its guard stepped in (hostguard.go)
 	sessOnce       sync.Once
 	sess           *sessionStore // agent sessions (sessions.go)
 	pushErr        string        // the last problem sending a phone alert

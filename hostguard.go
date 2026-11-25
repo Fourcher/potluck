@@ -58,23 +58,23 @@ func (h *Host) guardTripped(id string, ev *GuardEvent, plan *Plan) {
 		}
 	}
 	next := ""
+	var ceil *memCeiling
 	if held > 0 && plan.LayerBytes > 0 && held > plan.LayerBytes {
-		if h.memCeil == nil {
-			h.memCeil = map[string]memCeiling{}
-		}
-		ceil := held - plan.LayerBytes // one layer less than what it could not hold
-		c := memCeiling{Bytes: ceil, Until: time.Now().Add(6 * time.Hour)}
-		h.memCeil[id] = c
-		go h.cfg.Update(func(cf *Config) {
-			if cf.Ceilings == nil {
-				cf.Ceilings = map[string]memCeiling{}
-			}
-			cf.Ceilings[id] = c
-		})
-		next = fmt.Sprintf(" Next time Potluck gives %s at most %s (it ran out holding %s); start the model again to try.", name, humanBytes(ceil), humanBytes(held))
+		// One layer less than what it could not hold, for six hours.
+		ceil = &memCeiling{Bytes: held - plan.LayerBytes, Until: time.Now().Add(6 * time.Hour)}
+		next = fmt.Sprintf(" Next time Potluck gives %s at most %s (it ran out holding %s); start the model again to try.", name, humanBytes(ceil.Bytes), humanBytes(held))
 	}
 	h.guardWhy = fmt.Sprintf("%s: %s. Potluck stopped the model so %s would not freeze.%s", name, ev.Why, name, next)
 	h.mu.Unlock()
+	if ceil != nil {
+		// Kept in the settings only (one copy, and it survives a restart).
+		h.cfg.Update(func(cf *Config) {
+			if cf.Ceilings == nil {
+				cf.Ceilings = map[string]memCeiling{}
+			}
+			cf.Ceilings[id] = *ceil
+		})
+	}
 	h.Stop()
 	h.mu.Lock()
 	h.cluster.Phase, h.cluster.Error = "error", h.guardWhy
@@ -83,10 +83,10 @@ func (h *Host) guardTripped(id string, ev *GuardEvent, plan *Plan) {
 
 // capByCeiling trims a computer's offer to what it held without running out (see above).
 func (h *Host) capByCeiling(id string, cpu, gpu int64) (int64, int64) {
-	c, ok := h.memCeil[id]
-	if !ok && h.cfg != nil {
-		c, ok = h.cfg.Get().Ceilings[id] // from before a restart
+	if h.cfg == nil {
+		return cpu, gpu
 	}
+	c, ok := h.cfg.Get().Ceilings[id]
 	if !ok || time.Now().After(c.Until) || cpu+gpu <= c.Bytes {
 		return cpu, gpu
 	}
