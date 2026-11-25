@@ -135,6 +135,7 @@ final class PotluckEngine {
     private func ping() async -> Bool {
         var r = URLRequest(url: Self.panelURL.appendingPathComponent("api/state"))
         r.timeoutInterval = 1.5
+        r.setValue("1", forHTTPHeaderField: "X-Potluck") // the panel answers only Potluck's own pages and apps
         return ((try? await URLSession.shared.data(for: r).1) as? HTTPURLResponse)?.statusCode == 200
     }
 
@@ -183,6 +184,7 @@ final class PotluckEngine {
     private func getJSON(_ url: URL) async throws -> [String: Any] {
         var r = URLRequest(url: url)
         r.timeoutInterval = 3
+        r.setValue("1", forHTTPHeaderField: "X-Potluck")
         let (d, resp) = try await URLSession.shared.data(for: r)
         guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
         return (try JSONSerialization.jsonObject(with: d)) as? [String: Any] ?? [:]
