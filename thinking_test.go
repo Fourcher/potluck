@@ -6,7 +6,7 @@ func TestApplyThinking(t *testing.T) {
 	b := map[string]any{"model": "potluck", "thinking": "off"}
 	applyThinking(b)
 	kw := b["chat_template_kwargs"].(map[string]any)
-	if _, left := b["thinking"]; left || kw["reasoning_effort"] != "none" || kw["enable_thinking"] != false || b["reasoning_budget_tokens"] != thinkBackstopOff {
+	if _, left := b["thinking"]; left || kw["reasoning_effort"] != "none" || kw["enable_thinking"] != false || b["reasoning_budget_tokens"] != 0 {
 		t.Fatalf("off: %v", b)
 	}
 	b = map[string]any{"thinking": true, "reasoning_budget_tokens": 2500, "chat_template_kwargs": map[string]any{"reasoning_effort": "medium"}}

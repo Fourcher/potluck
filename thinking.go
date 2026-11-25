@@ -7,10 +7,14 @@ package main
 //
 //	"thinking": "off" | "low" | "medium" | "high"   (or true / false)
 //
-// and Potluck turns it into what the model reads. A thinking budget stays only as a backstop
-// against a model that will not stop: generous, so the model normally ends its thinking
-// itself. (A budget of 0 or 1 cut the thinking off before it began, in a state the model never
-// saw in training; a 2-bit Inkling looped on its own markers at 0.)
+// and Potluck turns it into what the model reads.
+//
+// Off means off: the model's lowest effort and a thinking budget of 0, so it answers at once.
+// Inkling 2's "none" alone does not stop it (measured on the 2-bit file: up to 1,356 tokens of
+// thinking for a haiku); with a budget of 0 it answered all six test prompts with no thinking
+// and no loop, at the makers' sampling settings. (This morning's loop at budget 0 came with
+// the engine's generic sampling settings; Potluck now fills in the makers', sampling.go.)
+// On, the budget is only a backstop against a model that will not stop.
 
 import (
 	"bytes"
@@ -21,7 +25,7 @@ import (
 )
 
 const (
-	thinkBackstopOff = 1024 // effort "none" still thinks a sentence or two; this only stops a runaway
+	thinkBackstopOff = 0
 	thinkBackstopOn  = 8192
 	thinkStopMessage = "Stop thinking now and give the answer."
 )
