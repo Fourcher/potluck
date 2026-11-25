@@ -332,7 +332,7 @@ struct WebView: NSViewRepresentable {
             return panel.runModal() == .OK ? panel.urls : nil
         }
         // The microphone, for dictation in the chat: only for Potluck's own pages on this computer.
-        func webView(_ w: WKWebView, requestMediaCapturePermissionFor o: WKSecurityOrigin, initiatedByFrame f: WKFrameInfo, type: WKMediaCaptureType) async -> WKPermissionDecision {
+        func webView(_ w: WKWebView, decideMediaCapturePermissionsFor o: WKSecurityOrigin, initiatedBy f: WKFrameInfo, type: WKMediaCaptureType) async -> WKPermissionDecision {
             (o.host == "127.0.0.1" || o.host == "localhost") && type == .microphone ? .grant : .deny
         }
         func webView(_ w: WKWebView, runJavaScriptConfirmPanelWithMessage m: String, initiatedByFrame f: WKFrameInfo) async -> Bool {
