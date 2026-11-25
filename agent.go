@@ -129,6 +129,7 @@ type Agent struct {
 	listeners []net.Listener
 	jobs      map[string]context.CancelFunc // jobs in progress (jobCtx)
 	jobOwner  map[string]string             // whose each job is: "" the main model, "aux:<slot>" an extra engine
+	rtMu      sync.Mutex                    // one engine install at a time (ensureRuntime)
 	status    string
 	done      int64
 	total     int64
@@ -437,7 +438,7 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 				return map[string]string{"dir": dir, "gpuDevice": dev, "local": le}, nil
 			}
 		}
-		dir, err := a.ensureRuntime(a.jobCtxFor("runtime", spec.For), spec, func(s string) { a.note(s, 0, 0) })
+		dir, err := a.ensureRuntime(a.jobCtxFor("runtime:"+spec.For, spec.For), spec, func(s string) { a.note(s, 0, 0) })
 		if err != nil {
 			return nil, err
 		}

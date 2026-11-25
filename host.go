@@ -42,18 +42,20 @@ func init() {
 
 // Node is one computer as the main computer sees it.
 type Node struct {
-	Info     NodeInfo  `json:"info"`
-	Online   bool      `json:"online"`
-	IsMain   bool      `json:"isMain"`
-	Status   string    `json:"status"`
-	Done     int64     `json:"done"`
-	Total    int64     `json:"total"`
-	Role     string    `json:"role"` // head | worker | "" while a model runs
-	Held     int64     `json:"held"` // bytes of the running model on this computer
-	Offer    int64     `json:"offer"`
-	Active   bool      `json:"active"` // allowed to work right now (switch + schedule)
-	NoGPU    bool      `json:"noGPU"`  // its engine found no graphics card it can use after all
-	LastSeen time.Time `json:"lastSeen"`
+	Info      NodeInfo `json:"info"`
+	Online    bool     `json:"online"`
+	IsMain    bool     `json:"isMain"`
+	Status    string   `json:"status"`
+	Done      int64    `json:"done"`
+	Total     int64    `json:"total"`
+	Role      string   `json:"role"` // head | worker | "" while a model runs
+	Held      int64    `json:"held"` // bytes of the running model on this computer
+	Offer     int64    `json:"offer"`
+	Active    bool     `json:"active"`   // allowed to work right now (switch + schedule)
+	NoGPU     bool     `json:"noGPU"`    // its engine found no graphics card it can use after all
+	Prepared  bool     `json:"prepared"` // its engine is installed and has said which card it can use (prepareNode)
+	preparing bool
+	LastSeen  time.Time `json:"lastSeen"`
 	// LinkMs is the average round trip to this computer over the last couple of minutes,
 	// jitter included. 0 until measured.
 	LinkMs float64 `json:"linkMs"`
@@ -441,9 +443,56 @@ func (h *Host) refreshNode(id string) {
 		return
 	}
 	h.mu.Lock()
+	prep := false
 	if n := h.nodes[id]; n != nil {
 		info.ID = id
 		n.Info, n.LastSeen = info, time.Now()
+		if !n.Prepared && !n.preparing && n.Online && info.Limits.ActiveNow(time.Now()) {
+			n.preparing, prep = true, true
+		}
+	}
+	h.mu.Unlock()
+	if prep {
+		go h.prepareNode(id)
+	}
+}
+
+// prepareNode installs the AI engine on a computer that lends, as soon as it does, and learns
+// whether the engine can use its graphics card. Plans then count the card only if it works,
+// instead of finding out halfway through starting a model and planning again; and the first
+// start is quicker.
+func (h *Host) prepareNode(id string) {
+	defer func() {
+		h.mu.Lock()
+		if n := h.nodes[id]; n != nil {
+			n.preparing = false
+		}
+		h.mu.Unlock()
+	}()
+	h.mu.Lock()
+	n := h.nodes[id]
+	if n == nil {
+		h.mu.Unlock()
+		return
+	}
+	ni := n.Info
+	single := h.cfg != nil && h.cfg.Get().Single
+	h.mu.Unlock()
+	spec, err := h.runtimeSpec(ni, true)
+	if err != nil {
+		return
+	}
+	spec.Solo, spec.For = single, "aux:prepare" // alone: an engine already on the computer will do
+	var res struct {
+		GPUDevice string `json:"gpuDevice"`
+	}
+	if err := h.call(id, "ensure_runtime", spec, &res, 2*time.Hour); err != nil {
+		return
+	}
+	h.mu.Lock()
+	if n := h.nodes[id]; n != nil {
+		n.Prepared = true
+		n.NoGPU = twoDev(ni) && res.GPUDevice == ""
 	}
 	h.mu.Unlock()
 }

@@ -196,6 +196,11 @@ func simpleDownload(ctx context.Context, u, dest, sha string) error {
 
 // ensureRuntime installs the llama.cpp build described by spec and returns its folder.
 func (a *Agent) ensureRuntime(ctx context.Context, spec RuntimeSpec, note func(string)) (string, error) {
+	// One install at a time on a computer: the main model, the helper, a crew member and the
+	// early preparation can all ask at once, and share the same folder. A second asker waits
+	// and then finds the engine ready.
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
 	dir := filepath.Join(a.dir, "runtime", spec.Tag+"-"+spec.Variant)
 	if _, err := os.Stat(filepath.Join(dir, ".ok")); err == nil {
 		return dir, a.ensureGlibc(ctx, note)
