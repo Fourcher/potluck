@@ -1437,6 +1437,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		// Every hardware thread except where it measured slower: the disk in play, or pooled with
 		// whole layers on the head's processor (see threadsFor).
 		AllThreads: plan.Overflow == 0 && !(!plan.Solo && len(plan.Shares) > 0 && plan.Shares[0].CPULayers > 0)}
+	loadStart := time.Now()
 	if err := h.call(plan.Head, "start_head", req, nil, time.Minute); err != nil {
 		done(err)
 		return err
@@ -1474,7 +1475,11 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 				break
 			}
 			if !st.Head {
-				err := errors.New("the AI engine stopped while loading: " + lastLogLine(st.HeadLog))
+				why := lastLogLine(st.HeadLog)
+				if st.Guard != nil && st.Guard.At.After(loadStart) {
+					why = st.Guard.Why // the guard stopped it, and says why
+				}
+				err := errors.New("the AI engine stopped while loading: " + why)
 				done(err)
 				return err
 			}

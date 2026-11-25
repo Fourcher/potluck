@@ -121,6 +121,8 @@ type Agent struct {
 	rtDir     string
 	gpuDev    string // the engine's name for this computer's graphics card, "" if none is used
 	rpc, head *proc
+	// headLog: the last head engine's log, kept after a stop so the reason it ended can still be read.
+	headLog string
 	guard     *GuardEvent // the guard's last stop (guard.go)
 	vision    bool        // the model running here was loaded with its image add-on
 	rpcPort   int
@@ -835,7 +837,7 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 		return nil, err
 	}
 	a.mu.Lock()
-	a.head, a.apiPort, a.listeners = p, api, listeners
+	a.head, a.apiPort, a.listeners, a.headLog = p, api, listeners, p.logPath
 	a.mu.Unlock()
 	a.note("Loading the model", 0, 0)
 	return map[string]int{"port": api, "threads": threads}, nil
@@ -884,7 +886,7 @@ func (a *Agent) startStream(in StartHeadReq) (any, error) {
 		return nil, err
 	}
 	a.mu.Lock()
-	a.head, a.apiPort, a.links = p, api, nil
+	a.head, a.apiPort, a.links, a.headLog = p, api, nil, p.logPath
 	a.mu.Unlock()
 	a.note("Loading the model (the first start measures this computer's disk, one to three minutes)", 0, 0)
 	return map[string]int{"port": api}, nil
@@ -900,7 +902,7 @@ func (a *Agent) Status() AgentStatus {
 			s.Links[k] = v
 		}
 	}
-	api, head := a.apiPort, a.head
+	api, head, headLog := a.apiPort, a.head, a.headLog
 	a.mu.Unlock()
 	if s.Head {
 		c := http.Client{Timeout: 2 * time.Second}
@@ -909,10 +911,10 @@ func (a *Agent) Status() AgentStatus {
 			res.Body.Close()
 		}
 	}
-	if head != nil {
-		s.HeadLog = tailFile(head.logPath, 6000)
-		if s.Ready {
-			s.FullLog = headFile(head.logPath, 200000)
+	if headLog != "" {
+		s.HeadLog = tailFile(headLog, 6000)
+		if s.Ready && head != nil {
+			s.FullLog = headFile(headLog, 200000)
 		}
 	}
 	return s
