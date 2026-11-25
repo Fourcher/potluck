@@ -625,9 +625,24 @@ function viewRunMain() {
     if (m.asleep) return `<h1>${esc(m.asleep.title || m.asleep.file)} is resting</h1>
       <p class="muted">It was let go after ${m.idleUnload} minutes without use, so its memory is free for other apps. It loads again by itself with your next chat message.</p>
       <p style="margin-top:14px"><a class="btn" href="${esc(m.chatURL)}" target="_blank" rel="noopener">Open chat</a> <button class="btn ghost" data-a="again">Load it now</button></p>`;
-    if (!m.lastModel) return `<h1>Ready when you are</h1><p class="muted">One click picks the best model your computers can run, downloads it and starts it. A model you already have (from LM Studio, Ollama or Hugging Face) is used where it is.</p>
+    if (!m.lastModel) {
+      // Say what the one click will run before it runs: the model, its size, where it fits.
+      if (quick.choice === undefined && !quick.looking) {
+        quick.looking = true;
+        api("/api/quickstart").then(r => { quick.choice = r; }).catch(e => { quick.choice = null; quick.lookErr = e.message; }).finally(() => { quick.looking = false; draw(); });
+      }
+      const ch = quick.choice, mm = ch && ch.model;
+      const pick = mm ? `<div class="card" style="margin-top:14px"><div class="row spread"><h3>${esc(mm.title || mm.file)}</h3>
+          <span class="badge ${ch.verdict === "pool" ? "main" : "ok"}">${ch.verdict === "pool" ? "Runs pooled across your computers" : "Runs on one computer"}</span></div>
+          ${ch.blurb ? `<p class="muted small">${esc(ch.blurb)}</p>` : ""}
+          <p class="small">${ch.local ? esc(ch.note) : `Download ${gb(ch.download)}. ${esc(ch.note || "")}`}</p></div>`
+        : quick.looking ? `<p class="muted small" style="margin-top:14px">Finding the best model for your computers…</p>`
+        : quick.lookErr ? `<div class="note">${esc(quick.lookErr)}</div>` : "";
+      return `<h1>Ready when you are</h1><p class="muted">One click downloads the best model your computers can run and starts it. A model you already have (from LM Studio, Ollama or Hugging Face) is used where it is.</p>
+      ${pick}
       ${quick.error ? `<div class="note">${esc(quick.error)}</div>` : ""}
-      <p style="margin-top:14px"><button class="btn" data-a="quick" ${quick.busy ? "disabled" : ""}>${quick.busy ? "Choosing a model…" : "Download and start"}</button> <button class="btn ghost" data-a="tab" data-tab="models">Choose a model myself</button></p>`;
+      <p style="margin-top:14px"><button class="btn" data-a="quick" ${quick.busy || (!mm && quick.looking) ? "disabled" : ""}>${quick.busy ? "Starting…" : mm && mm.source === "local" ? "Start it" : "Download and start"}</button> <button class="btn ghost" data-a="tab" data-tab="models">Choose a model myself</button></p>`;
+    }
     return `<h1>Nothing is running</h1><p class="muted">Pick a model and Potluck spreads it over your computers.</p>
       <p style="margin-top:14px"><button class="btn" data-a="tab" data-tab="models">Choose a model</button>
       ${m.lastModel ? ` <button class="btn ghost" data-a="again">Run ${esc(m.lastModel.title || m.lastModel.file)} again</button>` : ""}</p>`;

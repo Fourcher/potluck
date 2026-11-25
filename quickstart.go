@@ -45,8 +45,28 @@ func pickQuick(files []StoreFile) (StoreFile, bool) {
 // download) if one fits, and otherwise downloads the first of the recommended models that
 // fits, in the size that suits these computers.
 func (h *Host) QuickStart(ctx context.Context) (ModelRef, error) {
+	c, err := h.quickChoice(ctx)
+	if err != nil {
+		return ModelRef{}, err
+	}
+	return c.Model, h.Start(c.Model, 0, c.Solo) // 0: the conversation memory is chosen to fit (autoCtx)
+}
+
+// QuickChoice is what the one-click start would run, said before anything is downloaded.
+type QuickChoice struct {
+	Model    ModelRef `json:"model"`
+	Solo     string   `json:"-"`
+	Local    bool     `json:"local"`    // already on one of the computers: nothing to download
+	Verdict  string   `json:"verdict"`  // one | pool (StoreFile.Verdict)
+	Note     string   `json:"note"`     // how it fits, in plain words
+	Blurb    string   `json:"blurb"`    // why it was picked (the catalog's words)
+	Download int64    `json:"download"` // bytes to download, 0 when local
+}
+
+// quickChoice picks the model QuickStart runs (see there).
+func (h *Host) quickChoice(ctx context.Context) (QuickChoice, error) {
 	if m, ok := h.quickLocal(ctx); ok {
-		return m, h.Start(m, 0, "") // 0: the conversation memory is chosen to fit (autoCtx)
+		return QuickChoice{Model: m, Local: true, Verdict: "one", Note: "Already on " + h.nodeName(m.Node) + ", so nothing to download."}, nil
 	}
 	repos := []string{h.recommended()}
 	if c := h.catalog(); c != nil {
@@ -99,18 +119,26 @@ func (h *Host) QuickStart(ctx context.Context) (ModelRef, error) {
 				solo = p.Head
 			}
 		}
-		return m, h.Start(m, 0, solo) // 0: the conversation memory is chosen to fit (autoCtx)
+		blurb := ""
+		if c := h.catalog(); c != nil {
+			for _, p := range c.Picks {
+				if p.Repo == repo {
+					blurb = p.Blurb
+				}
+			}
+		}
+		return QuickChoice{Model: m, Solo: solo, Verdict: f.Verdict, Note: f.Note, Blurb: blurb, Download: m.Size}, nil
 	}
 	if ctx.Err() != nil {
-		return ModelRef{}, errors.New("looking for a model that fits took too long; try again")
+		return QuickChoice{}, errors.New("looking for a model that fits took too long; try again")
 	}
 	if fitted && lastErr != nil {
-		return ModelRef{}, fmt.Errorf("a model that fits was found, but could not be read: %w", lastErr)
+		return QuickChoice{}, fmt.Errorf("a model that fits was found, but could not be read: %w", lastErr)
 	}
 	if !reached {
-		return ModelRef{}, errors.New("could not reach Hugging Face to fetch the model list. Check the internet connection and try again")
+		return QuickChoice{}, errors.New("could not reach Hugging Face to fetch the model list. Check the internet connection and try again")
 	}
-	return ModelRef{}, fmt.Errorf("none of the recommended models fits the computers connected now (the smallest needs about %s of free memory). Add another computer under Computers, or close other apps and try again", humanBytes(smallest+smallest/5))
+	return QuickChoice{}, fmt.Errorf("none of the recommended models fits the computers connected now (the smallest needs about %s of free memory). Add another computer under Computers, or close other apps and try again", humanBytes(smallest+smallest/5))
 }
 
 // quickLocal is a model already on one of the computers that runs well as it is: the last one

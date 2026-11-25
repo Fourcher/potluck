@@ -340,6 +340,10 @@ func (app *App) serveUI() error {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 		defer cancel()
+		if r.Method == http.MethodGet {
+			// What the one-click start would run, shown before anything is downloaded.
+			return h.quickChoice(ctx)
+		}
 		m, err := h.QuickStart(ctx)
 		if err != nil {
 			return nil, err
@@ -693,7 +697,7 @@ func (app *App) serveUI() error {
 				c.Single = *in.Single
 				if c.Single {
 					c.Limits.Enabled = true
-					if c.Limits.Pedal < 50 {
+					if c.Limits.Pedal <= 50 { // the main computer's default share (50%) is not "all it can spare"
 						c.Limits.Pedal = 100
 					}
 				}
