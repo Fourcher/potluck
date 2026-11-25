@@ -50,7 +50,7 @@ func fakeMonolith(t *testing.T, calls *[]string) measurer {
 func TestFitStartShrinksBatchThenContext(t *testing.T) {
 	var calls []string
 	req := StartHeadReq{Ctx: 262144, NGL: 999}
-	got := fitStart(fakeMonolith(t, &calls), "m", req, true, 0, nil)
+	got := fitStart(fakeMonolith(t, &calls), "m", req, true, 0, nil, nil)
 	if !got.Measured {
 		t.Fatalf("not measured: %+v", got)
 	}
@@ -65,7 +65,7 @@ func TestFitStartShrinksBatchThenContext(t *testing.T) {
 
 func TestFitStartKeepsChosenSize(t *testing.T) {
 	var calls []string
-	got := fitStart(fakeMonolith(t, &calls), "m", StartHeadReq{Ctx: 65536}, false, 0, nil)
+	got := fitStart(fakeMonolith(t, &calls), "m", StartHeadReq{Ctx: 65536}, false, 0, nil, nil)
 	// The person chose 64k: only the batch may change, and nothing fits, so it stands.
 	if got.Ctx != 65536 || got.UBatch != 0 || len(calls) != 3 {
 		t.Fatalf("got %+v after %v", got, calls)
@@ -74,7 +74,7 @@ func TestFitStartKeepsChosenSize(t *testing.T) {
 
 func TestFitStartVisionGoesToProcessorWhenShort(t *testing.T) {
 	var calls []string
-	got := fitStart(fakeMonolith(t, &calls), "m", StartHeadReq{Ctx: 8192}, true, 765, nil)
+	got := fitStart(fakeMonolith(t, &calls), "m", StartHeadReq{Ctx: 8192}, true, 765, nil, nil)
 	// 8k at 512: 1008+496+840 = 2344; with the add-on 3109 + margin > 3359.
 	if got.Ctx != 8192 || got.UBatch != 0 || !got.VisionCPU {
 		t.Fatalf("got %+v", got)
@@ -112,8 +112,42 @@ func TestFitStartMovesExpertsBackBeforeShrinkingBatch(t *testing.T) {
 			plan = append(plan, l)
 		}
 	}
-	got := fitStart(m, "m", StartHeadReq{Ctx: 16384, ExpertCPU: plan}, false, 0, all)
+	got := fitStart(m, "m", StartHeadReq{Ctx: 16384, ExpertCPU: plan}, false, 0, all, nil)
 	if got.Ctx != 16384 || got.UBatch != 256 || len(got.ExpertCPU) != 24 {
 		t.Fatalf("got %+v after %v", got, calls)
+	}
+}
+
+// A pooled start: the helper's engine reports all of its memory as free (16 GB on the MacBook),
+// so its share is checked against what Potluck may use there. Figures from a dry run on LLMOS
+// with the MacBook as helper (Inkling 2 IQ2_M, 16k): working memory 1772 MiB at batch 512,
+// 442 at 128.
+func TestFitStartPooledChecksHelperBudget(t *testing.T) {
+	m := func(node string, r StartHeadReq) (MeasureRes, error) {
+		compute := int64(1772)
+		switch r.UBatch {
+		case 256:
+			compute = 886
+		case 128:
+			compute = 442
+		}
+		return MeasureRes{Devices: []DevMem{{Name: "RPC0 (127.0.0.1:5000)", Node: "mbp", Total: 16384, Free: 16384, Self: 8003 + 755 + compute}}}, nil
+	}
+	req := StartHeadReq{Ctx: 16384, Workers: []string{"mbp"}}
+	got := fitStart(m, "llmos", req, false, 0, nil, map[string]int64{"mbp": 10000})
+	// 10530 + margin > 10000; 9644 + 384 = 10028 > 10000; 9200 + 384 fits at 128.
+	if !got.Measured || got.UBatch != 128 || got.Note != "Fits on every computer with reading prompts 128 words at a time" {
+		t.Fatalf("%+v", got)
+	}
+	if got := fitStart(m, "llmos", req, false, 0, nil, map[string]int64{"mbp": 12000}); got.UBatch != 0 {
+		t.Fatalf("room enough, batch must stay: %+v", got)
+	}
+}
+
+func TestNameHelpers(t *testing.T) {
+	r := MeasureRes{Devices: []DevMem{{Name: "CUDA0 (GTX 1050 Ti)"}, {Name: "RPC0 (127.0.0.1:5001)"}, {Name: "RPC1 (127.0.0.1:5002)"}}}
+	r.nameHelpers([]string{"127.0.0.1:5001", "127.0.0.1:5002"}, []string{"a", "b"})
+	if r.Devices[0].Node != "" || r.Devices[1].Node != "a" || r.Devices[2].Node != "b" {
+		t.Fatalf("%+v", r.Devices)
 	}
 }

@@ -44,7 +44,10 @@ type fitOutcome struct {
 //
 // allExperts lists every layer with experts: when the plan put some experts on the card, the
 // card can have them back in memory (slower writing) before the prompt batch shrinks.
-func fitStart(measure measurer, node string, req StartHeadReq, auto bool, visionMiB int64, allExperts []int) fitOutcome {
+//
+// budget is, for each helper in the start, the memory (MiB) Potluck may use there: a helper's
+// engine reports its whole memory as free, so its share is checked against what it lends.
+func fitStart(measure measurer, node string, req StartHeadReq, auto bool, visionMiB int64, allExperts []int, budget map[string]int64) fitOutcome {
 	sizes := []int{req.Ctx}
 	if auto {
 		for c := req.Ctx / 2; c >= 8192; c /= 2 {
@@ -71,12 +74,12 @@ func fitStart(measure measurer, node string, req StartHeadReq, auto bool, vision
 					continue
 				}
 				first = false
-				short := cardShortMiB(res, 0)
+				short := cardShortMiB(res, 0, budget)
 				if short > 0 {
 					continue
 				}
 				out := fitOutcome{Ctx: c, UBatch: ub, ExpertCPU: experts, Measured: true}
-				if visionMiB > 0 && cardShortMiB(res, visionMiB) > 0 {
+				if visionMiB > 0 && cardShortMiB(res, visionMiB, budget) > 0 {
 					out.VisionCPU = true
 				}
 				var bits []string
@@ -93,6 +96,9 @@ func fitStart(measure measurer, node string, req StartHeadReq, auto bool, vision
 					bits = append(bits, "the image add-on on the processor")
 				}
 				out.Note = "Fits on the graphics card"
+				if len(req.Workers) > 0 {
+					out.Note = "Fits on every computer"
+				}
 				if len(bits) > 0 {
 					out.Note += " with " + strings.Join(bits, ", ")
 				}
@@ -100,25 +106,40 @@ func fitStart(measure measurer, node string, req StartHeadReq, auto bool, vision
 			}
 		}
 	}
-	keep.Note = "The engine reports it will not fit on the graphics card at any size tried"
+	keep.Note = "The engine reports it will not fit at any size tried"
 	keep.Measured = !first
 	return keep
 }
 
-// cardShortMiB: how much more card memory the start needs than the cards have free (after
-// the margin), with extra MiB on the first card; 0 when it fits.
-func cardShortMiB(res MeasureRes, extra int64) int64 {
+// cardShortMiB: how much more memory the start needs than there is (after the margin), with
+// extra MiB on this computer's first graphics card; 0 when it fits. This computer's cards are
+// checked against what they have free; a helper's devices against what it lends (budget),
+// and each of its devices against what it has free when that is a real figure (a card).
+func cardShortMiB(res MeasureRes, extra int64, budget map[string]int64) int64 {
 	var short int64
-	for i, d := range res.Devices {
-		if d.Total <= 0 {
+	first := true
+	perNode := map[string]int64{}
+	for _, d := range res.Devices {
+		if d.Node != "" {
+			perNode[d.Node] += d.Self
+			if d.Total <= 0 || d.Free >= d.Total {
+				continue // its engine reports all its memory as free: only the budget says
+			}
+		} else if d.Total <= 0 {
 			continue
 		}
 		need := d.Self + cardMarginMiB
-		if i == 0 {
+		if d.Node == "" && first {
 			need += extra
+			first = false
 		}
 		if need > d.Free {
 			short = max(short, need-d.Free)
+		}
+	}
+	for n, self := range perNode {
+		if b := budget[n]; b > 0 && self+cardMarginMiB > b {
+			short = max(short, self+cardMarginMiB-b)
 		}
 	}
 	return short

@@ -29,6 +29,8 @@ type DevMem struct {
 	Model   int64  `json:"model"`
 	Context int64  `json:"context"`
 	Compute int64  `json:"compute"`
+	// Node: for a device on a helper (the engine's "RPC0 (127.0.0.1:port)"), which computer.
+	Node string `json:"node,omitempty"`
 }
 
 // MeasureRes is the engine's report for one set of start arguments.
@@ -67,8 +69,8 @@ func parseMemReport(log string) (MeasureRes, bool) {
 
 // measureHead runs the engine's dry run for a start on this computer alone.
 func (a *Agent) measureHead(in StartHeadReq) (any, error) {
-	if len(in.Workers) > 0 || in.Stream {
-		return nil, errors.New("only a model on one computer can be measured")
+	if in.Stream {
+		return nil, errors.New("a model read from disk as it runs cannot be measured")
 	}
 	a.mu.Lock()
 	rt, gpuDev := a.rtDir, a.gpuDev
@@ -84,7 +86,18 @@ func (a *Agent) measureHead(in StartHeadReq) (any, error) {
 	if _, err := os.Stat(model); err != nil {
 		return nil, errors.New("the model file is not on this computer")
 	}
-	args := a.headArgs(in, model, rt, gpuDev, nil, threadsFor(a.Info(), in.AllThreads))
+	// With helpers, the dry run asks their engines (already started) through the same
+	// tunnels the real start uses; nothing is loaded on them.
+	rpcList, listeners, err := a.rpcTunnels(in.Workers)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		for _, l := range listeners {
+			l.Close()
+		}
+	}()
+	args := a.headArgs(in, model, rt, gpuDev, rpcList, threadsFor(a.Info(), in.AllThreads))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	cmd := a.engineCmd(bin, args...)
@@ -100,6 +113,7 @@ func (a *Agent) measureHead(in StartHeadReq) (any, error) {
 	if !ok {
 		return nil, errors.New("the engine's dry run gave no memory report: " + lastLogLine(out.String()))
 	}
+	res.nameHelpers(rpcList, in.Workers)
 	return res, nil
 }
 
@@ -117,3 +131,20 @@ func (c *capBuf) Write(p []byte) (int, error) {
 }
 
 func (c *capBuf) String() string { return string(c.b) }
+
+var rpcDevName = regexp.MustCompile(`^RPC\d+\S*\s+\(([^)]+)\)`)
+
+// nameHelpers marks each helper device with the computer behind its tunnel.
+func (r *MeasureRes) nameHelpers(rpcList, workers []string) {
+	for i := range r.Devices {
+		m := rpcDevName.FindStringSubmatch(r.Devices[i].Name)
+		if m == nil {
+			continue
+		}
+		for k, addr := range rpcList {
+			if addr == m[1] && k < len(workers) {
+				r.Devices[i].Node = workers[k]
+			}
+		}
+	}
+}

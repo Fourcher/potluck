@@ -805,33 +805,9 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	} else if found, _ := filepath.Glob(filepath.Join(filepath.Dir(model), "mmproj*.gguf")); len(found) > 0 {
 		mmproj = found[0]
 	}
-	// One local port per helper. The engine connects to these; each connection is carried
-	// to that helper through the main computer's encrypted link.
-	var rpcList []string
-	var listeners []net.Listener
-	for _, w := range in.Workers {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			return nil, err
-		}
-		listeners = append(listeners, l)
-		rpcList = append(rpcList, "127.0.0.1:"+strconv.Itoa(l.Addr().(*net.TCPAddr).Port))
-		go func(l net.Listener, w string) {
-			for {
-				c, err := l.Accept()
-				if err != nil {
-					return
-				}
-				go func() {
-					t, err := a.dialPeer(w, "rpc")
-					if err != nil {
-						c.Close()
-						return
-					}
-					pipe(c, t)
-				}()
-			}
-		}(l, w)
+	rpcList, listeners, err := a.rpcTunnels(in.Workers)
+	if err != nil {
+		return nil, err
 	}
 	api, err := freePort()
 	if err != nil {
@@ -1132,4 +1108,39 @@ func (a *Agent) localHeader(file string) (*ModelInfo, error) {
 		infos = append(infos, info)
 	}
 	return mergeParts(infos), nil
+}
+
+// rpcTunnels opens one local port per helper. The engine connects to these; each connection
+// is carried to that helper through the main computer's encrypted link.
+func (a *Agent) rpcTunnels(workers []string) ([]string, []net.Listener, error) {
+	var rpcList []string
+	var listeners []net.Listener
+	for _, w := range workers {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			for _, l := range listeners {
+				l.Close()
+			}
+			return nil, nil, err
+		}
+		listeners = append(listeners, l)
+		rpcList = append(rpcList, "127.0.0.1:"+strconv.Itoa(l.Addr().(*net.TCPAddr).Port))
+		go func(l net.Listener, w string) {
+			for {
+				c, err := l.Accept()
+				if err != nil {
+					return
+				}
+				go func() {
+					t, err := a.dialPeer(w, "rpc")
+					if err != nil {
+						c.Close()
+						return
+					}
+					pipe(c, t)
+				}()
+			}
+		}(l, w)
+	}
+	return rpcList, listeners, nil
 }

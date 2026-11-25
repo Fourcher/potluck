@@ -1435,10 +1435,19 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		// Every hardware thread except where it measured slower: the disk in play, or pooled with
 		// whole layers on the head's processor (see threadsFor).
 		AllThreads: plan.Overflow == 0 && !(!plan.Solo && len(plan.Shares) > 0 && plan.Shares[0].CPULayers > 0)}
-	// One computer alone: check the start against the engine's own report of what it will
-	// allocate, and shrink the prompt batch or the conversation memory until it truly fits.
-	if len(plan.WorkerOrder) == 0 && !plan.Stream && ngl > 0 {
-		done = h.step("Checking that it fits on the graphics card")
+	// Check the start against the engine's own report of what it will allocate on each device
+	// (this computer's cards, and each helper's share through its engine), and shrink the
+	// prompt batch or the conversation memory until it truly fits.
+	if !plan.Stream && (ngl > 0 || len(plan.WorkerOrder) > 0) {
+		if len(plan.WorkerOrder) == 0 {
+			done = h.step("Checking that it fits on the graphics card")
+		} else {
+			done = h.step("Checking that it fits on each computer")
+		}
+		budget := map[string]int64{}
+		for _, pn := range h.planNodes() {
+			budget[pn.ID] = (pn.CPUBytes + pn.GPUBytes) >> 20
+		}
 		var visionMiB int64
 		if model.Vision != nil {
 			visionMiB = (model.Vision.Size + model.Vision.Size/4) >> 20 // its weights and the room to work on an image
@@ -1449,7 +1458,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 				allExperts = append(allExperts, l)
 			}
 		}
-		f := fitStart(h.measureOn, plan.Head, req, auto, visionMiB, allExperts)
+		f := fitStart(h.measureOn, plan.Head, req, auto, visionMiB, allExperts, budget)
 		req.Ctx, req.UBatch, req.VisionCPU, req.ExpertCPU = f.Ctx, f.UBatch, f.VisionCPU, f.ExpertCPU
 		if f.Ctx != ctxSize {
 			ctxSize = f.Ctx
