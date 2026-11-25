@@ -566,6 +566,8 @@ function crewView() {
     <p class="small muted">A model already on a computer runs there; a Hugging Face model is downloaded to the computer you pick.</p></div>`;
 }
 
+const quick = { busy: false, error: "" };
+
 function viewRunMain() {
   const m = S.main, c = m.cluster;
   if (c.phase === "idle") {
@@ -574,6 +576,9 @@ function viewRunMain() {
     if (m.asleep) return `<h1>${esc(m.asleep.title || m.asleep.file)} is resting</h1>
       <p class="muted">It was let go after ${m.idleUnload} minutes without use, so its memory is free for other apps. It loads again by itself with your next chat message.</p>
       <p style="margin-top:14px"><a class="btn" href="${esc(m.chatURL)}" target="_blank" rel="noopener">Open chat</a> <button class="btn ghost" data-a="again">Load it now</button></p>`;
+    if (!m.lastModel) return `<h1>Ready when you are</h1><p class="muted">One click picks the best model your computers can run, downloads it and starts it. A model you already have (from LM Studio, Ollama or Hugging Face) is used where it is.</p>
+      ${quick.error ? `<div class="note">${esc(quick.error)}</div>` : ""}
+      <p style="margin-top:14px"><button class="btn" data-a="quick" ${quick.busy ? "disabled" : ""}>${quick.busy ? "Choosing a model…" : "Download and start"}</button> <button class="btn ghost" data-a="tab" data-tab="models">Choose a model myself</button></p>`;
     return `<h1>Nothing is running</h1><p class="muted">Pick a model and Potluck spreads it over your computers.</p>
       <p style="margin-top:14px"><button class="btn" data-a="tab" data-tab="models">Choose a model</button>
       ${m.lastModel ? ` <button class="btn ghost" data-a="again">Run ${esc(m.lastModel.title || m.lastModel.file)} again</button>` : ""}</p>`;
@@ -720,6 +725,10 @@ const actions = {
     const m = sheet.model, ctx = +($("#ctx") ? $("#ctx").value : 0), solo = t.dataset.solo || "";
     sheet = null; tab = "run"; location.hash = tab;
     act(() => api("/api/start", { ...m, ctx, solo }));
+  },
+  quick() {
+    quick.busy = true; quick.error = ""; draw(true);
+    api("/api/quickstart", {}).then(() => { quick.busy = false; tab = "run"; draw(true); }).catch(e => { quick.busy = false; quick.error = e.message; draw(true); });
   },
   again() {
     const c = S.main.cluster, m = c.model || S.main.lastModel;
