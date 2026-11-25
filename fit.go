@@ -1,0 +1,107 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+// cardMarginMiB is room left free on a graphics card after what the engine says it will
+// allocate: the engine also takes small scratch buffers as it runs, and the desktop may
+// grow. llama.cpp's own fitting keeps 1024 MiB; this is what a 4 GB card can spare.
+const cardMarginMiB = 384
+
+// measurer asks a computer's engine what a start would need (an interface so tests can
+// stand in for the engine).
+type measurer func(node string, req StartHeadReq) (MeasureRes, error)
+
+func (h *Host) measureOn(node string, req StartHeadReq) (MeasureRes, error) {
+	var res MeasureRes
+	err := h.call(node, "measure_head", req, &res, 4*time.Minute)
+	return res, err
+}
+
+// fitOutcome is what fitStart settled on.
+type fitOutcome struct {
+	Ctx       int
+	UBatch    int
+	VisionCPU bool
+	Measured  bool   // false: the engine could not be asked; the plan's estimate stands
+	Note      string // for the progress list
+}
+
+// fitStart checks a one-computer start against the engine's own report and, if it does not
+// fit, finds the closest start that does: first a smaller prompt batch (a little slower
+// reading, same conversation size), then, when the size was chosen automatically, a smaller
+// conversation. The image add-on goes on the card only when there is room left for it.
+// When nothing fits, the original start stands and the engine's own error will say why.
+func fitStart(measure measurer, node string, req StartHeadReq, auto bool, visionMiB int64) fitOutcome {
+	sizes := []int{req.Ctx}
+	if auto {
+		for c := req.Ctx / 2; c >= 8192; c /= 2 {
+			sizes = append(sizes, c)
+		}
+	}
+	keep := fitOutcome{Ctx: req.Ctx, UBatch: req.UBatch}
+	first := true
+	for _, c := range sizes {
+		for _, ub := range []int{0, 256, 128} {
+			r := req
+			r.Ctx, r.UBatch = c, ub
+			res, err := measure(node, r)
+			if err != nil {
+				if first {
+					keep.Note = "Could not measure it first (" + err.Error() + "); going by the estimate"
+					return keep
+				}
+				continue
+			}
+			first = false
+			short := cardShortMiB(res, 0)
+			if short > 0 {
+				continue
+			}
+			out := fitOutcome{Ctx: c, UBatch: ub, Measured: true}
+			if visionMiB > 0 && cardShortMiB(res, visionMiB) > 0 {
+				out.VisionCPU = true
+			}
+			var bits []string
+			if c != req.Ctx {
+				bits = append(bits, fmt.Sprintf("conversation memory %dk words instead of %dk", c/1024, req.Ctx/1024))
+			}
+			if ub != 0 {
+				bits = append(bits, fmt.Sprintf("reading prompts %d words at a time", ub))
+			}
+			if out.VisionCPU {
+				bits = append(bits, "the image add-on on the processor")
+			}
+			out.Note = "Fits on the graphics card"
+			if len(bits) > 0 {
+				out.Note += " with " + strings.Join(bits, ", ")
+			}
+			return out
+		}
+	}
+	keep.Note = "The engine reports it will not fit on the graphics card at any size tried"
+	keep.Measured = !first
+	return keep
+}
+
+// cardShortMiB: how much more card memory the start needs than the cards have free (after
+// the margin), with extra MiB on the first card; 0 when it fits.
+func cardShortMiB(res MeasureRes, extra int64) int64 {
+	var short int64
+	for i, d := range res.Devices {
+		if d.Total <= 0 {
+			continue
+		}
+		need := d.Self + cardMarginMiB
+		if i == 0 {
+			need += extra
+		}
+		if need > d.Free {
+			short = max(short, need-d.Free)
+		}
+	}
+	return short
+}

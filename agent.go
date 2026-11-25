@@ -343,6 +343,12 @@ type (
 		// AllThreads: every hardware thread of the fast cores instead of one per core, where
 		// that measured faster (see threadsFor).
 		AllThreads bool `json:"allThreads,omitempty"`
+		// UBatch: how many prompt words the engine reads at once (-ub); 0 is the engine's
+		// default (512). Smaller needs less card memory (see measureHead) and reads a little slower.
+		UBatch int `json:"ubatch,omitempty"`
+		// VisionCPU keeps the image add-on off the card, which is too small for it and the
+		// conversation both.
+		VisionCPU bool `json:"visionCPU,omitempty"`
 		// Sampling: the maker's settings the model file leaves out, as engine flags (sampling.go).
 		Sampling []string `json:"sampling,omitempty"`
 	}
@@ -553,6 +559,13 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 	case "start_rpc":
 		return a.startRPC()
 
+	case "measure_head":
+		var in StartHeadReq
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, err
+		}
+		return a.measureHead(in)
+
 	case "start_head":
 		var in StartHeadReq
 		if err := json.Unmarshal(raw, &in); err != nil {
@@ -711,6 +724,49 @@ func (a *Agent) startRPC() (any, error) {
 	return map[string]int{"port": port, "threads": threads}, nil
 }
 
+// headArgs: the head engine's arguments that the server and the engine's dry run
+// (measureHead) share, so what is measured is exactly what will be started.
+func (a *Agent) headArgs(in StartHeadReq, model, rt, gpuDev string, rpcList []string, threads int) []string {
+	if in.Ctx <= 0 {
+		in.Ctx = 4096
+	}
+	args := []string{"-m", model, "-c", strconv.Itoa(in.Ctx), "-np", "1", "-t", strconv.Itoa(threads), "-fit", "off", "-lv", "4"}
+	if in.UBatch > 0 {
+		args = append(args, "-ub", strconv.Itoa(in.UBatch))
+	}
+	if in.Split != "" && in.NGL > 0 {
+		args = append(args, "-ts", in.Split)
+	}
+	args = append(args, placementArgs(in.NGL, in.ExpertCPU, in.KVKeyQ8)...)
+	args = append(args, safeSampling(in.Sampling)...)
+	// The helpers must be named before the device list: the engine only knows the names
+	// RPC0, RPC1, ... once it has read --rpc.
+	if len(rpcList) > 0 {
+		args = append(args, "--rpc", strings.Join(rpcList, ","))
+	}
+	if base := filepath.Base(rt); strings.Contains(base, "cuda") || strings.Contains(base, "vulkan") {
+		// Name every device to use, in the plan's order: the helpers' devices, then the one
+		// local card. Otherwise the engine would also pick up graphics built into the
+		// processor or a second card the plan does not know about.
+		var devs []string
+		for i := 0; i < in.RPCDevices; i++ {
+			devs = append(devs, "RPC"+strconv.Itoa(i))
+		}
+		// The card only when the plan puts layers on it. With none there, the engine would
+		// still copy every weight to the card for long prompts and reserve room for that:
+		// 14.4 GB on a 4 GB card (Inkling 2 at 32k, measured), which Windows quietly spills
+		// into system memory, slowing prompt reading to a crawl.
+		if gpuDev != "" && in.NGL > 0 {
+			devs = append(devs, gpuDev)
+		}
+		if len(devs) == 0 {
+			devs = []string{"none"}
+		}
+		args = append(args, "-dev", strings.Join(devs, ","))
+	}
+	return args
+}
+
 func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	if in.Stream {
 		return a.startStream(in)
@@ -776,58 +832,27 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	}
 	info := a.Info()
 	threads := threadsFor(info, in.AllThreads)
-	if in.Ctx <= 0 {
-		in.Ctx = 4096
-	}
-	args := []string{"-m", model, "-c", strconv.Itoa(in.Ctx), "-np", "1", "-t", strconv.Itoa(threads),
-		"--host", "127.0.0.1", "--port", strconv.Itoa(api), "-fit", "off", "-lv", "4",
+	args := a.headArgs(in, model, rt, gpuDev, rpcList, threads)
+	// What only the server takes (the engine's dry run, measureHead, refuses these).
+	args = append(args, "--host", "127.0.0.1", "--port", strconv.Itoa(api),
 		// Name the model in API answers by its file name, not the full path on this disk.
-		"--alias", strings.TrimSuffix(filepath.Base(model), ".gguf")}
+		"--alias", strings.TrimSuffix(filepath.Base(model), ".gguf"))
 	if mmproj != "" {
 		args = append(args, "--mmproj", mmproj)
-		a.mu.Lock()
-		a.vision = true
-		a.mu.Unlock()
-	} else {
-		a.mu.Lock()
-		a.vision = false
-		a.mu.Unlock()
+		if in.VisionCPU {
+			args = append(args, "--no-mmproj-offload") // the card's room went to the conversation
+		}
 	}
-	if in.Split != "" && in.NGL > 0 {
-		args = append(args, "-ts", in.Split)
-	}
-	args = append(args, placementArgs(in.NGL, in.ExpertCPU, in.KVKeyQ8)...)
-	args = append(args, safeSampling(in.Sampling)...)
-	// The helpers must be named before the device list: the engine only knows the names
-	// RPC0, RPC1, ... once it has read --rpc.
+	a.mu.Lock()
+	a.vision = mmproj != ""
+	a.mu.Unlock()
 	if len(rpcList) > 0 {
-		args = append(args, "--rpc", strings.Join(rpcList, ","))
 		// The engine normally saves its working state after every prompt so a conversation
 		// can be rewound. With helpers that state has to come back over the network: measured
 		// at 20 seconds per prompt on a direct Wi-Fi link and minutes on a poor one. Off, a
 		// follow-up that cannot continue from where the last answer ended is read again
 		// from the start, which is far cheaper here.
 		args = append(args, "-ctxcp", "0", "-cram", "0")
-	}
-	if base := filepath.Base(rt); strings.Contains(base, "cuda") || strings.Contains(base, "vulkan") {
-		// Name every device to use, in the plan's order: the helpers' devices, then the one
-		// local card. Otherwise the engine would also pick up graphics built into the
-		// processor or a second card the plan does not know about.
-		var devs []string
-		for i := 0; i < in.RPCDevices; i++ {
-			devs = append(devs, "RPC"+strconv.Itoa(i))
-		}
-		// The card only when the plan puts layers on it. With none there, the engine would
-		// still copy every weight to the card for long prompts and reserve room for that:
-		// 14.4 GB on a 4 GB card (Inkling 2 at 32k, measured), which Windows quietly spills
-		// into system memory, slowing prompt reading to a crawl.
-		if gpuDev != "" && in.NGL > 0 {
-			devs = append(devs, gpuDev)
-		}
-		if len(devs) == 0 {
-			devs = []string{"none"}
-		}
-		args = append(args, "-dev", strings.Join(devs, ","))
 	}
 	p, err := a.startProc("head", rt, findBin(rt, "llama-server"), args, false, info.Limits.Pedal < 100)
 	if err != nil {

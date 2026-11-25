@@ -1213,7 +1213,8 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 	if err != nil {
 		return fmt.Errorf("could not read the model: %w", err)
 	}
-	if ctxSize <= 0 {
+	auto := ctxSize <= 0
+	if auto {
 		ctxSize = h.autoCtx(info, model.File, solo, model.Node)
 	}
 	h.mu.Lock()
@@ -1396,11 +1397,6 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		return errors.New("stopped")
 	}
 
-	if len(plan.WorkerOrder) == 0 {
-		done = h.step("Loading the model")
-	} else {
-		done = h.step("Loading the model across the computers")
-	}
 	// Devices the helpers offer, in order; the head's own card (if any) is the last entry
 	// of the plan's device list and is not one of them.
 	rpcDevs, helperLayers := 0, 0
@@ -1437,6 +1433,31 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		// Every hardware thread except where it measured slower: the disk in play, or pooled with
 		// whole layers on the head's processor (see threadsFor).
 		AllThreads: plan.Overflow == 0 && !(!plan.Solo && len(plan.Shares) > 0 && plan.Shares[0].CPULayers > 0)}
+	// One computer alone: check the start against the engine's own report of what it will
+	// allocate, and shrink the prompt batch or the conversation memory until it truly fits.
+	if len(plan.WorkerOrder) == 0 && !plan.Stream && ngl > 0 {
+		done = h.step("Checking that it fits on the graphics card")
+		var visionMiB int64
+		if model.Vision != nil {
+			visionMiB = (model.Vision.Size + model.Vision.Size/4) >> 20 // its weights and the room to work on an image
+		}
+		f := fitStart(h.measureOn, plan.Head, req, auto, visionMiB)
+		req.Ctx, req.UBatch, req.VisionCPU = f.Ctx, f.UBatch, f.VisionCPU
+		if f.Ctx != ctxSize {
+			ctxSize = f.Ctx
+			h.mu.Lock()
+			h.lastCtx = ctxSize
+			info.PlanCtx = ctxSize
+			h.mu.Unlock()
+		}
+		h.setProgress(plan.Head, ProgressNote{Msg: f.Note})
+		done(nil)
+	}
+	if len(plan.WorkerOrder) == 0 {
+		done = h.step("Loading the model")
+	} else {
+		done = h.step("Loading the model across the computers")
+	}
 	loadStart := time.Now()
 	if err := h.call(plan.Head, "start_head", req, nil, time.Minute); err != nil {
 		done(err)
