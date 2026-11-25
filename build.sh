@@ -64,7 +64,7 @@ if [ "$(uname -s)" = Darwin ] && command -v codesign >/dev/null 2>&1; then
     for f in "$APP/Contents/Resources/potluck" "$APP/Contents/Resources/kit/potluck-darwin-arm64" "$APP/Contents/Resources/kit/potluck-darwin-amd64"; do
       codesign -s "$ID" -f --options runtime --timestamp "$f"
     done
-    codesign -s "$ID" -f --options runtime --timestamp "$APP"
+    codesign -s "$ID" -f --options runtime --timestamp --entitlements macos/Potluck.entitlements "$APP"
     codesign --verify --strict --deep "$APP"
   fi
   echo "built $APP"
