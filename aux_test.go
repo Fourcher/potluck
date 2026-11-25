@@ -35,3 +35,19 @@ func TestStopKeepsAuxJobs(t *testing.T) {
 		t.Fatal("a crew member's download was cancelled by stopping the main model")
 	}
 }
+
+// Stopping a crew member cancels its download too (found by the self-review check: a member
+// stopped while its model was arriving went on downloading, then started an engine no plan
+// counted).
+func TestStopAuxCancelsItsDownload(t *testing.T) {
+	a := &Agent{}
+	mine := a.jobCtxFor("model:big.gguf", "aux:crew-x")
+	other := a.jobCtxFor("model:other.gguf", "aux:helper")
+	a.stopAux("crew-x")
+	if mine.Err() == nil {
+		t.Fatal("the stopped member's download goes on")
+	}
+	if other.Err() != nil {
+		t.Fatal("another slot's download was cancelled")
+	}
+}

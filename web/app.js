@@ -414,8 +414,8 @@ function diskView() {
         <span class="row"><button class="btn sm" data-a="planlocal" data-node="${esc(id)}" data-file="${esc(f.file)}">Set up</button>
         <button class="btn sm quiet" data-a="forget" data-node="${esc(id)}" data-file="${esc(f.file)}">Remove from list</button></span></div>`;
       return `<div class="file"><span class="q">${esc(f.file.replace(/\.gguf$/, ""))}</span><span>${gb(f.size)}</span>
-        <span class="n muted small">${f.complete ? (later ? "Part of a model that comes in several files" : "On " + esc(n.info.name)) : "Unfinished download"}${sum ? `<br>SHA-256: <span style="user-select:all;overflow-wrap:anywhere">${esc(sum)}</span>` : ""}</span>
-        <span class="row">${f.complete && !later ? `<button class="btn sm" data-a="planlocal" data-node="${esc(id)}" data-file="${esc(f.file)}">Set up</button>` : ""}
+        <span class="n muted small">${f.complete ? (f.addOn ? "A model's helper file (image add-on or similar)" : later ? "Part of a model that comes in several files" : "On " + esc(n.info.name)) : "Unfinished download"}${sum ? `<br>SHA-256: <span style="user-select:all;overflow-wrap:anywhere">${esc(sum)}</span>` : ""}</span>
+        <span class="row">${f.complete && !later && !f.addOn ? `<button class="btn sm" data-a="planlocal" data-node="${esc(id)}" data-file="${esc(f.file)}">Set up</button>` : ""}
         ${f.complete ? `<button class="btn sm quiet" data-a="checksum" data-node="${esc(id)}" data-file="${esc(f.file)}">${sum === "…" ? "Working…" : "Checksum"}</button>` : ""}
         <button class="btn sm quiet" data-a="delmodel" data-node="${esc(id)}" data-file="${esc(f.file)}" data-name="${esc(n.info.name)}">Delete</button></span></div>`;
     }).join("");

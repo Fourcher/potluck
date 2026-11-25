@@ -1198,6 +1198,14 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		done(err)
 		return err
 	}
+	// A model found in another app's folder may have its image add-on beside it: name it in
+	// the start so the plan counts its memory (the engine only loads what the start names).
+	if local && model.Vision == nil {
+		var v *ModelPart
+		if h.call(model.Node, "found_vision", map[string]string{"file": model.File}, &v, 20*time.Second) == nil && v != nil && v.Size > 0 {
+			model.Vision = v
+		}
+	}
 	h.mu.Lock()
 	h.cluster.Model = &model // now with its title, size and checksum filled in
 	h.mu.Unlock()

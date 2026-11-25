@@ -266,7 +266,7 @@ func (h *Host) chatModels() []chatModel {
 	for id, rep := range h.Storage() {
 		for _, f := range rep.Models {
 			// A model that comes as several files is one entry, under its first file.
-			if !f.Complete || seen[f.File] || (splitRe.MatchString(f.File) && !strings.Contains(f.File, "-00001-of-")) {
+			if !f.Complete || f.AddOn || seen[f.File] || (splitRe.MatchString(f.File) && !strings.Contains(f.File, "-00001-of-")) {
 				continue
 			}
 			seen[f.File] = true

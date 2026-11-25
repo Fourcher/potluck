@@ -31,6 +31,7 @@ type CrewMember struct {
 	Error    string    `json:"error,omitempty"`
 	Since    time.Time `json:"since"`
 	bytes    int64     // memory it holds on its computer
+	cancel   context.CancelFunc
 }
 
 // CrewSaved is a crew member as kept in the settings, so it comes back when Potluck or its
@@ -41,6 +42,8 @@ type CrewSaved struct {
 	Model ModelRef `json:"model"`
 	Ctx   int      `json:"ctx"`
 }
+
+var errCrewStopped = errors.New("stopped")
 
 var crewNameClean = regexp.MustCompile(`[^a-z0-9]+`)
 
@@ -116,7 +119,8 @@ func (h *Host) StartCrew(name, node string, model ModelRef, ctxSize int) (string
 	if ctxSize <= 0 {
 		ctxSize = 16384
 	}
-	c := &CrewMember{Name: name, Node: node, NodeName: n.Info.Name, Model: model, Ctx: ctxSize, Phase: "starting", Note: "Reading the model's blueprint", Since: time.Now()}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
+	c := &CrewMember{Name: name, Node: node, NodeName: n.Info.Name, Model: model, Ctx: ctxSize, Phase: "starting", Note: "Reading the model's blueprint", Since: time.Now(), cancel: cancel}
 	if h.crew == nil {
 		h.crew = map[string]*CrewMember{}
 	}
@@ -127,7 +131,8 @@ func (h *Host) StartCrew(name, node string, model ModelRef, ctxSize int) (string
 		cf.Crew = append(cf.Crew, CrewSaved{Name: name, Node: node, Model: model, Ctx: ctxSize})
 	})
 	go func() {
-		err := h.startCrew(c)
+		defer cancel()
+		err := h.startCrew(ctx, c)
 		h.mu.Lock()
 		if err != nil {
 			c.Phase, c.Error, c.Note = "error", err.Error(), ""
@@ -145,9 +150,15 @@ func (h *Host) crewNote(c *CrewMember, s string) {
 	h.mu.Unlock()
 }
 
-func (h *Host) startCrew(c *CrewMember) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
-	defer cancel()
+// startCrew gets a member running. It ends early when the member is stopped (ctx), and an
+// engine it started for a member stopped meanwhile is stopped again, never left running
+// outside every plan.
+func (h *Host) startCrew(ctx context.Context, c *CrewMember) error {
+	current := func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.crew[c.Name] == c && ctx.Err() == nil
+	}
 	model := c.Model
 	if err := resolveModel(ctx, &model); err != nil {
 		return err
@@ -186,7 +197,12 @@ func (h *Host) startCrew(c *CrewMember) error {
 		kv += b
 	}
 	c.Model, c.bytes = model, info.FileSize+kv
-	ni := h.nodes[c.Node].Info
+	n := h.nodes[c.Node]
+	if n == nil {
+		h.mu.Unlock()
+		return errors.New("that computer was removed")
+	}
+	ni := n.Info
 	h.mu.Unlock()
 	h.crewNote(c, "Getting the AI engine ready")
 	spec, err := h.runtimeSpec(ni, true)
@@ -197,11 +213,17 @@ func (h *Host) startCrew(c *CrewMember) error {
 	if err := h.call(c.Node, "ensure_runtime", spec, nil, 2*time.Hour); err != nil {
 		return err
 	}
+	if !current() {
+		return errCrewStopped
+	}
 	if model.Source != "local" {
 		h.crewNote(c, "Downloading "+humanBytes(model.Size))
 		if err := h.call(c.Node, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts, For: "aux:" + c.Name, HFKey: currentHFKey()}, nil, 24*time.Hour); err != nil {
 			return err
 		}
+	}
+	if !current() {
+		return errCrewStopped
 	}
 	h.crewNote(c, "Loading the model")
 	ngl := plan.NGL
@@ -211,21 +233,31 @@ func (h *Host) startCrew(c *CrewMember) error {
 	if err := h.call(c.Node, "start_aux", StartAuxReq{Name: c.Name, File: model.File, Ctx: c.Ctx, NGL: ngl, ExpertCPU: plan.ExpertCPU, KVKeyQ8: plan.KVKeyQ8, Sampling: samplingArgs(info)}, nil, time.Minute); err != nil {
 		return err
 	}
+	// Stopped while loading, or before this start was sent: take its engine down again (the
+	// stop may have reached the computer before the start did).
+	stopIt := func() error {
+		_ = h.call(c.Node, "stop_aux", map[string]string{"name": c.Name}, nil, 30*time.Second)
+		return errCrewStopped
+	}
 	for deadline := time.Now().Add(30 * time.Minute); time.Now().Before(deadline); time.Sleep(3 * time.Second) {
+		if !current() {
+			return stopIt()
+		}
 		var st AuxStatus
 		if err := h.call(c.Node, "aux_status", map[string]string{"name": c.Name}, &st, 20*time.Second); err != nil {
 			continue
 		}
 		if st.Ready {
+			if !current() {
+				return stopIt()
+			}
 			return nil
 		}
 		if !st.Running {
 			return errors.New("the engine stopped while loading: " + st.Log)
 		}
-		if h.crewMember(c.Name) == nil {
-			return errors.New("stopped")
-		}
 	}
+	_ = stopIt()
 	return errors.New("loading took too long")
 }
 
@@ -235,6 +267,9 @@ func (h *Host) StopCrew(name string) error {
 	c := h.crew[name]
 	delete(h.crew, name)
 	h.mu.Unlock()
+	if c != nil && c.cancel != nil {
+		c.cancel() // a start still under way ends, and stops anything it started
+	}
 	h.cfg.Update(func(cf *Config) {
 		cf.Crew = slices.DeleteFunc(cf.Crew, func(s CrewSaved) bool { return s.Name == name })
 	})

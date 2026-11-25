@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net"
 	"net/http"
@@ -91,25 +92,42 @@ func loadConfig(dir string) *ConfigStore {
 	return s
 }
 
+// Get returns the settings as they are now. Its maps and lists are shared with every other
+// Get, so they must only be read: Update never changes them in place (it works on a fresh
+// copy and swaps it in), so a reader can never meet a half-made change.
 func (s *ConfigStore) Get() Config {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c := s.c
-	c.Trusted = map[string]string{}
-	for k, v := range s.c.Trusted {
-		c.Trusted[k] = v
-	}
-	return c
+	return s.c
 }
 
+// Update changes the settings and saves them. fn works on a deep copy, so the maps and lists
+// that Get handed out before stay as they were (two goroutines touching one map at once is
+// a crash Go cannot recover from).
 func (s *ConfigStore) Update(fn func(c *Config)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fn(&s.c)
-	b, _ := json.MarshalIndent(s.c, "", "  ")
-	tmp := s.path + ".tmp"
-	if os.WriteFile(tmp, b, 0o600) == nil {
-		_ = os.Rename(tmp, s.path)
+	b, err := json.Marshal(s.c)
+	if err != nil {
+		panic("potluck: settings cannot be copied: " + err.Error()) // every field is plain data
+	}
+	var c Config
+	if err := json.Unmarshal(b, &c); err != nil {
+		panic("potluck: settings cannot be copied: " + err.Error())
+	}
+	if c.Trusted == nil {
+		c.Trusted = map[string]string{}
+	}
+	fn(&c)
+	s.c = c
+	if b, err = json.MarshalIndent(s.c, "", "  "); err == nil {
+		tmp := s.path + ".tmp"
+		if err = os.WriteFile(tmp, b, 0o600); err == nil {
+			err = os.Rename(tmp, s.path)
+		}
+	}
+	if err != nil {
+		log.Printf("could not save the settings: %v", err)
 	}
 }
 
@@ -591,6 +609,20 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 	case "storage":
 		return a.Storage(), nil
 
+	case "found_vision":
+		// The image add-on lying next to a model found in another app's folder, if any.
+		var in struct {
+			File string `json:"file"`
+		}
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, err
+		}
+		p, size := a.foundVision(filepath.Base(in.File))
+		if p == "" {
+			return nil, nil
+		}
+		return ModelPart{File: filepath.Base(p), Size: size}, nil
+
 	case "read_header":
 		// A model file that is already on this computer (copied here or downloaded with
 		// another program): read its blueprint so it can be planned like any other.
@@ -794,16 +826,17 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	if _, err := os.Stat(model); err != nil {
 		return nil, errors.New("the model file is not on this computer")
 	}
-	// The image add-on: from the model's repository, or one lying next to a model file found on
-	// this computer (LM Studio and others keep them together).
+	// The image add-on, only when the start names one (so the plan counted it): from the
+	// model's repository, or the one next to a model found in another app's folder.
 	mmproj := ""
 	if in.Vision != nil && in.Vision.URL != "" {
 		dst := filepath.Join(a.dir, "models", filepath.Base(in.Vision.File))
-		if err := downloadFile(withHFKey(context.Background(), in.HFKey), in.Vision.URL, dst, in.Vision.Size, in.Vision.SHA256, 8, nil); err == nil {
-			mmproj = dst
+		if err := downloadFile(withHFKey(context.Background(), in.HFKey), in.Vision.URL, dst, in.Vision.Size, in.Vision.SHA256, 8, nil); err != nil {
+			return nil, fmt.Errorf("the model's image add-on: %w", err)
 		}
-	} else if found, _ := filepath.Glob(filepath.Join(filepath.Dir(model), "mmproj*.gguf")); len(found) > 0 {
-		mmproj = found[0]
+		mmproj = dst
+	} else if in.Vision != nil {
+		mmproj, _ = a.foundVision(in.File)
 	}
 	rpcList, listeners, err := a.rpcTunnels(in.Workers)
 	if err != nil {
@@ -986,6 +1019,9 @@ type ModelFile struct {
 	Size     int64  `json:"size"`
 	Complete bool   `json:"complete"`
 	Found    string `json:"found,omitempty"`
+	// AddOn: not a model but a helper file of one (an image add-on, a draft model): listed
+	// for its disk space, never offered to run.
+	AddOn bool `json:"addOn,omitempty"`
 }
 
 func dirSize(dir string) int64 {
@@ -1014,7 +1050,7 @@ func (a *Agent) Storage() StorageReport {
 		}
 		switch {
 		case strings.HasSuffix(name, ".gguf"):
-			r.Models = append(r.Models, ModelFile{File: name, Size: info.Size(), Complete: true})
+			r.Models = append(r.Models, ModelFile{File: name, Size: info.Size(), Complete: true, AddOn: notAModel.MatchString(name)})
 		case strings.HasSuffix(name, ".gguf.part"):
 			r.Models = append(r.Models, ModelFile{File: strings.TrimSuffix(name, ".part"), Size: info.Size()})
 		}
@@ -1143,4 +1179,30 @@ func (a *Agent) rpcTunnels(workers []string) ([]string, []net.Listener, error) {
 		}(l, w)
 	}
 	return rpcList, listeners, nil
+}
+
+// foundVision is the image add-on next to a model found in another app's folder (LM Studio
+// and others keep one model per folder, with its add-on beside it). Potluck's own models
+// folder holds every downloaded model's add-on side by side, so nothing there is guessed: a
+// model Potluck downloaded names its own add-on.
+func (a *Agent) foundVision(name string) (string, int64) {
+	if !a.isFound(name) {
+		return "", 0
+	}
+	dir := filepath.Dir(a.modelPath(name))
+	if dir == filepath.Join(a.dir, "models") {
+		return "", 0
+	}
+	found, _ := filepath.Glob(filepath.Join(dir, "mmproj*.gguf"))
+	sort.Strings(found)
+	for _, pref := range []string{"f16", "bf16", ""} { // as for downloads: full precision first
+		for _, p := range found {
+			if strings.HasSuffix(strings.ToLower(p), pref+".gguf") {
+				if st, err := os.Stat(p); err == nil {
+					return p, st.Size()
+				}
+			}
+		}
+	}
+	return "", 0
 }

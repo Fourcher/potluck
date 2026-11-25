@@ -27,3 +27,26 @@ func TestPanelNeedsHeaderEvenForGET(t *testing.T) {
 		}
 	}
 }
+
+// A map handed out by Get must never change underneath its reader (found by the self-review
+// check: Phones was written in place while the phone key check looped over it, a fatal error).
+func TestConfigGetIsNotChangedByUpdate(t *testing.T) {
+	s := loadConfig(t.TempDir())
+	s.Update(func(c *Config) { c.Phones = map[string]PhoneKey{"a": {Name: "one"}} })
+	got := s.Get().Phones
+	done := make(chan bool)
+	go func() {
+		for i := 0; i < 200; i++ {
+			s.Update(func(c *Config) { c.Phones[string(rune('b'+i%20))] = PhoneKey{Name: "x"} })
+		}
+		close(done)
+	}()
+	for i := 0; i < 200; i++ {
+		for range got {
+		}
+	}
+	<-done
+	if len(got) != 1 || len(s.Get().Phones) != 21 {
+		t.Fatalf("handed-out %d, now %d", len(got), len(s.Get().Phones))
+	}
+}

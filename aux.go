@@ -116,6 +116,14 @@ func (a *Agent) stopAux(name string) {
 	a.mu.Lock()
 	e := a.aux[name]
 	delete(a.aux, name)
+	// Its downloads too: a member stopped while its model was still arriving.
+	for k, c := range a.jobs {
+		if a.jobOwner[k] == "aux:"+name {
+			c()
+			delete(a.jobs, k)
+			delete(a.jobOwner, k)
+		}
+	}
 	a.mu.Unlock()
 	if e != nil {
 		e.proc.Stop()
