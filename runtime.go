@@ -443,9 +443,15 @@ func (p *proc) Stop() {
 		killTree(cmd.Process.Pid)
 		_ = cmd.Process.Kill()
 	}
+	// Wait for it to be gone, so its memory is free when the caller plans again. A kill that
+	// has not taken after half a minute is said so in the log rather than passed over.
 	select {
 	case <-p.done:
-	case <-time.After(8 * time.Second):
+	case <-time.After(30 * time.Second):
+		if f, err := os.OpenFile(p.logPath, os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+			fmt.Fprintf(f, "\n[potluck] %s did not end within 30 seconds of being stopped\n", p.name)
+			f.Close()
+		}
 	}
 }
 

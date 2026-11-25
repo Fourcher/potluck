@@ -1084,14 +1084,24 @@ func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 		h.mu.Unlock()
 		return errors.New("busy: wait for the current start or stop to finish")
 	}
+	// Claim the start before letting go of the lock, so a second start (a click, the
+	// watcher, a phone) is turned away instead of running alongside this one.
 	running := h.cluster.Phase == "running"
+	if h.cancel != nil {
+		h.cancel()
+		h.cancel = nil
+	}
+	h.cluster = ClusterState{Phase: "starting", Model: &model, Since: time.Now()}
 	h.mu.Unlock()
 	if running {
-		h.Stop()
-		// The computers report their free memory every few seconds; planning straight away
-		// would count the old model as still there (seen: a 23.5 GB model planned to read
-		// 34 GB from disk on a computer with 27 GB free).
-		time.Sleep(12 * time.Second)
+		// Stop the old model and wait until its engines have exited, then read every
+		// computer's free memory afresh: planning on the last report would count the old
+		// model as still there (seen: a 23.5 GB model planned to read 34 GB from disk on a
+		// computer with 27 GB free).
+		h.stopAll()
+		h.mu.Lock()
+		h.vision = false
+		h.mu.Unlock()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.mu.Lock()
@@ -1529,7 +1539,10 @@ func (h *Host) stopAll() {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
-			_ = h.call(id, "stop", nil, nil, 30*time.Second)
+			// "stop" answers once the engines have exited; the inventory after it is fresh.
+			if h.call(id, "stop", nil, nil, 60*time.Second) == nil {
+				h.refreshNode(id)
+			}
 		}(id)
 	}
 	wg.Wait()
