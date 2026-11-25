@@ -9,6 +9,11 @@ import (
 // cardMarginMiB is room left free on a graphics card after what the engine says it will
 // allocate: the engine also takes small scratch buffers as it runs, and the desktop may
 // grow. llama.cpp's own fitting keeps 1024 MiB; this is what a 4 GB card can spare.
+// Measured on Monolith (GTX 1050 Ti, Inkling 2 Q6_K, 2026-11-24): a start reported at 3075 MiB
+// against 3359 free (284 to spare) crashed under load, so less than ~300 is not enough. A start
+// that spilled past the card into system memory ran 7.7x slower reading prompts and 3x slower
+// writing than a smaller one that truly fit (16k at batch 256: 15.2 / 4.4 tokens a second), which
+// is why a smaller size that fits always beats a larger one that does not.
 const cardMarginMiB = 384
 
 // measurer asks a computer's engine what a start would need (an interface so tests can
