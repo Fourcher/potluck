@@ -141,6 +141,7 @@ function nodeCard(n) {
     <div class="lend">${lend}</div>${slow}${profileLine(n)}
     ${limitsUI(i.id, L, n.isMain)}
     ${progress(n.status, n.done, n.total)}
+    ${n.prepareErr ? `<div class="err small">Its AI engine could not be set up: ${esc(n.prepareErr)}. Potluck tries again by itself, waiting longer each time.</div>` : ""}
     <div class="row small" style="margin-top:6px"><button class="link" data-a="rename" data-id="${esc(i.id)}" data-name="${esc(i.name)}">Rename</button>
       ${n.isMain ? "" : `<button class="link" data-a="forget" data-id="${esc(i.id)}" data-name="${esc(i.name)}">Remove</button>`}</div>
   </div>`;

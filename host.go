@@ -55,7 +55,12 @@ type Node struct {
 	NoGPU     bool     `json:"noGPU"`    // its engine found no graphics card it can use after all
 	Prepared  bool     `json:"prepared"` // its engine is installed and has said which card it can use (prepareNode)
 	preparing bool
-	LastSeen  time.Time `json:"lastSeen"`
+	// PrepareErr: why getting its engine ready failed last time; tried again after a wait
+	// that grows with each failure (each try may download the engine again).
+	PrepareErr string `json:"prepareErr,omitempty"`
+	prepFails  int
+	prepNext   time.Time
+	LastSeen   time.Time `json:"lastSeen"`
 	// LinkMs is the average round trip to this computer over the last couple of minutes,
 	// jitter included. 0 until measured.
 	LinkMs float64 `json:"linkMs"`
@@ -123,8 +128,12 @@ type Host struct {
 	lastSolo string
 	lastInfo *ModelInfo
 	paused   *ModelRef // a model waiting for enough computers to be available again
-	pauseWhy string
-	stale    bool // limits changed on a computer that is part of the running model
+	// pausedInfo, pausedCtx: that model's own blueprint and size, for deciding when it fits
+	// again (lastInfo and lastCtx belong to whatever ran since).
+	pausedInfo *ModelInfo
+	pausedCtx  int
+	pauseWhy   string
+	stale      bool // limits changed on a computer that is part of the running model
 
 	lastUse    time.Time // the last request to the model
 	asleep     *ModelRef // let go after being unused for a while; the next request loads it
@@ -141,10 +150,14 @@ type Host struct {
 	helper     helperState            // the Potluck helper (helper.go)
 	helperGen  int                    // which setup run is current; bumped by stop and restart
 	crew       map[string]*CrewMember // extra models on other computers (crew.go), under mu
-	shareMu    sync.Mutex
-	shareSrvs  []*http.Server
-	shareOn    string // the addresses the share server listens on now
-	phoneOn    string // the addresses the phone server listens on now
+	// startGen numbers each start (and each stop); a start's progress and cleanup only touch
+	// the cluster while its number is current. startDone closes when that start's work ends.
+	startGen  int
+	startDone chan struct{}
+	shareMu   sync.Mutex
+	shareSrvs []*http.Server
+	shareOn   string // the addresses the share server listens on now
+	phoneOn   string // the addresses the phone server listens on now
 }
 
 func newHost(a *Agent, id *Identity, cfg *ConfigStore) *Host {
@@ -449,7 +462,7 @@ func (h *Host) refreshNode(id string) {
 	if n := h.nodes[id]; n != nil {
 		info.ID = id
 		n.Info, n.LastSeen = info, time.Now()
-		if !n.Prepared && !n.preparing && n.Online && info.Limits.ActiveNow(time.Now()) {
+		if !n.Prepared && !n.preparing && n.Online && info.Limits.ActiveNow(time.Now()) && time.Now().After(n.prepNext) {
 			n.preparing, prep = true, true
 		}
 	}
@@ -480,8 +493,18 @@ func (h *Host) prepareNode(id string) {
 	ni := n.Info
 	single := h.cfg != nil && h.cfg.Get().Single
 	h.mu.Unlock()
+	failed := func(err error) {
+		h.mu.Lock()
+		if n := h.nodes[id]; n != nil {
+			n.PrepareErr = err.Error()
+			n.prepFails++
+			n.prepNext = time.Now().Add(min(time.Minute<<min(n.prepFails-1, 6), time.Hour))
+		}
+		h.mu.Unlock()
+	}
 	spec, err := h.runtimeSpec(ni, true)
 	if err != nil {
+		failed(err)
 		return
 	}
 	spec.Solo, spec.For = single, "aux:prepare" // alone: an engine already on the computer will do
@@ -489,12 +512,14 @@ func (h *Host) prepareNode(id string) {
 		GPUDevice string `json:"gpuDevice"`
 	}
 	if err := h.call(id, "ensure_runtime", spec, &res, 2*time.Hour); err != nil {
+		failed(err)
 		return
 	}
 	h.mu.Lock()
 	if n := h.nodes[id]; n != nil {
 		n.Prepared = true
 		n.NoGPU = twoDev(ni) && res.GPUDevice == ""
+		n.PrepareErr, n.prepFails, n.prepNext = "", 0, time.Time{}
 	}
 	h.mu.Unlock()
 }
@@ -716,7 +741,7 @@ func (h *Host) watchLoop() {
 		now := time.Now()
 		h.mu.Lock()
 		phase, model, ctxSize, info := h.cluster.Phase, h.cluster.Model, h.lastCtx, h.lastInfo
-		paused := h.paused
+		paused, pInfo, pCtx := h.paused, h.pausedInfo, h.pausedCtx
 		var gone []string
 		if phase == "running" {
 			for _, n := range h.nodes {
@@ -735,14 +760,12 @@ func (h *Host) watchLoop() {
 			} else {
 				h.mu.Lock()
 				h.paused, h.pauseWhy = model, why+". The model no longer fits on the computers that are left; it will start again by itself when they are back."
+				h.pausedInfo, h.pausedCtx = info, ctxSize
 				h.mu.Unlock()
 			}
-		case paused != nil && phase == "idle" && info != nil:
-			if h.plan(info, h.soloChoice()).Fits {
-				h.mu.Lock()
-				h.paused, h.pauseWhy = nil, ""
-				h.mu.Unlock()
-				_ = h.Start(*paused, ctxSize, h.soloChoice())
+		case paused != nil && phase == "idle" && pInfo != nil:
+			if h.plan(pInfo, h.soloChoice()).Fits {
+				_ = h.Start(*paused, pCtx, h.soloChoice())
 			}
 		}
 	}
@@ -1115,12 +1138,13 @@ func (h *Host) bestSolo(info *ModelInfo, only string) *Plan {
 
 func (h *Host) step(text string) func(err error) {
 	h.mu.Lock()
+	gen := h.startGen
 	h.cluster.Steps = append(h.cluster.Steps, Step{Text: text, State: "doing"})
 	i := len(h.cluster.Steps) - 1
 	h.mu.Unlock()
 	return func(err error) {
 		h.mu.Lock()
-		if i < len(h.cluster.Steps) {
+		if h.startGen == gen && i < len(h.cluster.Steps) {
 			if err != nil {
 				h.cluster.Steps[i].State = "failed"
 			} else {
@@ -1146,8 +1170,12 @@ func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 		h.cancel()
 		h.cancel = nil
 	}
+	h.startGen++ // whatever an earlier start still does no longer touches the cluster
+	prev := h.startDone
+	h.paused, h.pausedInfo, h.pauseWhy = nil, nil, "" // what runs now was chosen: no old model comes back
 	h.cluster = ClusterState{Phase: "starting", Model: &model, Since: time.Now()}
 	h.mu.Unlock()
+	waitStart(prev)
 	if running {
 		// Stop the old model and wait until its engines have exited, then read every
 		// computer's free memory afresh: planning on the last report would count the old
@@ -1161,6 +1189,10 @@ func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.mu.Lock()
 	h.cancel = cancel
+	h.startGen++
+	gen := h.startGen
+	finished := make(chan struct{})
+	h.startDone = finished
 	h.cluster = ClusterState{Phase: "starting", Model: &model, Since: time.Now()}
 	h.guardWhy = ""
 	h.lastCtx, h.lastSolo, h.stale = ctxSize, solo, false
@@ -1168,27 +1200,50 @@ func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 	h.mu.Unlock()
 	h.cfg.Update(func(c *Config) { c.LastModel = &model })
 	go func() {
+		defer close(finished)
 		err := h.start(ctx, model, ctxSize, solo)
 		h.mu.Lock()
-		if err != nil {
-			h.cluster.Phase, h.cluster.Error = "error", err.Error()
-			if h.guardWhy != "" {
-				h.cluster.Error = h.guardWhy // the guard stopped it: say that, not "stopped"
-			}
-			for i := range h.cluster.Steps {
-				if h.cluster.Steps[i].State == "doing" {
-					h.cluster.Steps[i].State = "failed"
-				}
-			}
-		} else {
+		if h.startGen != gen {
+			h.mu.Unlock() // stopped or replaced meanwhile: whoever did that owns the cluster now
+			return
+		}
+		if err == nil {
 			h.cluster.Phase = "running"
+			h.mu.Unlock()
+			return
+		}
+		// Clean up while still busy, so no new start runs into this one's stopAll.
+		h.cluster.Phase, h.cluster.Error = "stopping", err.Error()
+		if h.guardWhy != "" {
+			h.cluster.Error = h.guardWhy // the guard stopped it: say that, not "stopped"
+		}
+		for i := range h.cluster.Steps {
+			if h.cluster.Steps[i].State == "doing" {
+				h.cluster.Steps[i].State = "failed"
+			}
 		}
 		h.mu.Unlock()
-		if err != nil {
-			h.stopAll()
+		h.stopAll()
+		h.mu.Lock()
+		if h.startGen == gen {
+			h.cluster.Phase = "error"
 		}
+		h.mu.Unlock()
 	}()
 	return nil
+}
+
+// waitStart waits for an earlier start's work to end (it was cancelled), so it cannot write
+// over a new start or stop its engines. A start stuck in a slow call is given two minutes;
+// after that its writes are ignored anyway (startGen).
+func waitStart(done chan struct{}) {
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Minute):
+	}
 }
 
 func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo string) error {
@@ -1615,12 +1670,16 @@ func (h *Host) Stop() {
 		h.cancel()
 		h.cancel = nil
 	}
+	h.paused, h.pausedInfo, h.pauseWhy = nil, nil, "" // a stop also ends a pause
 	if h.cluster.Phase == "idle" {
 		h.mu.Unlock()
 		return
 	}
+	h.startGen++
+	prev := h.startDone
 	h.cluster.Phase = "stopping"
 	h.mu.Unlock()
+	waitStart(prev)
 	h.stopAll()
 	h.mu.Lock()
 	h.cluster = ClusterState{Phase: "idle"}
