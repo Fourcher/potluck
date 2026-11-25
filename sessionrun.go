@@ -443,9 +443,14 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 	var order []int
 	sc := bufio.NewScanner(res.Body)
 	sc.Buffer(make([]byte, 1<<20), 64<<20)
+	ended := false // the engine said the answer is complete ([DONE] or a finish reason)
 	for sc.Scan() {
 		data, ok := strings.CutPrefix(sc.Text(), "data: ")
-		if !ok || data == "[DONE]" {
+		if !ok {
+			continue
+		}
+		if data == "[DONE]" {
+			ended = true
 			continue
 		}
 		var ch struct {
@@ -462,13 +467,26 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 						} `json:"function"`
 					} `json:"tool_calls"`
 				} `json:"delta"`
+				Finish *string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage *struct {
 				Prompt int `json:"prompt_tokens"`
 			} `json:"usage"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
 		}
 		if json.Unmarshal([]byte(data), &ch) != nil {
 			continue
+		}
+		// The engine can fail partway (out of memory, context full, a crash on a helper):
+		// it says so in the stream, and the task must stop with that, not carry on with half
+		// an answer as if it were whole.
+		if ch.Error != nil {
+			return SMsg{}, errors.New("the model stopped partway: " + strings.TrimPrefix(ch.Error.Message, "Potluck: "))
+		}
+		if len(ch.Choices) > 0 && ch.Choices[0].Finish != nil && *ch.Choices[0].Finish != "" {
+			ended = true
 		}
 		if ch.Usage != nil {
 			s.mu.Lock()
@@ -500,6 +518,9 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 	}
 	if err := sc.Err(); err != nil && ctx.Err() == nil {
 		return SMsg{}, fmt.Errorf("the answer broke off: %w", err)
+	}
+	if !ended && ctx.Err() == nil {
+		return SMsg{}, errors.New("the answer broke off before the model finished (the connection to the model closed)")
 	}
 	for _, i := range order {
 		c := calls[i]

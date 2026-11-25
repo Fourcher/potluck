@@ -40,6 +40,16 @@ func (f *scriptModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": delta}}})
 		fmt.Fprintf(w, "data: %s\n\n", b)
 	}
+	if t, ok := strings.CutPrefix(reply, "error:"); ok { // fails partway
+		chunk(map[string]any{"content": "half an ans"})
+		b, _ := json.Marshal(map[string]any{"error": map[string]any{"message": t}})
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		return
+	}
+	if t, ok := strings.CutPrefix(reply, "cut:"); ok { // the connection closes mid-answer
+		chunk(map[string]any{"content": t})
+		return
+	}
 	if t, ok := strings.CutPrefix(reply, "text:"); ok {
 		chunk(map[string]any{"content": t})
 	} else {
@@ -192,5 +202,25 @@ func TestPermissionScopes(t *testing.T) {
 	}
 	if no, _ := st.allowed(t.Context(), s, SToolCall{Name: "run_command", Args: "{}"}, map[string]any{"command": "ls"}); no != "" {
 		t.Fatal("commands=auto should run commands without asking")
+	}
+}
+
+// An engine failure partway through an answer stops the task with the reason, instead of
+// ending it "done" with half an answer (found by the 2026-11-24 code review).
+func TestSessionStreamFailures(t *testing.T) {
+	for _, tc := range []struct{ reply, want string }{
+		{"error:out of memory", "out of memory"},
+		{"cut:half", "broke off"},
+	} {
+		_, st := withFakeModel(t, tc.reply)
+		s := st.create(nil, Policy{})
+		_ = st.send(s, "go")
+		waitStatus(t, s, "error", "idle")
+		s.mu.Lock()
+		status, msg := s.Status, s.Error
+		s.mu.Unlock()
+		if status != "error" || !strings.Contains(msg, tc.want) {
+			t.Fatalf("%s: status %s %q", tc.reply, status, msg)
+		}
 	}
 }
