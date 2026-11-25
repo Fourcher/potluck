@@ -261,6 +261,14 @@ func (app *App) serveUI() error {
 		return h.storeSearch(r.URL.Query().Get("source"), r.URL.Query().Get("q"))
 	})
 
+	api("/api/lists", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		return h.catalog().Lists, nil
+	})
+
 	api("/api/files", func(r *http.Request) (any, error) {
 		h, err := needMain()
 		if err != nil {
@@ -649,6 +657,7 @@ func (app *App) serveUI() error {
 			IdleUnload *int      `json:"idleUnload"`
 			Single     *bool     `json:"single"`
 			AgentDir   *string   `json:"agentDir"`
+			HFKey      *string   `json:"hfKey"`
 		}
 		if err := body(r, &in); err != nil {
 			return nil, err
@@ -675,6 +684,10 @@ func (app *App) serveUI() error {
 			}
 			if in.AgentDir != nil {
 				c.AgentDir = *in.AgentDir
+			}
+			if in.HFKey != nil {
+				c.HFKey = strings.TrimSpace(*in.HFKey)
+				setHFKey(c.HFKey)
 			}
 			if in.Single != nil {
 				c.Single = *in.Single
@@ -901,7 +914,7 @@ func (app *App) state() map[string]any {
 			"headChoice": c.HeadChoice, "chatURL": "http://127.0.0.1:" + strconv.Itoa(portChat),
 			"totalOffer": total, "biggestOffer": biggest, "lastModel": c.LastModel, "firewall": app.firewall(), "profiles": c.Profiles, "measured": c.Measured,
 			"shareChat": c.ShareChat, "sharedURL": shared, "shareURLs": shareURLs, "shareKey": shareKey, "dataDir": app.dir, "pauseWhy": pauseWhy, "stale": stale,
-			"lastCtx": lastCtx, "single": c.Single, "idleUnload": c.IdleUnload, "asleep": asleep, "enginePath": c.EnginePath, "modelDirs": c.ModelDirs, "agentDir": app.agentDir(),
+			"lastCtx": lastCtx, "single": c.Single, "idleUnload": c.IdleUnload, "asleep": asleep, "enginePath": c.EnginePath, "modelDirs": c.ModelDirs, "agentDir": app.agentDir(), "hasHFKey": c.HFKey != "",
 		}
 	}
 	if app.helper != nil {

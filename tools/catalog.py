@@ -50,6 +50,7 @@ def entry(m):
 
 def main():
     picks = json.load(open(os.path.join(ROOT, "catalog", "picks.json")))["picks"]
+    lists = json.load(open(os.path.join(ROOT, "catalog", "lists.json")))["lists"]
     taken = {p["repo"] for p in picks}
 
     def take(models, n):
@@ -79,6 +80,7 @@ def main():
         "trending": trending,
         "new": new,
         "popular": popular,
+        "lists": lists,
     }
     path = os.path.join(ROOT, "catalog", "models.json")
     old = None
@@ -88,7 +90,7 @@ def main():
         except ValueError:
             pass
     # Only write when a list changed, so the daily job doesn't commit just a new timestamp.
-    if old and all(old.get(k) == cat[k] for k in ("picks", "trending", "new", "popular")):
+    if old and all(old.get(k) == cat[k] for k in ("picks", "trending", "new", "popular", "lists")):
         print("catalog unchanged")
         return 0
     with open(path, "w") as f:

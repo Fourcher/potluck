@@ -38,11 +38,15 @@ var apiClient = &http.Client{Timeout: 40 * time.Second}
 func httpGetJSON(u string, out any) error {
 	req, _ := http.NewRequest("GET", u, nil)
 	req.Header.Set("User-Agent", userAgent)
+	hfAuth(req)
 	res, err := apiClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
+	if why := hfDenied(req, res.StatusCode); why != "" {
+		return errors.New(why)
+	}
 	if res.StatusCode != 200 {
 		return fmt.Errorf("%s answered %s", hostOf(u), res.Status)
 	}
@@ -63,9 +67,14 @@ func rangeGet(ctx context.Context, u string, start, end int64) (*http.Response, 
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	hfAuth(req)
 	res, err := dlClient.Do(req)
 	if err != nil {
 		return nil, err
+	}
+	if why := hfDenied(req, res.StatusCode); why != "" {
+		res.Body.Close()
+		return nil, errors.New(why)
 	}
 	if res.StatusCode != http.StatusPartialContent {
 		res.Body.Close()

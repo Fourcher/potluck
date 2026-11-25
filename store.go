@@ -120,6 +120,7 @@ func hfTree(repo string) ([]hfEntry, error) {
 
 var (
 	splitRe = regexp.MustCompile(`-(\d{5})-of-(\d{5})\.gguf$`)
+	shaHex  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	quantRe = regexp.MustCompile(`(?i)[-.]((?:UD-)?(?:IQ\d[_A-Z0-9]*|Q\d[_A-Z0-9]*|BF16|F16|F32|MXFP4[_A-Z0-9]*))\.gguf$`)
 )
 
@@ -150,7 +151,9 @@ func hfFiles(repo string) ([]StoreFile, error) {
 			} else {
 				f.Quant = strings.TrimSuffix(key[strings.LastIndex(key, "/")+1:], ".gguf")
 			}
-			if e.LFS != nil {
+			// A gated repository shows the checksum only to an account allowed to download it
+			// (otherwise "****…"); without it the file is not checked, so take only a real one.
+			if e.LFS != nil && shaHex.MatchString(e.LFS.OID) {
 				f.SHA256 = e.LFS.OID
 			}
 			byKey[key] = f
@@ -161,6 +164,26 @@ func hfFiles(repo string) ([]StoreFile, error) {
 	var out []StoreFile
 	for _, k := range order {
 		out = append(out, *byKey[k])
+	}
+	// Names with no standard size in them (e.g. "Model-Mix-16G"): show what tells them apart.
+	var plain []*StoreFile
+	for i := range out {
+		if quantRe.FindStringSubmatch(out[i].File) == nil {
+			plain = append(plain, &out[i])
+		}
+	}
+	if len(plain) > 1 {
+		pre := plain[0].Quant
+		for _, f := range plain[1:] {
+			for !strings.HasPrefix(f.Quant, pre) {
+				pre = pre[:len(pre)-1]
+			}
+		}
+		if i := strings.LastIndexAny(pre, "-_."); i > 0 {
+			for _, f := range plain {
+				f.Quant = f.Quant[i+1:]
+			}
+		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Size < out[j].Size })
 	// Drop stray small files that sit beside the real model (anything under a tenth of the biggest).
@@ -340,7 +363,7 @@ func resolveModel(ctx context.Context, m *ModelRef) error {
 					low := strings.ToLower(e.Path)
 					if m.Vision == nil && strings.Contains(low, "mmproj") && strings.HasSuffix(low, pref+".gguf") {
 						sha := ""
-						if e.LFS != nil {
+						if e.LFS != nil && shaHex.MatchString(e.LFS.OID) {
 							sha = e.LFS.OID
 						}
 						m.Vision = &ModelPart{File: e.Path[strings.LastIndex(e.Path, "/")+1:], URL: hfURL(e.Path), Size: e.Size, SHA256: sha}
@@ -352,7 +375,7 @@ func resolveModel(ctx context.Context, m *ModelRef) error {
 			m.Parts, m.Size = nil, 0
 			for _, e := range tree {
 				sha := ""
-				if e.LFS != nil {
+				if e.LFS != nil && shaHex.MatchString(e.LFS.OID) {
 					sha = e.LFS.OID
 				}
 				switch {

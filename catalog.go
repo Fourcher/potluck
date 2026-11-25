@@ -33,6 +33,27 @@ type CatalogEntry struct {
 	Created   string `json:"created"`
 }
 
+// CatalogList is a ranked list someone else made (catalog/lists.json), shown with its age.
+type CatalogList struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	By      string `json:"by"`
+	AsOf    string `json:"asOf"`
+	Added   string `json:"added"`   // the day Potluck took it in (YYYY-MM-DD)
+	Expires string `json:"expires"` // after this day it is shown as out of date
+	About   string `json:"about"`
+	Tiers   []struct {
+		Tier  string `json:"tier"`
+		Items []struct {
+			Name   string `json:"name"`
+			Maker  string `json:"maker,omitempty"`
+			Note   string `json:"note,omitempty"`
+			Repo   string `json:"repo,omitempty"`   // opens the model's sizes
+			Search string `json:"search,omitempty"` // or searches for it, when no one repository is meant
+		} `json:"items"`
+	} `json:"tiers"`
+}
+
 type Catalog struct {
 	Updated  string         `json:"updated"`
 	Source   string         `json:"source"`
@@ -40,6 +61,7 @@ type Catalog struct {
 	Trending []CatalogEntry `json:"trending"`
 	New      []CatalogEntry `json:"new"`
 	Popular  []CatalogEntry `json:"popular"`
+	Lists    []CatalogList  `json:"lists,omitempty"`
 }
 
 var (
@@ -60,10 +82,11 @@ func (h *Host) catalog() *Catalog {
 				catCurrent = &c
 			}
 		}
-		if catCurrent == nil {
-			var c Catalog
-			_ = json.Unmarshal(builtinCatalog, &c)
-			catCurrent = &c
+		// A newer Potluck carries a newer catalog than the copy fetched before the update.
+		var built Catalog
+		_ = json.Unmarshal(builtinCatalog, &built)
+		if catCurrent == nil || built.Updated > catCurrent.Updated {
+			catCurrent = &built
 		}
 		if st, err := os.Stat(cache); err == nil {
 			catChecked = st.ModTime()
@@ -87,7 +110,9 @@ func (h *Host) catalog() *Catalog {
 				_ = os.WriteFile(cache, b, 0o644)
 			}
 			catMu.Lock()
-			catCurrent = &c
+			if c.Updated >= catCurrent.Updated {
+				catCurrent = &c
+			}
 			catMu.Unlock()
 		}()
 	}

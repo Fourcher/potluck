@@ -328,6 +328,30 @@ function shelf(list) {
   }).join("");
 }
 
+// Ranked lists other people made (catalog/lists.json), with how old each one is.
+let lists = null, listsLoading = false;
+function listsView() {
+  if (lists === null) {
+    if (!listsLoading) { listsLoading = true; api("/api/lists").then(r => { lists = r || []; }).catch(() => { lists = []; }).finally(() => { listsLoading = false; draw(true); }); }
+    return "";
+  }
+  if (!lists.length) return "";
+  const day = 864e5, today = Date.now();
+  return `<h2>Ranked lists</h2><p class="muted small">Rankings other people made, with their age: models move fast. Potluck has not measured these; open one to check its sizes against your computers.</p>` + lists.map(l => {
+    const age = Math.max(0, Math.floor((today - Date.parse(l.added)) / day));
+    const old = l.expires && today > Date.parse(l.expires) + day;
+    const ageText = age === 0 ? "added today" : age === 1 ? "added 1 day ago" : `added ${age} days ago`;
+    const tiers = (l.tiers || []).map(t => `<div class="tier"><span class="tier-name tier-${esc(t.tier)}">${esc(t.tier)}</span><div class="tier-items">${(t.items || []).map(i => {
+      const open = i.repo || i.search;
+      return `<div class="tier-item">${open ? `<button class="btn sm ghost" data-a="listopen" data-q="${esc(i.repo || i.search)}">${esc(i.name)}</button>` : `<b class="small">${esc(i.name)}</b>`}
+        <span class="muted small">${i.maker ? esc(i.maker) + ". " : ""}${esc(i.note || "")}</span></div>`;
+    }).join("")}</div></div>`).join("");
+    return `<details class="model"${old ? "" : " open"}><summary><b>${esc(l.title)}</b> <span class="muted small">${esc(l.by)}, ${esc(l.asOf)}</span>
+        <span class="badge ${old ? "bad" : age > 30 ? "warn" : ""}">${old ? "Out of date: " : ""}${ageText}</span></summary>
+      <p class="muted small" style="margin:8px 0">${esc(l.about)}</p>${tiers}</details>`;
+  }).join("");
+}
+
 // The person's other AI setups (connections.go).
 let conns = null, connsLoading = false;
 function loadConns() {
@@ -366,6 +390,7 @@ function viewModels() {
     ${pf ? `<div class="note">PirateFace lists community torrents of Hugging Face models, for when Hugging Face is unreachable. Potluck only reads the list. Download with your own torrent app, then compare the file's SHA-256 with the one Hugging Face publishes before you trust it. Downloading torrents inside Potluck is planned.</div>` : ""}
     ${store.error ? `<div class="err">${esc(store.error)}</div>` : ""}
     ${store.loading ? `<p class="muted">Searching…</p>` : shelf(store.results || []) || `<p class="muted">Nothing found.</p>`}
+    ${pf || store.q ? "" : listsView()}
     ${pf ? "" : diskView()}
     ${pf ? "" : localSettings()}
     ${pf ? "" : `<h2>Have a direct link?</h2><div class="tools"><input type="text" id="url" placeholder="https://…/model.gguf" style="flex:1;min-width:260px" aria-label="Direct link to a model file"><button class="btn quiet" data-a="planurl">Check it</button></div>`}`;
@@ -447,6 +472,8 @@ function localSettings() {
       <span class="muted">It loads again by itself with your next message.</span></p>
     <p class="small" style="margin-top:10px"><label>AI engine when a model runs here alone <select data-local="engine" style="max-width:100%">${engSel}</select></label></p>
     <p class="small" style="margin-top:10px"><label>Agent mode in the chat starts commands in <input type="text" data-local="agentdir" value="${esc(m.agentDir || "")}" style="min-width:300px"></label> <button class="btn sm quiet" data-a="agentdir">Save</button></p>
+    <p class="small" style="margin-top:10px"><label>Hugging Face key, for gated models <input type="password" data-local="hfkey" placeholder="${m.hasHFKey ? "Saved. Type a new one to replace it" : "hf_…"}" autocomplete="off" style="min-width:260px"></label> <button class="btn sm quiet" data-a="hfkey">Save</button>${m.hasHFKey ? ` <button class="btn sm quiet" data-a="hfkeyrm">Remove</button>` : ""}</p>
+    <p class="muted small">Some models only download after you accept their terms on their Hugging Face page while signed in. Then make a key that can read them at <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co/settings/tokens</a> and paste it here. Potluck sends it only to Hugging Face, and to your own computers when they download for you.</p>
   </div>`;
 }
 
@@ -783,6 +810,9 @@ const actions = {
   foundagain() { loadFound(false); },
   adddir() { const v = $("#adddir").value.trim(); if (v) act(() => api("/api/local", { modelDirs: [...(S.main.modelDirs || []), v] }).then(() => loadFound(false))); },
   deldir(t) { act(() => api("/api/local", { modelDirs: (S.main.modelDirs || []).filter(x => x !== t.dataset.dir) }).then(() => loadFound(false))); },
+  listopen(t) { store.source = "hf"; store.q = t.dataset.q; store.results = null; draw(true); window.scrollTo(0, 0); },
+  hfkey() { const v = $("[data-local=hfkey]").value.trim(); if (!v) return; act(() => api("/api/local", { hfKey: v }).then(() => toast("Hugging Face key saved"))); },
+  hfkeyrm() { act(() => api("/api/local", { hfKey: "" }).then(() => toast("Hugging Face key removed"))); },
   agentdir() { const v = $("[data-local=agentdir]").value.trim(); act(() => api("/api/local", { agentDir: v }).then(() => toast("Saved"))); },
   checksum(t) {
     const k = t.dataset.node + "/" + t.dataset.file;

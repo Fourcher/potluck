@@ -158,6 +158,7 @@ func newHost(a *Agent, id *Identity, cfg *ConfigStore) *Host {
 		// tested with (b12608 for Inkling 2 models), and every computer installs the same one.
 		c.EngineTag = engineTag
 	})
+	setHFKey(cfg.Get().HFKey)
 	self := &Node{Info: a.Info(), Online: true, IsMain: true}
 	h.nodes[id.FP] = self
 	a.dialTunnel = h.openTunnel
@@ -1352,7 +1353,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			if local {
 				return nil // the file is already there
 			}
-			return h.call(p.id, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts, Vision: model.Vision}, nil, 24*time.Hour)
+			return h.call(p.id, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts, Vision: model.Vision, HFKey: currentHFKey()}, nil, 24*time.Hour)
 		}
 		var res struct {
 			Port int `json:"port"`
@@ -1383,7 +1384,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 				items = append(items, it)
 			}
 		}
-		if err := h.call(p.id, "seed", SeedReq{URL: model.URL, Items: items}, nil, 24*time.Hour); err != nil {
+		if err := h.call(p.id, "seed", SeedReq{URL: model.URL, Items: items, HFKey: currentHFKey()}, nil, 24*time.Hour); err != nil {
 			// Not fatal: the head can still push this share over the local network.
 			h.setProgress(p.id, ProgressNote{Msg: "Will receive its share from the head instead (" + err.Error() + ")"})
 		}
@@ -1428,7 +1429,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		}
 	}
 	h.mu.Unlock()
-	req := StartHeadReq{File: model.File, Vision: model.Vision, Workers: plan.WorkerOrder, NGL: ngl, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream, DenseBytes: info.denseBytes(), KVKeyQ8: plan.KVKeyQ8,
+	req := StartHeadReq{File: model.File, Vision: model.Vision, HFKey: currentHFKey(), Workers: plan.WorkerOrder, NGL: ngl, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream, DenseBytes: info.denseBytes(), KVKeyQ8: plan.KVKeyQ8,
 		ExpertCPU: plan.ExpertCPU, Sampling: samplingArgs(info),
 		// Every hardware thread except where it measured slower: the disk in play, or pooled with
 		// whole layers on the head's processor (see threadsFor).

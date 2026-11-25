@@ -103,3 +103,11 @@ pre.log{background:#15120f;color:#e9e1d5;border-radius:10px;padding:12px;font-si
 .sheet>.card{max-width:640px;width:100%;max-height:90vh;overflow:auto}
 footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--line);overflow-wrap:anywhere}
 .model.recommended{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+
+/* Ranked lists (tier lists) on the Models page */
+.tier { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--line, rgba(127,127,127,.2)); }
+.tier-name { flex: 0 0 34px; height: 34px; display: grid; place-items: center; border-radius: 8px; font-weight: 800; color: #111; background: #ccc; }
+.tier-S { background: #ff7f7f; } .tier-A { background: #ffbf7f; } .tier-B { background: #ffdf7f; } .tier-C { background: #ffff7f; } .tier-D { background: #bfff7f; }
+.tier-items { display: grid; gap: 6px; flex: 1; min-width: 0; }
+.tier-item { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+details.model > summary { cursor: pointer; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }

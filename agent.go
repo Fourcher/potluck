@@ -58,7 +58,9 @@ type Config struct {
 	// EnginePath: "" = use an engine found on this computer when it is new enough and the
 	// model runs here alone; "potluck" = always Potluck's own; else that llama-server.
 	EnginePath string `json:"enginePath,omitempty"`
-	Single     bool   `json:"single,omitempty"` // set up for one computer
+	// HFKey: the person's own Hugging Face key, for gated models (hfkey.go). Main only.
+	HFKey  string `json:"hfKey,omitempty"`
+	Single bool   `json:"single,omitempty"` // set up for one computer
 	// IdleUnload: minutes without a request after which the model is let go to free the
 	// memory (0 = keep it loaded). It loads again with the next message.
 	IdleUnload int `json:"idleUnload,omitempty"`
@@ -122,7 +124,7 @@ type Agent struct {
 	gpuDev    string // the engine's name for this computer's graphics card, "" if none is used
 	rpc, head *proc
 	// headLog: the last head engine's log, kept after a stop so the reason it ended can still be read.
-	headLog string
+	headLog   string
 	guard     *GuardEvent // the guard's last stop (guard.go)
 	vision    bool        // the model running here was loaded with its image add-on
 	rpcPort   int
@@ -315,15 +317,18 @@ type (
 		Parts  []ModelPart `json:"parts,omitempty"`
 		Vision *ModelPart  `json:"vision,omitempty"` // the image add-on, fetched with the model
 		For    string      `json:"for,omitempty"`    // as RuntimeSpec.For
+		HFKey  string      `json:"hfKey,omitempty"`  // the person's Hugging Face key, for gated models (hfkey.go)
 	}
 	SeedReq struct {
 		URL   string     `json:"url"`
 		Items []SeedItem `json:"items"`
+		HFKey string     `json:"hfKey,omitempty"`
 	}
 	StartHeadReq struct {
 		KVKeyQ8 bool       `json:"kvKeyQ8,omitempty"` // the cache's keys in 8 bits (-ctk q8_0): the plan needed the room
 		File    string     `json:"file"`
 		Vision  *ModelPart `json:"vision,omitempty"` // the image add-on to fetch (if not here yet) and load
+		HFKey   string     `json:"hfKey,omitempty"`  // for fetching the add-on from a gated model
 		Workers []string   `json:"workers"`          // node ids, in --rpc order
 		NGL     int        `json:"ngl"`
 		Split   string     `json:"split"`
@@ -521,7 +526,7 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		if len(parts) == 0 {
 			parts = []ModelPart{{File: in.File, URL: in.URL, Size: in.Size, SHA256: in.SHA256}}
 		}
-		ctx := a.jobCtxFor("model:"+filepath.Base(in.File), in.For)
+		ctx := withHFKey(a.jobCtxFor("model:"+filepath.Base(in.File), in.For), in.HFKey)
 		var before int64
 		for _, part := range parts {
 			err := downloadFile(ctx, part.URL, filepath.Join(a.dir, "models", filepath.Base(part.File)), part.Size, part.SHA256, 24, func(d, t int64, s string) {
@@ -547,7 +552,7 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		if err := json.Unmarshal(raw, &in); err != nil {
 			return nil, err
 		}
-		err := seedCache(a.jobCtx("seed"), in.URL, filepath.Join(a.dir, "cache", "rpc"), in.Items, 8, func(d, t int64, s string) {
+		err := seedCache(withHFKey(a.jobCtx("seed"), in.HFKey), in.URL, filepath.Join(a.dir, "cache", "rpc"), in.Items, 8, func(d, t int64, s string) {
 			a.note("Its share of the model: downloading", d, t)
 		})
 		if err != nil {
@@ -792,7 +797,7 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	mmproj := ""
 	if in.Vision != nil && in.Vision.URL != "" {
 		dst := filepath.Join(a.dir, "models", filepath.Base(in.Vision.File))
-		if err := downloadFile(context.Background(), in.Vision.URL, dst, in.Vision.Size, in.Vision.SHA256, 8, nil); err == nil {
+		if err := downloadFile(withHFKey(context.Background(), in.HFKey), in.Vision.URL, dst, in.Vision.Size, in.Vision.SHA256, 8, nil); err == nil {
 			mmproj = dst
 		}
 	} else if found, _ := filepath.Glob(filepath.Join(filepath.Dir(model), "mmproj*.gguf")); len(found) > 0 {
