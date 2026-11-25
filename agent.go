@@ -671,14 +671,30 @@ func (a *Agent) startRPC() (any, error) {
 	a.mu.Lock()
 	a.rpc, a.rpcPort = p, port
 	a.mu.Unlock()
-	// Give it a moment to open its port.
-	for i := 0; i < 50; i++ {
+	// Wait until it answers on its port. If it never does (it crashed, or something else took
+	// the port in the moment between choosing it and the engine opening it), say so with the
+	// engine's own last words instead of reporting a helper that is not there.
+	up := false
+	for i := 0; i < 50 && !up; i++ {
 		if c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), 300*time.Millisecond); err == nil {
 			time.Sleep(300 * time.Millisecond) // hanging up at once makes the macOS worker quit
 			c.Close()
+			up = true
+			break
+		}
+		if !p.Running() && i > 5 {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+	if !up {
+		p.Stop()
+		a.mu.Lock()
+		if a.rpc == p {
+			a.rpc = nil
+		}
+		a.mu.Unlock()
+		return nil, errors.New("the helper engine did not start: " + lastLogLine(tailFile(p.logPath, 4000)))
 	}
 	a.note("Helper engine running", 0, 0)
 	return map[string]int{"port": port, "threads": threads}, nil

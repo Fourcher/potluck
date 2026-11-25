@@ -545,8 +545,10 @@ func (a *Agent) startProc(name, rtDir, bin string, args []string, restart, lowPr
 		runtime.LockOSThread()
 		defer close(p.done)
 		defer logf.Close()
+		quick := 0
 		for i := 0; ; i++ {
 			cmd := build()
+			started := time.Now()
 			err := cmd.Start()
 			if i == 0 {
 				first <- err
@@ -575,8 +577,27 @@ func (a *Agent) startProc(name, rtDir, bin string, args []string, restart, lowPr
 			if stopped || !restart {
 				return
 			}
-			fmt.Fprintf(logf, "\n[potluck] %s stopped, starting it again\n", name)
-			time.Sleep(time.Second)
+			// Start it again, but not forever: an engine that keeps dying within a minute of
+			// starting has a cause a restart will not fix (a bad file, no memory, a broken
+			// driver). After five such ends in a row it stays down, and its log says why.
+			if time.Since(started) < time.Minute {
+				quick++
+			} else {
+				quick = 0
+			}
+			if quick >= 5 {
+				fmt.Fprintf(logf, "\n[potluck] %s ended %d times in a row within a minute of starting; not starting it again\n", name, quick)
+				return
+			}
+			wait := time.Second << quick // 1, 2, 4, 8, 16 seconds
+			fmt.Fprintf(logf, "\n[potluck] %s stopped, starting it again in %s\n", name, wait)
+			time.Sleep(wait)
+			p.mu.Lock()
+			stopped = p.stopped
+			p.mu.Unlock()
+			if stopped {
+				return
+			}
 		}
 	}()
 	if err := <-first; err != nil {
