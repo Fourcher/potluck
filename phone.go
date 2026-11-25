@@ -93,30 +93,18 @@ func (h *Host) applyPhones() {
 	if len(h.cfg.Get().Phones) > 0 || pairing {
 		want = phoneAddrs()
 	}
-	sort.Strings(want)
-	key := strings.Join(want, ",")
 	h.phoneMu.Lock()
 	defer h.phoneMu.Unlock()
-	if key == h.phoneOn {
-		return
-	}
-	for _, s := range h.phoneSrvs {
-		_ = s.Close()
-	}
-	h.phoneSrvs, h.phoneOn = nil, key
-	if len(want) == 0 {
-		return
-	}
 	conf := &tls.Config{Certificates: []tls.Certificate{h.id.Cert}, MinVersion: tls.VersionTLS12}
-	for _, ip := range want {
+	h.phoneSrvs = syncListeners(h.phoneSrvs, want, "phones", func(ip string) (*http.Server, error) {
 		ln, err := net.Listen("tcp", net.JoinHostPort(ip, strconv.Itoa(portPhone)))
 		if err != nil {
-			continue
+			return nil, err
 		}
 		srv := &http.Server{Handler: h.phoneHandler(), ReadHeaderTimeout: 20 * time.Second}
-		h.phoneSrvs = append(h.phoneSrvs, srv)
 		go func() { _ = srv.Serve(tls.NewListener(ln, conf)) }()
-	}
+		return srv, nil
+	})
 }
 
 // phoneWho returns the paired phone a request comes from, by its key.

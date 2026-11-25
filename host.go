@@ -145,7 +145,7 @@ type Host struct {
 	pairUntil  time.Time
 	phoneSeen  map[string]time.Time
 	phoneMu    sync.Mutex
-	phoneSrvs  []*http.Server
+	phoneSrvs  map[string]*http.Server // by address
 	helperMu   sync.Mutex
 	helper     helperState            // the Potluck helper (helper.go)
 	helperGen  int                    // which setup run is current; bumped by stop and restart
@@ -155,9 +155,7 @@ type Host struct {
 	startGen  int
 	startDone chan struct{}
 	shareMu   sync.Mutex
-	shareSrvs []*http.Server
-	shareOn   string // the addresses the share server listens on now
-	phoneOn   string // the addresses the phone server listens on now
+	shareSrvs map[string]*http.Server // by address
 }
 
 func newHost(a *Agent, id *Identity, cfg *ConfigStore) *Host {

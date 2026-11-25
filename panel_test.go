@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 )
@@ -48,5 +50,34 @@ func TestConfigGetIsNotChangedByUpdate(t *testing.T) {
 	<-done
 	if len(got) != 1 || len(s.Get().Phones) != 21 {
 		t.Fatalf("handed-out %d, now %d", len(got), len(s.Get().Phones))
+	}
+}
+
+// An address that cannot be opened now is tried again later, without closing the servers
+// that work (found by the self-review: one failure stopped all retries until the addresses
+// changed).
+func TestSyncListenersRetriesOnlyTheMissing(t *testing.T) {
+	opened := map[string]int{}
+	fail := map[string]bool{"b": true}
+	open := func(ip string) (*http.Server, error) {
+		opened[ip]++
+		if fail[ip] {
+			return nil, errors.New("busy")
+		}
+		return &http.Server{}, nil
+	}
+	cur := syncListeners(nil, []string{"a", "b"}, "test", open)
+	a := cur["a"]
+	if a == nil || cur["b"] != nil {
+		t.Fatalf("%v", cur)
+	}
+	fail["b"] = false
+	cur = syncListeners(cur, []string{"a", "b"}, "test", open)
+	if cur["a"] != a || cur["b"] == nil || opened["a"] != 1 || opened["b"] != 2 {
+		t.Fatalf("%v %v", cur, opened)
+	}
+	cur = syncListeners(cur, []string{"b"}, "test", open)
+	if len(cur) != 1 {
+		t.Fatalf("%v", cur)
 	}
 }
