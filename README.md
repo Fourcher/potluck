@@ -67,6 +67,8 @@ Open `http://127.0.0.1:7720` on the main computer (or "Open chat" in the control
 - **Usage:** a ring shows how full the conversation's memory is. Click it for tokens read and written, speed, time spent, and which computers are working.
 - **Commands:** type `/` in the message box, or press Ctrl/Cmd+K anywhere. `/help` lists what there is.
 - **Versions:** trying again or editing a message keeps the earlier answers; flip between them with ‹ ›.
+- **Write before the model is ready:** a message sent while a model is still downloading or loading is kept and goes out by itself as soon as it is ready. The model answers one conversation at a time; a reply waiting behind another one says so.
+- **Long chats:** when a chat no longer fits the model's memory, the page says so and offers to summarize it and carry on in a fresh chat, with your last message.
 - **Also:** thinking on or off, writing styles, your own standing instructions, stop, a preview panel for HTML and SVG the model writes, light and dark, keyboard shortcuts, and a phone-sized layout.
 
 Two things make it quick on slow hardware. Follow-up messages read only what is new: for Qwen-style models the page sends the conversation back exactly as it was written, where the standard route made the engine read every earlier token again on every turn (measured: 23 new tokens instead of 78). And there are no hidden extra requests, such as asking the model for a title.
@@ -80,6 +82,10 @@ It runs on one of your computers that lends its memory, on the processor only an
 ## Models: always current
 
 The Models page starts with **Our picks** (chosen for quality and how well they run at home, each with links to check), then **Trending**, **New this month** and **Most downloaded** on Hugging Face, refreshed every day (`tools/catalog.py`, run daily in this repository; Potluck fetches the newest list once a day). Every number shown is Hugging Face's own; every size is checked against your computers, and once a model has run here Potluck shows the speed it measured.
+
+**Ranked lists** made by other people (such as a tier list of uncensored models) appear below, each saying who ranked it and how many days old it is; past its expiry date a list is folded away as out of date. Potluck has not measured these rankings: open a model from a list to check its sizes against your computers.
+
+**Gated models:** some Hugging Face models only download after you accept their terms on their page while signed in. Make a read key at huggingface.co/settings/tokens and paste it under Models, On this computer. Potluck sends it only to Hugging Face, and to your own computers when they download for you.
 
 ## Your other AI setups, and other apps
 
@@ -108,7 +114,7 @@ The app has a UI test (`ios/PotluckUITests`) that pairs with a running Potluck, 
 One self-contained program per platform (about 9 MB, no installer). Written in Go; the control panel is a local web page.
 
 - **Engine:** [llama.cpp](https://github.com/ggml-org/llama.cpp) and its RPC backend. Potluck downloads the matching build for each computer (checked against the SHA-256 GitHub publishes) and pins one version everywhere, because the worker protocol is version-checked.
-- **Planner** (`gguf.go`): reads the model's header over the network, takes each computer's offered memory, and decides which layers go where. It emits llama.cpp's `-ngl` and `--tensor-split` values and is tested against llama.cpp's own layer-assignment rule. It keeps as much as it can on the computer that runs the model, brings in as few helpers as will do, and prefers the better-connected ones.
+- **Planner** (`gguf.go`, `fit.go`): reads the model's header over the network, takes each computer's offered memory, and decides which layers go where. Before loading, it asks the engine's own dry run (llama-fit-params with the exact start, nothing loaded, about a second) what each device will really need, the conversation cache and working memory included, and shrinks the prompt batch or, when the size was automatic, the conversation memory until the start truly fits. With helpers, their engines are asked the same way through the encrypted link. It emits llama.cpp's `-ngl` and `--tensor-split` values and is tested against llama.cpp's own layer-assignment rule. It keeps as much as it can on the computer that runs the model, brings in as few helpers as will do, and prefers the better-connected ones.
 - **Mixture-of-experts models and small graphics cards:** in these models most of each layer is "experts", of which only a few are read per word, while the rest of the layer (the trunk) is read every time. When the running computer's card is too small for whole layers, Potluck puts the trunk of its layers on the card and keeps their experts in memory. A 4 GB card then helps with 32 layers instead of 2.
 - **Each computer fetches its own share** (`fetch.go`): the worker caches tensors by hash, so helpers download just their byte ranges of the model file straight from the source instead of receiving them from the head over Wi-Fi.
 - **Security** (`identity.go`, `host.go`, `worker.go`): every computer has its own key. Pairing pins the keys (USB kit and join link carry the main computer's fingerprint and a secret; network discovery uses a 4-digit comparison). All traffic between computers is encrypted with those pinned keys. llama.cpp's worker protocol has no authentication, so the engine only ever listens on the computer itself and is reached through that encrypted link.
@@ -200,6 +206,7 @@ Run `dist/potluck-<your platform>` to start. Keep the other platforms' programs 
 
 ## Known limits
 
+- The model answers one conversation at a time; others wait their turn (the chat page says so).
 - Inkling 2 Mini cannot be stopped from thinking entirely: with Think off it still writes a short line of reasoning (shown folded under "Thought about it") before its answer.
 
 - The Mac app is signed and notarized. The Windows app is not signed yet, so Windows shows "Windows protected your PC" the first time (More info, Run anyway).
