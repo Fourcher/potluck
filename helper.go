@@ -72,11 +72,17 @@ func (h *Host) EnsureHelper() {
 		h.helperMu.Unlock()
 		return
 	}
+	// The helper's last computer may still run its engine (it went quiet for a moment, or its
+	// setup gave up): stop it there before choosing again, so it is never left running unseen.
+	old := h.helper.Node
 	h.helper = helperState{Phase: "preparing", Note: "Choosing a computer for the helper"}
 	h.helperGen++
 	gen := h.helperGen
 	h.helperMu.Unlock()
 	go func() {
+		if old != "" {
+			_ = h.call(old, "stop_aux", nil, nil, 20*time.Second) // before a new start, maybe there
+		}
 		err := h.startHelper(gen)
 		h.helperMu.Lock()
 		if err != nil && h.helperGen == gen {
@@ -180,6 +186,13 @@ func (h *Host) startHelper(gen int) error {
 	if err := h.call(node, "start_aux", StartAuxReq{Name: "helper", File: m.File, Ctx: helperCtx}, nil, time.Minute); err != nil {
 		return err
 	}
+	// From here on, giving up stops the engine it started (it restarts by itself otherwise).
+	ready := false
+	defer func() {
+		if !ready {
+			_ = h.call(node, "stop_aux", nil, nil, 20*time.Second)
+		}
+	}()
 	for deadline := time.Now().Add(5 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
 		var st AuxStatus
 		if err := h.call(node, "aux_status", nil, &st, 15*time.Second); err != nil {
@@ -198,6 +211,7 @@ func (h *Host) startHelper(gen int) error {
 			}
 			h.helper.Phase, h.helper.Note, h.helper.bytes = "ready", "", need
 			h.helperMu.Unlock()
+			ready = true
 			return nil
 		}
 		if !st.Running {

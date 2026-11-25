@@ -194,7 +194,7 @@ func (a *Agent) ensureStream(ctx context.Context, p StreamPackage, note func(str
 		return dir, nil
 	}
 	_ = os.RemoveAll(dir)
-	tmp := filepath.Join(a.dir, "tmp")
+	tmp := filepath.Join(a.dir, "tmp", "stream-"+filepath.Base(dir)) // its own (see ensureRuntime)
 	if err := os.MkdirAll(tmp, 0o755); err != nil {
 		return "", err
 	}

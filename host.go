@@ -295,7 +295,10 @@ func (h *Host) serveControl(c *tls.Conn, fp string, hello Hello) {
 		p := &Pending{ID: fp, Name: name, OS: hello.OS, Addr: c.RemoteAddr().String(), Code: pairCode(h.id.FP, fp), decide: make(chan bool, 1)}
 		h.mu.Lock()
 		if old := h.pending[fp]; old != nil {
-			old.decide <- false
+			select { // never wait while holding the lock: an answer may already be queued
+			case old.decide <- false:
+			default:
+			}
 		}
 		h.pending[fp] = p
 		h.mu.Unlock()
@@ -1638,10 +1641,17 @@ func engineUsedHelpers(log string) bool {
 var logNoise = regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+ \w `)
 
 func lastLogLine(log string) string {
+	// The engine often prints its error and then a few lines while it shuts down: look for
+	// the error first, and only without one take the last line.
 	lines := strings.Split(strings.TrimSpace(log), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		l := strings.TrimSpace(lines[i])
-		if l != "" && (strings.Contains(strings.ToLower(l), "error") || strings.Contains(l, " E ") || i == len(lines)-1) {
+		if strings.Contains(strings.ToLower(l), "error") || strings.Contains(l, " E ") {
+			return logNoise.ReplaceAllString(l, "")
+		}
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
 			return logNoise.ReplaceAllString(l, "")
 		}
 	}

@@ -206,7 +206,9 @@ func (a *Agent) ensureRuntime(ctx context.Context, spec RuntimeSpec, note func(s
 		return dir, a.ensureGlibc(ctx, note)
 	}
 	_ = os.RemoveAll(dir)
-	tmp := filepath.Join(a.dir, "tmp")
+	// Its own download folder: an engine install and a disk-streaming install can run at
+	// once, and each removes only its own half-finished files (resumed after a restart).
+	tmp := filepath.Join(a.dir, "tmp", "engine-"+filepath.Base(dir))
 	if err := os.MkdirAll(tmp, 0o755); err != nil {
 		return "", err
 	}
@@ -300,6 +302,9 @@ func (a *Agent) ensureGlibc(ctx context.Context, note func(string)) error {
 		return err
 	}
 	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return fmt.Errorf("the Debian package list answered %s", res.Status)
+	}
 	gz, err := gzip.NewReader(res.Body)
 	if err != nil {
 		return err
@@ -562,6 +567,9 @@ func (a *Agent) startProc(name, rtDir, bin string, args []string, restart, lowPr
 				first <- err
 			}
 			if err != nil {
+				if i > 0 {
+					fmt.Fprintf(logf, "[potluck] could not start %s again: %v\n", name, err)
+				}
 				return
 			}
 			p.mu.Lock()
