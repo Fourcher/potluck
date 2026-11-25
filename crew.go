@@ -179,13 +179,13 @@ func (h *Host) startCrew(c *CrewMember) error {
 	if err != nil {
 		return err
 	}
-	spec.Solo = true
+	spec.Solo, spec.For = true, "aux:"+c.Name
 	if err := h.call(c.Node, "ensure_runtime", spec, nil, 2*time.Hour); err != nil {
 		return err
 	}
 	if model.Source != "local" {
 		h.crewNote(c, "Downloading "+humanBytes(model.Size))
-		if err := h.call(c.Node, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts}, nil, 24*time.Hour); err != nil {
+		if err := h.call(c.Node, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts, For: "aux:" + c.Name}, nil, 24*time.Hour); err != nil {
 			return err
 		}
 	}

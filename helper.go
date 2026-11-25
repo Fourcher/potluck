@@ -165,12 +165,12 @@ func (h *Host) startHelper(gen int) error {
 	if err != nil {
 		return err
 	}
-	spec.Solo = true
+	spec.Solo, spec.For = true, "aux:helper"
 	if err := h.call(node, "ensure_runtime", spec, nil, 2*time.Hour); err != nil {
 		return err
 	}
 	h.helperNote("Downloading the helper (" + humanBytes(m.Size) + ") to " + name)
-	if err := h.call(node, "fetch_model", FetchModelReq{URL: m.URL, File: m.File, Size: m.Size, SHA256: m.SHA256}, nil, 2*time.Hour); err != nil {
+	if err := h.call(node, "fetch_model", FetchModelReq{URL: m.URL, File: m.File, Size: m.Size, SHA256: m.SHA256, For: "aux:helper"}, nil, 2*time.Hour); err != nil {
 		return err
 	}
 	if !h.helperCurrent(gen) {

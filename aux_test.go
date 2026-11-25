@@ -21,3 +21,17 @@ func TestLocalPortAuxDoesNotDeadlock(t *testing.T) {
 		t.Fatal("localPort deadlocked on an aux target")
 	}
 }
+
+// Stopping the main model leaves an extra engine's download alone.
+func TestStopKeepsAuxJobs(t *testing.T) {
+	a := &Agent{}
+	mainJob := a.jobCtxFor("model:big.gguf", "")
+	crewJob := a.jobCtxFor("model:small.gguf", "aux:crew")
+	a.Stop()
+	if mainJob.Err() == nil {
+		t.Fatal("the main model's download should stop with it")
+	}
+	if crewJob.Err() != nil {
+		t.Fatal("a crew member's download was cancelled by stopping the main model")
+	}
+}

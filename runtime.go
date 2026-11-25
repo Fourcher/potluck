@@ -44,6 +44,9 @@ type RuntimeSpec struct {
 	// Solo: the model runs on this computer alone, so an engine already installed here may
 	// be used instead (helpers need Potluck's own build on every computer).
 	Solo bool `json:"solo,omitempty"`
+	// For: what the engine is for: "" the main model, "aux:<slot>" the helper or a crew
+	// member. Stopping the main model cancels only its own jobs.
+	For string `json:"for,omitempty"`
 }
 
 func safeJoin(root, name string) (string, error) {

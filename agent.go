@@ -128,6 +128,7 @@ type Agent struct {
 	aux       map[string]*auxEngine // extra engines: the helper and crew members (aux.go)
 	listeners []net.Listener
 	jobs      map[string]context.CancelFunc // jobs in progress (jobCtx)
+	jobOwner  map[string]string             // whose each job is: "" the main model, "aux:<slot>" an extra engine
 	status    string
 	done      int64
 	total     int64
@@ -220,17 +221,21 @@ func (a *Agent) note(msg string, done, total int64) {
 // replaces the one in progress, but different jobs run side by side, so the helper's and crew
 // members' downloads on this computer don't cancel the main model's or each other's.
 // Stop ends them all.
-func (a *Agent) jobCtx(key string) context.Context {
+func (a *Agent) jobCtx(key string) context.Context { return a.jobCtxFor(key, "") }
+
+// jobCtxFor starts a job for an owner ("" the main model, "aux:<slot>" an extra engine).
+func (a *Agent) jobCtxFor(key, owner string) context.Context {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.jobs == nil {
 		a.jobs = map[string]context.CancelFunc{}
+		a.jobOwner = map[string]string{}
 	}
 	if c := a.jobs[key]; c != nil {
 		c()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	a.jobs[key] = cancel
+	a.jobs[key], a.jobOwner[key] = cancel, owner
 	return ctx
 }
 
@@ -304,6 +309,7 @@ type (
 		SHA256 string      `json:"sha256"`
 		Parts  []ModelPart `json:"parts,omitempty"`
 		Vision *ModelPart  `json:"vision,omitempty"` // the image add-on, fetched with the model
+		For    string      `json:"for,omitempty"`    // as RuntimeSpec.For
 	}
 	SeedReq struct {
 		URL   string     `json:"url"`
@@ -431,7 +437,7 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 				return map[string]string{"dir": dir, "gpuDevice": dev, "local": le}, nil
 			}
 		}
-		dir, err := a.ensureRuntime(a.jobCtx("runtime"), spec, func(s string) { a.note(s, 0, 0) })
+		dir, err := a.ensureRuntime(a.jobCtxFor("runtime", spec.For), spec, func(s string) { a.note(s, 0, 0) })
 		if err != nil {
 			return nil, err
 		}
@@ -504,7 +510,7 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		if len(parts) == 0 {
 			parts = []ModelPart{{File: in.File, URL: in.URL, Size: in.Size, SHA256: in.SHA256}}
 		}
-		ctx := a.jobCtx("model:" + filepath.Base(in.File))
+		ctx := a.jobCtxFor("model:"+filepath.Base(in.File), in.For)
 		var before int64
 		for _, part := range parts {
 			err := downloadFile(ctx, part.URL, filepath.Join(a.dir, "models", filepath.Base(part.File)), part.Size, part.SHA256, 24, func(d, t int64, s string) {
@@ -912,10 +918,14 @@ func (a *Agent) Status() AgentStatus {
 // Stop ends every engine process and any download in progress.
 func (a *Agent) Stop() {
 	a.mu.Lock()
-	for _, c := range a.jobs {
-		c()
+	// The main model's jobs only: a crew member's or the helper's download goes on.
+	for k, c := range a.jobs {
+		if !strings.HasPrefix(a.jobOwner[k], "aux:") {
+			c()
+			delete(a.jobs, k)
+			delete(a.jobOwner, k)
+		}
 	}
-	a.jobs = nil
 	rpc, head, ls := a.rpc, a.head, a.listeners
 	a.rpc, a.head, a.listeners, a.links = nil, nil, nil, nil
 	a.status, a.done, a.total = "", 0, 0
