@@ -243,15 +243,16 @@ func freePort() (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-// threadsFor turns the pedal into a number of CPU threads. The base is one thread per
-// processor core; on processors that mix fast and slow cores it is the fast cores' threads
-// (measured on a 4 fast + 8 slow core laptop: 8 threads beat 12 by 14% writing and 24%
-// reading). all asks for every hardware thread instead.
-func threadsFor(info NodeInfo, all bool) int {
+// threadsFor turns the pedal into a number of CPU threads. The base is every hardware thread
+// of the processor's fast cores (all of them when the cores are alike). Measured with experts
+// kept in memory: on a 4-core, 8-thread desktop 8 threads beat 4 (prompt 17.5 vs 12.6
+// tokens/s, writing 4.5 vs 3.9); on a 4 fast + 8 slow core laptop the fast cores' 8 threads
+// beat all 12 (14% writing, 24% reading).
+func threadsFor(info NodeInfo) int {
 	base := info.Cores
 	if info.PerfThreads > 0 {
 		base = info.PerfThreads
-	} else if all && info.Threads > base {
+	} else if info.Threads > base {
 		base = info.Threads
 	}
 	t := int(math.Round(float64(base) * float64(info.Limits.Pedal) / 100))
@@ -259,6 +260,33 @@ func threadsFor(info NodeInfo, all bool) int {
 		t = 1
 	}
 	return t
+}
+
+// placementArgs are the engine flags that say where a model's weights and cache go, shared
+// by every engine Potluck starts (the main model, the helper's model, crew members), so a
+// rule learned for one applies to all.
+func placementArgs(ngl int, expertCPU []int, kvKeyQ8 bool) []string {
+	args := []string{"-ngl", strconv.Itoa(ngl)}
+	if kvKeyQ8 {
+		args = append(args, "-ctk", "q8_0")
+	}
+	if len(expertCPU) > 0 {
+		// Keep these layers' expert weights in memory; the rest of each layer goes to the card.
+		// Any ffn_...exps tensor, as isExpertTensor counts them: models fuse them differently
+		// (Inkling 2 has ffn_gate_up_exps; a pattern for up/down/gate alone left two thirds of
+		// its experts on a 4 GB card, 15 GB in all).
+		//
+		// The engine still uses the card for long prompts, copying the experts over as it
+		// goes ("op offload"). Measured on a 4 GB card with Inkling 2 at 32k: it fits (3.8 GB
+		// used) and reads prompts 2.2 times as fast (27.7 vs 12.6 tokens/s) as working on
+		// the processor with --no-op-offload.
+		nums := make([]string, len(expertCPU))
+		for i, l := range expertCPU {
+			nums[i] = strconv.Itoa(l)
+		}
+		args = append(args, "-ot", `blk\.(`+strings.Join(nums, "|")+`)\.ffn_[a-z_]*exps=CPU`)
+	}
+	return args
 }
 
 // Requests the main computer can make.
@@ -295,8 +323,8 @@ type (
 		// DenseBytes is the size of the part of the model every word uses. InferSSD puts it on
 		// the graphics card; when the card is too small for it, the card is left out.
 		DenseBytes int64 `json:"denseBytes,omitempty"`
-		// AllThreads: use every hardware thread instead of one per core. The main computer
-		// asks for it only in the layout where that measured faster.
+		// AllThreads is no longer used (every engine now uses the fast cores' threads); kept so
+		// an older main computer's requests still decode.
 		AllThreads bool `json:"allThreads,omitempty"`
 	}
 	AgentStatus struct {
@@ -614,7 +642,7 @@ func (a *Agent) startRPC() (any, error) {
 		return nil, err
 	}
 	info := a.Info()
-	threads := threadsFor(info, false)
+	threads := threadsFor(info)
 	_ = os.MkdirAll(filepath.Join(a.dir, "cache", "rpc"), 0o755)
 	// Bound to this computer only. Other computers reach it through the encrypted tunnel,
 	// because the worker protocol itself has no password.
@@ -712,12 +740,12 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 		return nil, err
 	}
 	info := a.Info()
-	threads := threadsFor(info, in.AllThreads)
+	threads := threadsFor(info)
 	if in.Ctx <= 0 {
 		in.Ctx = 4096
 	}
 	args := []string{"-m", model, "-c", strconv.Itoa(in.Ctx), "-np", "1", "-t", strconv.Itoa(threads),
-		"--host", "127.0.0.1", "--port", strconv.Itoa(api), "-fit", "off", "-ngl", strconv.Itoa(in.NGL), "-lv", "4",
+		"--host", "127.0.0.1", "--port", strconv.Itoa(api), "-fit", "off", "-lv", "4",
 		// Name the model in API answers by its file name, not the full path on this disk.
 		"--alias", strings.TrimSuffix(filepath.Base(model), ".gguf")}
 	if mmproj != "" {
@@ -733,24 +761,7 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	if in.Split != "" && in.NGL > 0 {
 		args = append(args, "-ts", in.Split)
 	}
-	if in.KVKeyQ8 {
-		args = append(args, "-ctk", "q8_0")
-	}
-	if len(in.ExpertCPU) > 0 {
-		// Keep these layers' expert weights in memory; the rest of each layer goes to the card.
-		// Any ffn_...exps tensor, as isExpertTensor counts them: models fuse them differently
-		// (Inkling 2 has ffn_gate_up_exps; a pattern for up/down/gate alone left two thirds of
-		// its experts on a 4 GB card, 15 GB in all).
-		nums := make([]string, len(in.ExpertCPU))
-		for i, l := range in.ExpertCPU {
-			nums[i] = strconv.Itoa(l)
-		}
-		args = append(args, "-ot", `blk\.(`+strings.Join(nums, "|")+`)\.ffn_[a-z_]*exps=CPU`)
-		// And work on them where they are. By default the engine copies experts kept in memory
-		// to the card for long prompts, and reserves room for that on the card: 15.9 GB for
-		// Inkling 2 at 32k on a 4 GB card (measured), so the model could not start at all.
-		args = append(args, "--no-op-offload")
-	}
+	args = append(args, placementArgs(in.NGL, in.ExpertCPU, in.KVKeyQ8)...)
 	// The helpers must be named before the device list: the engine only knows the names
 	// RPC0, RPC1, ... once it has read --rpc.
 	if len(rpcList) > 0 {

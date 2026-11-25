@@ -24,7 +24,10 @@ type StartAuxReq struct {
 	File    string `json:"file"`
 	Ctx     int    `json:"ctx"`
 	NGL     int    `json:"ngl,omitempty"`     // layers on the graphics card; 0 = processor only
-	Threads int    `json:"threads,omitempty"` // 0 = a few (helper) or most (crew)
+	Threads int    `json:"threads,omitempty"` // 0 = a few (helper) or the same as the main model (crew)
+	// ExpertCPU and KVKeyQ8 are the plan's, as for the main model (placementArgs).
+	ExpertCPU []int `json:"expertCPU,omitempty"`
+	KVKeyQ8   bool  `json:"kvKeyQ8,omitempty"`
 }
 
 type AuxStatus struct {
@@ -76,18 +79,20 @@ func (a *Agent) startAux(in StartAuxReq) (any, error) {
 	if in.Ctx <= 0 {
 		in.Ctx = 16384
 	}
-	cores := a.Info().Cores
+	info := a.Info()
 	threads := in.Threads
 	if threads <= 0 {
 		if name == "helper" {
-			threads = max(2, min(4, cores/2))
+			// The helper stays small so the computer's own work and the main model keep going.
+			threads = max(2, min(4, info.Cores/2))
 		} else {
-			threads = max(2, cores-1)
+			threads = threadsFor(info)
 		}
 	}
 	args := []string{"-m", model, "-c", strconv.Itoa(in.Ctx), "-np", "1", "-t", strconv.Itoa(threads),
-		"--host", "127.0.0.1", "--port", strconv.Itoa(port), "-ngl", strconv.Itoa(in.NGL), "--jinja", "--no-webui",
+		"--host", "127.0.0.1", "--port", strconv.Itoa(port), "-fit", "off", "-lv", "4", "--jinja", "--no-webui",
 		"--alias", name}
+	args = append(args, placementArgs(in.NGL, in.ExpertCPU, in.KVKeyQ8)...)
 	if base := strings.ToLower(rt); in.NGL == 0 && (strings.Contains(base, "cuda") || strings.Contains(base, "vulkan")) {
 		args = append(args, "-dev", "none")
 	}
