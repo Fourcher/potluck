@@ -160,12 +160,23 @@ final class AppModel {
         questions.removeAll { $0.id == q.id }
     }
 
-    /// Answers from a notification button, when the app may not even be open.
-    func answer(session: String, question: String, text: String) async {
-        if client == nil { return }
-        if client?.addr == nil { _ = try? await client?.connect() }
-        try? await client?.answer(session: session, question: question, answer: text)
-        questions.removeAll { $0.id == question }
+    /// Answers from a notification button, when the app may not even be open. The phone may
+    /// just be waking up its network, so it tries a few times. It returns whether the answer
+    /// reached the computer; if not, the question stays, so it can be answered again.
+    func answer(session: String, question: String, text: String) async -> Bool {
+        guard let client else { return false }
+        for wait in [0, 2, 5] {
+            if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+            do {
+                if client.addr == nil { _ = try await client.connect() }
+                try await client.answer(session: session, question: question, answer: text)
+                questions.removeAll { $0.id == question }
+                return true
+            } catch {
+                continue
+            }
+        }
+        return false
     }
 
     func registerPush(token: String) {

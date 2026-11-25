@@ -127,7 +127,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         default: break // the alert itself: the app opens on the list
         }
         if let a = answer, !a.trimmingCharacters(in: .whitespaces).isEmpty {
-            await model?.answer(session: session, question: question, text: a)
+            let sent = await model?.answer(session: session, question: question, text: a) ?? false
+            if !sent, let again = response.notification.request.content.mutableCopy() as? UNMutableNotificationContent {
+                // Never lose an answer quietly: show the question again, saying why.
+                again.subtitle = "Your answer didn't reach your computer. Try again."
+                try? await center.add(UNNotificationRequest(identifier: UUID().uuidString, content: again, trigger: nil))
+            }
         } else {
             await MainActor.run { model?.refreshNow() }
         }
