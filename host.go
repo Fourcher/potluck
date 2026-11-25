@@ -98,6 +98,10 @@ type Host struct {
 	id  *Identity
 	cfg *ConfigStore
 
+	// Locks, in the only order they may be taken: h.mu, then h.helperMu (the planner holds
+	// h.mu and reads the helper's reservation). Never take h.mu while holding helperMu, never
+	// take the agent's a.mu while holding either, and never make a network call (h.call, a
+	// tunnel) while holding any of them. TestLockOrder exercises the paths that share them.
 	mu             sync.Mutex
 	nodes          map[string]*Node
 	memCeil        map[string]memCeiling // per computer, after its guard stepped in (hostguard.go)
