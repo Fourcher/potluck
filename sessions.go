@@ -85,10 +85,11 @@ type Session struct {
 	Question *Question   `json:"question,omitempty"` // the open question, if waiting
 	Steps    int         `json:"steps"`
 
-	lastPrompt int // tokens the model read last time, to know when to make room
-	mu         sync.Mutex
-	cancel     context.CancelFunc
-	subs       map[chan SEvent]bool
+	lastPrompt  int // tokens the model read last time, to know when to make room
+	lastPromptN int // how many messages the task had then
+	mu          sync.Mutex
+	cancel      context.CancelFunc
+	subs        map[chan SEvent]bool
 }
 
 type ProjectRef struct {

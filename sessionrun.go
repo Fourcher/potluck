@@ -126,10 +126,7 @@ func (st *sessionStore) systemPrompt(s *Session) string {
 	}
 	h := st.host
 	data := h.a.dir
-	ctxTok := h.lastCtx
-	if ctxTok <= 0 {
-		ctxTok = 8192
-	}
+	_, ctxTok := st.taskModel(s)
 	budget := max(2000, ctxTok) // characters of imported text: about a quarter of the context
 	capText := func(t string, n int) string {
 		n = min(n, budget/2)
@@ -392,9 +389,9 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 	s.mu.Lock()
 	thinking := s.Policy.Thinking
 	s.mu.Unlock()
-	model := "potluck"
+	model, _ := st.taskModel(s)
 	if s.Kind == "helper" {
-		model, thinking = "potluck-helper", false // the helper's own small model, answering at once
+		thinking = false // the helper's own small model, answering at once
 		// Its model may still be downloading the first time: wait for it rather than fail.
 		st.host.EnsureHelper()
 		for st.host.HelperStatus().Phase != "ready" {
@@ -490,7 +487,7 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 		}
 		if ch.Usage != nil {
 			s.mu.Lock()
-			s.lastPrompt = ch.Usage.Prompt
+			s.lastPrompt, s.lastPromptN = ch.Usage.Prompt, len(s.Messages)
 			s.mu.Unlock()
 		}
 		if len(ch.Choices) == 0 {
@@ -532,13 +529,35 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 	return msg, ctx.Err()
 }
 
+// taskModel is the model a task talks to and the size of its conversation memory.
+func (st *sessionStore) taskModel(s *Session) (string, int) {
+	if s.Kind == "helper" {
+		return "potluck-helper", helperCtx
+	}
+	st.host.mu.Lock()
+	c := st.host.lastCtx
+	st.host.mu.Unlock()
+	if c <= 0 {
+		c = 8192
+	}
+	return "potluck", c
+}
+
 // compactIfNeeded summarises the older part of a long session so it fits the context again.
 func (st *sessionStore) compactIfNeeded(ctx context.Context, s *Session) error {
-	ctxTok := st.host.lastCtx
+	model, ctxTok := st.taskModel(s)
 	s.mu.Lock()
+	// What the model will read next: what it read last time plus what was added since (a tool
+	// can return a whole file at once), at about 3 characters a token.
 	used, n := s.lastPrompt, len(s.Messages)
+	for _, m := range s.Messages[min(s.lastPromptN, n):] {
+		used += (len(m.Content) + len(m.Reasoning)) / 3
+		for _, c := range m.Calls {
+			used += len(c.Args) / 3
+		}
+	}
 	s.mu.Unlock()
-	if ctxTok <= 0 || used < ctxTok*3/4 || n < 8 {
+	if used < ctxTok*3/4 || n < 8 {
 		return nil
 	}
 	s.emit(SEvent{Type: "status", Status: "working", Error: "Summarising the earlier part of this task to make room"})
@@ -553,10 +572,12 @@ func (st *sessionStore) compactIfNeeded(ctx context.Context, s *Session) error {
 			fmt.Fprintf(&b, "  (called %s %s)\n", c.Name, trimTo(c.Args, 500))
 		}
 	}
-	body, _ := json.Marshal(map[string]any{"model": "potluck", "messages": []map[string]string{
+	sum := map[string]any{"model": model, "messages": []map[string]string{
 		{"role": "system", "content": "Summarise this work log for the assistant that continues it: the task, what was done, what was found, files changed, decisions, and what is left. Be complete and specific; it replaces the log."},
 		{"role": "user", "content": trimTo(b.String(), ctxTok*2)},
-	}, "chat_template_kwargs": map[string]any{"enable_thinking": false, "reasoning_effort": "none"}, "reasoning_budget_tokens": 1})
+	}, "chat_template_kwargs": map[string]any{"enable_thinking": false, "reasoning_effort": "none"}}
+	thinkBudget(sum, false)
+	body, _ := json.Marshal(sum)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://127.0.0.1:"+strconv.Itoa(portChat)+"/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	res, err := sessionHTTP.Do(req)
@@ -582,7 +603,7 @@ func (st *sessionStore) compactIfNeeded(ctx context.Context, s *Session) error {
 		rest = rest[1:]
 	}
 	s.Messages = append([]SMsg{{Role: "user", Content: "Summary of the work so far (it replaces the earlier log):\n\n" + out.Choices[0].Message.Content, At: time.Now()}}, rest...)
-	s.lastPrompt = 0
+	s.lastPrompt, s.lastPromptN = 0, 0
 	s.mu.Unlock()
 	return nil
 }
