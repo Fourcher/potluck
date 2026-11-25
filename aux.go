@@ -86,7 +86,7 @@ func (a *Agent) startAux(in StartAuxReq) (any, error) {
 			// The helper stays small so the computer's own work and the main model keep going.
 			threads = max(2, min(4, info.Cores/2))
 		} else {
-			threads = threadsFor(info)
+			threads = threadsFor(info, true) // a crew member runs alone on its computer, like the measured one-computer case
 		}
 	}
 	args := []string{"-m", model, "-c", strconv.Itoa(in.Ctx), "-np", "1", "-t", strconv.Itoa(threads),

@@ -296,7 +296,7 @@ func (app *App) serveUI() error {
 		if c, err := strconv.Atoi(r.URL.Query().Get("ctx")); err == nil && c > 0 {
 			info.PlanCtx = c
 		}
-		info.WorkSeen = h.cfg.Get().WorkSeen[m.File+"@"+strconv.Itoa(info.PlanCtx)]
+		info.WorkSeen = h.cfg.Get().WorkSeen[workKey(m.File, info.PlanCtx)]
 		// Two ways to run it: pooled across the computers, and (when one computer is close
 		// to big enough) on that computer alone with its disk covering the difference.
 		// A third, for the model families InferSSD knows: one computer streaming the experts

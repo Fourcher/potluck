@@ -1105,7 +1105,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 	if model.Vision != nil {
 		info.OtherBytes += model.Vision.Size // the image add-on is held by the computer running the model
 	}
-	info.WorkSeen = h.cfg.Get().WorkSeen[model.File+"@"+strconv.Itoa(ctxSize)]
+	info.WorkSeen = h.cfg.Get().WorkSeen[workKey(model.File, ctxSize)]
 	h.lastInfo = info
 	h.mu.Unlock()
 
@@ -1301,12 +1301,25 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		// on the processor (2 words per second instead of 18.5, measured on the Mac mini).
 		ngl = 999
 	}
+	// The largest graphics memory among the computers in the plan (see the working-memory
+	// note after loading).
+	var cardMax int64
+	h.mu.Lock()
+	for _, id := range append([]string{plan.Head}, plan.WorkerOrder...) {
+		if n := h.nodes[id]; n != nil {
+			for _, g := range n.Info.GPUs {
+				if !g.Unified && int64(g.VRAMTotal) > cardMax {
+					cardMax = int64(g.VRAMTotal)
+				}
+			}
+		}
+	}
+	h.mu.Unlock()
 	req := StartHeadReq{File: model.File, Vision: model.Vision, Workers: plan.WorkerOrder, NGL: ngl, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream, DenseBytes: info.denseBytes(), KVKeyQ8: plan.KVKeyQ8,
 		ExpertCPU: plan.ExpertCPU,
-		// Every hardware thread only where it measured faster: pooled, with the card holding
-		// the trunk of all the head's layers (3.8 against 3.3 words/s). With whole layers on
-		// the processor or the disk in play it measured slower (1.1 to 1.8 against 2.3 to 2.8).
-		AllThreads: plan.CardTrunk && !plan.Solo && len(plan.Shares) > 0 && plan.Shares[0].CPULayers == 0}
+		// Every hardware thread except where it measured slower: the disk in play, or pooled with
+		// whole layers on the head's processor (see threadsFor).
+		AllThreads: plan.Overflow == 0 && !(!plan.Solo && len(plan.Shares) > 0 && plan.Shares[0].CPULayers > 0)}
 	if err := h.call(plan.Head, "start_head", req, nil, time.Minute); err != nil {
 		done(err)
 		return err
@@ -1324,12 +1337,16 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 				h.mu.Lock()
 				h.vision = st.Vision
 				h.mu.Unlock()
-				if w := workReported(st.FullLog); w > 0 {
+				// Learn the engine's working memory, but only from a load that used graphics
+				// chips (the only kind the figure is charged to) and only a figure that fits on
+				// the largest of them: a bigger one means the system spilled it into ordinary
+				// memory, a sign of a wrong plan rather than something to plan around.
+				if w := workReported(st.FullLog); w > 0 && ngl > 0 && (cardMax == 0 || w <= cardMax) {
 					h.cfg.Update(func(c *Config) {
 						if c.WorkSeen == nil {
 							c.WorkSeen = map[string]int64{}
 						}
-						c.WorkSeen[model.File+"@"+strconv.Itoa(ctxSize)] = w
+						c.WorkSeen[workKey(model.File, ctxSize)] = w
 					})
 				}
 				if helperLayers > 0 && st.HeadLog != "" && !engineUsedHelpers(st.FullLog) {
@@ -1564,6 +1581,13 @@ func (h *Host) Test() error {
 		h.mu.Unlock()
 	}()
 	return nil
+}
+
+// workKey names a remembered working-memory figure: per model file and context size, for a
+// load that uses graphics chips. (Figures from before 1.12 had no "@card" and were dropped:
+// some came from loads with no layers on the card, which reserve far more.)
+func workKey(file string, ctx int) string {
+	return file + "@" + strconv.Itoa(ctx) + "@card"
 }
 
 var workLine = regexp.MustCompile(`(\S+) compute buffer size =\s+([\d.]+) MiB`)

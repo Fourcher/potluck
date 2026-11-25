@@ -243,16 +243,21 @@ func freePort() (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-// threadsFor turns the pedal into a number of CPU threads. The base is every hardware thread
-// of the processor's fast cores (all of them when the cores are alike). Measured with experts
-// kept in memory: on a 4-core, 8-thread desktop 8 threads beat 4 (prompt 17.5 vs 12.6
-// tokens/s, writing 4.5 vs 3.9); on a 4 fast + 8 slow core laptop the fast cores' 8 threads
-// beat all 12 (14% writing, 24% reading).
-func threadsFor(info NodeInfo) int {
+// threadsFor turns the pedal into a number of CPU threads. With all, the base is every
+// hardware thread of the processor's fast cores (all of them when the cores are alike);
+// otherwise one thread per fast core. The main computer decides which from measurements:
+//   - one computer, experts in memory, 4-core 8-thread desktop: 8 threads beat 4 (prompt
+//     17.5 vs 12.6 tokens/s, writing 4.5 vs 3.9);
+//   - pooled, the card holding the trunk of the head's layers: all threads 3.8 vs 3.3 words/s;
+//   - pooled with whole layers on the processor or the disk in play: all threads slower
+//     (1.1 to 1.8 against 2.3 to 2.8).
+// On a 4 fast + 8 slow core laptop the fast cores' 8 threads beat all 12 (14% writing, 24%
+// reading), so slow cores are never counted.
+func threadsFor(info NodeInfo, all bool) int {
 	base := info.Cores
 	if info.PerfThreads > 0 {
 		base = info.PerfThreads
-	} else if info.Threads > base {
+	} else if all && info.Threads > base {
 		base = info.Threads
 	}
 	t := int(math.Round(float64(base) * float64(info.Limits.Pedal) / 100))
@@ -323,8 +328,8 @@ type (
 		// DenseBytes is the size of the part of the model every word uses. InferSSD puts it on
 		// the graphics card; when the card is too small for it, the card is left out.
 		DenseBytes int64 `json:"denseBytes,omitempty"`
-		// AllThreads is no longer used (every engine now uses the fast cores' threads); kept so
-		// an older main computer's requests still decode.
+		// AllThreads: every hardware thread of the fast cores instead of one per core, where
+		// that measured faster (see threadsFor).
 		AllThreads bool `json:"allThreads,omitempty"`
 	}
 	AgentStatus struct {
@@ -642,7 +647,7 @@ func (a *Agent) startRPC() (any, error) {
 		return nil, err
 	}
 	info := a.Info()
-	threads := threadsFor(info)
+	threads := threadsFor(info, false)
 	_ = os.MkdirAll(filepath.Join(a.dir, "cache", "rpc"), 0o755)
 	// Bound to this computer only. Other computers reach it through the encrypted tunnel,
 	// because the worker protocol itself has no password.
@@ -740,7 +745,7 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 		return nil, err
 	}
 	info := a.Info()
-	threads := threadsFor(info)
+	threads := threadsFor(info, in.AllThreads)
 	if in.Ctx <= 0 {
 		in.Ctx = 4096
 	}
@@ -781,7 +786,11 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 		for i := 0; i < in.RPCDevices; i++ {
 			devs = append(devs, "RPC"+strconv.Itoa(i))
 		}
-		if gpuDev != "" {
+		// The card only when the plan puts layers on it. With none there, the engine would
+		// still copy every weight to the card for long prompts and reserve room for that:
+		// 14.4 GB on a 4 GB card (Inkling 2 at 32k, measured), which Windows quietly spills
+		// into system memory, slowing prompt reading to a crawl.
+		if gpuDev != "" && in.NGL > 0 {
 			devs = append(devs, gpuDev)
 		}
 		if len(devs) == 0 {
