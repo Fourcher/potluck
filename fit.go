@@ -26,6 +26,7 @@ type fitOutcome struct {
 	Ctx       int
 	UBatch    int
 	VisionCPU bool
+	ExpertCPU []int
 	Measured  bool   // false: the engine could not be asked; the plan's estimate stands
 	Note      string // for the progress list
 }
@@ -35,51 +36,63 @@ type fitOutcome struct {
 // reading, same conversation size), then, when the size was chosen automatically, a smaller
 // conversation. The image add-on goes on the card only when there is room left for it.
 // When nothing fits, the original start stands and the engine's own error will say why.
-func fitStart(measure measurer, node string, req StartHeadReq, auto bool, visionMiB int64) fitOutcome {
+//
+// allExperts lists every layer with experts: when the plan put some experts on the card, the
+// card can have them back in memory (slower writing) before the prompt batch shrinks.
+func fitStart(measure measurer, node string, req StartHeadReq, auto bool, visionMiB int64, allExperts []int) fitOutcome {
 	sizes := []int{req.Ctx}
 	if auto {
 		for c := req.Ctx / 2; c >= 8192; c /= 2 {
 			sizes = append(sizes, c)
 		}
 	}
-	keep := fitOutcome{Ctx: req.Ctx, UBatch: req.UBatch}
+	placements := [][]int{req.ExpertCPU}
+	if len(req.ExpertCPU) > 0 && len(allExperts) > len(req.ExpertCPU) {
+		placements = append(placements, allExperts)
+	}
+	keep := fitOutcome{Ctx: req.Ctx, UBatch: req.UBatch, ExpertCPU: req.ExpertCPU}
 	first := true
 	for _, c := range sizes {
-		for _, ub := range []int{0, 256, 128} {
-			r := req
-			r.Ctx, r.UBatch = c, ub
-			res, err := measure(node, r)
-			if err != nil {
-				if first {
-					keep.Note = "Could not measure it first (" + err.Error() + "); going by the estimate"
-					return keep
+		for _, experts := range placements {
+			for _, ub := range []int{0, 256, 128} {
+				r := req
+				r.Ctx, r.UBatch, r.ExpertCPU = c, ub, experts
+				res, err := measure(node, r)
+				if err != nil {
+					if first {
+						keep.Note = "Could not measure it first (" + err.Error() + "); going by the estimate"
+						return keep
+					}
+					continue
 				}
-				continue
+				first = false
+				short := cardShortMiB(res, 0)
+				if short > 0 {
+					continue
+				}
+				out := fitOutcome{Ctx: c, UBatch: ub, ExpertCPU: experts, Measured: true}
+				if visionMiB > 0 && cardShortMiB(res, visionMiB) > 0 {
+					out.VisionCPU = true
+				}
+				var bits []string
+				if c != req.Ctx {
+					bits = append(bits, fmt.Sprintf("conversation memory %dk words instead of %dk", c/1024, req.Ctx/1024))
+				}
+				if len(experts) > len(req.ExpertCPU) {
+					bits = append(bits, "every expert in memory")
+				}
+				if ub != 0 {
+					bits = append(bits, fmt.Sprintf("reading prompts %d words at a time", ub))
+				}
+				if out.VisionCPU {
+					bits = append(bits, "the image add-on on the processor")
+				}
+				out.Note = "Fits on the graphics card"
+				if len(bits) > 0 {
+					out.Note += " with " + strings.Join(bits, ", ")
+				}
+				return out
 			}
-			first = false
-			short := cardShortMiB(res, 0)
-			if short > 0 {
-				continue
-			}
-			out := fitOutcome{Ctx: c, UBatch: ub, Measured: true}
-			if visionMiB > 0 && cardShortMiB(res, visionMiB) > 0 {
-				out.VisionCPU = true
-			}
-			var bits []string
-			if c != req.Ctx {
-				bits = append(bits, fmt.Sprintf("conversation memory %dk words instead of %dk", c/1024, req.Ctx/1024))
-			}
-			if ub != 0 {
-				bits = append(bits, fmt.Sprintf("reading prompts %d words at a time", ub))
-			}
-			if out.VisionCPU {
-				bits = append(bits, "the image add-on on the processor")
-			}
-			out.Note = "Fits on the graphics card"
-			if len(bits) > 0 {
-				out.Note += " with " + strings.Join(bits, ", ")
-			}
-			return out
 		}
 	}
 	keep.Note = "The engine reports it will not fit on the graphics card at any size tried"

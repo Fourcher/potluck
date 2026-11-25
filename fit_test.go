@@ -50,7 +50,7 @@ func fakeMonolith(t *testing.T, calls *[]string) measurer {
 func TestFitStartShrinksBatchThenContext(t *testing.T) {
 	var calls []string
 	req := StartHeadReq{Ctx: 262144, NGL: 999}
-	got := fitStart(fakeMonolith(t, &calls), "m", req, true, 0)
+	got := fitStart(fakeMonolith(t, &calls), "m", req, true, 0, nil)
 	if !got.Measured {
 		t.Fatalf("not measured: %+v", got)
 	}
@@ -65,7 +65,7 @@ func TestFitStartShrinksBatchThenContext(t *testing.T) {
 
 func TestFitStartKeepsChosenSize(t *testing.T) {
 	var calls []string
-	got := fitStart(fakeMonolith(t, &calls), "m", StartHeadReq{Ctx: 65536}, false, 0)
+	got := fitStart(fakeMonolith(t, &calls), "m", StartHeadReq{Ctx: 65536}, false, 0, nil)
 	// The person chose 64k: only the batch may change, and nothing fits, so it stands.
 	if got.Ctx != 65536 || got.UBatch != 0 || len(calls) != 3 {
 		t.Fatalf("got %+v after %v", got, calls)
@@ -74,7 +74,7 @@ func TestFitStartKeepsChosenSize(t *testing.T) {
 
 func TestFitStartVisionGoesToProcessorWhenShort(t *testing.T) {
 	var calls []string
-	got := fitStart(fakeMonolith(t, &calls), "m", StartHeadReq{Ctx: 8192}, true, 765)
+	got := fitStart(fakeMonolith(t, &calls), "m", StartHeadReq{Ctx: 8192}, true, 765, nil)
 	// 8k at 512: 1008+496+840 = 2344; with the add-on 3109 + margin > 3359.
 	if got.Ctx != 8192 || got.UBatch != 0 || !got.VisionCPU {
 		t.Fatalf("got %+v", got)
@@ -91,5 +91,29 @@ func TestHeadArgsHaveNoServerOnlyFlags(t *testing.T) {
 	}
 	if i := slices.Index(args, "-ub"); i < 0 || args[i+1] != "128" {
 		t.Fatalf("no batch in %v", args)
+	}
+}
+
+func TestFitStartMovesExpertsBackBeforeShrinkingBatch(t *testing.T) {
+	var calls []string
+	base := fakeMonolith(t, &calls)
+	// The plan put two layers' experts on the card: 1752 MiB more there.
+	m := func(node string, r StartHeadReq) (MeasureRes, error) {
+		res, err := base(node, r)
+		if len(r.ExpertCPU) < 24 {
+			res.Devices[0].Self += 1752
+		}
+		return res, err
+	}
+	var all, plan []int
+	for l := 0; l < 24; l++ {
+		all = append(all, l)
+		if l < 22 {
+			plan = append(plan, l)
+		}
+	}
+	got := fitStart(m, "m", StartHeadReq{Ctx: 16384, ExpertCPU: plan}, false, 0, all)
+	if got.Ctx != 16384 || got.UBatch != 256 || len(got.ExpertCPU) != 24 {
+		t.Fatalf("got %+v after %v", got, calls)
 	}
 }

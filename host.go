@@ -1441,8 +1441,14 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		if model.Vision != nil {
 			visionMiB = (model.Vision.Size + model.Vision.Size/4) >> 20 // its weights and the room to work on an image
 		}
-		f := fitStart(h.measureOn, plan.Head, req, auto, visionMiB)
-		req.Ctx, req.UBatch, req.VisionCPU = f.Ctx, f.UBatch, f.VisionCPU
+		var allExperts []int
+		for l := 0; l < info.Layers; l++ {
+			if info.expertBytes(l) > 0 {
+				allExperts = append(allExperts, l)
+			}
+		}
+		f := fitStart(h.measureOn, plan.Head, req, auto, visionMiB, allExperts)
+		req.Ctx, req.UBatch, req.VisionCPU, req.ExpertCPU = f.Ctx, f.UBatch, f.VisionCPU, f.ExpertCPU
 		if f.Ctx != ctxSize {
 			ctxSize = f.Ctx
 			h.mu.Lock()
