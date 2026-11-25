@@ -287,7 +287,11 @@ func freePort() (int, error) {
 func threadsFor(info NodeInfo, all bool) int {
 	base := info.Cores
 	if info.PerfThreads > 0 {
+		// Two kinds of cores: only the fast ones, all their threads or one per core.
 		base = info.PerfThreads
+		if !all && info.PerfCores > 0 {
+			base = info.PerfCores
+		}
 	} else if all && info.Threads > base {
 		base = info.Threads
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,14 +86,17 @@ type NodeInfo struct {
 	Threads int    `json:"threads"`
 	// PerfThreads is the number of hardware threads on the fast cores of a processor that
 	// mixes fast and slow cores; 0 when all cores are alike or it is not known.
-	PerfThreads int    `json:"perfThreads,omitempty"`
-	RAMTotal    uint64 `json:"ramTotal"`
-	RAMAvail    uint64 `json:"ramAvail"`
-	GPUs        []GPU  `json:"gpus"`
-	DiskFree    uint64 `json:"diskFree"`
-	Musl        bool   `json:"musl"`
-	Version     string `json:"version"`
-	Limits      Limits `json:"limits"`
+	PerfThreads int `json:"perfThreads,omitempty"`
+	// PerfCores: how many fast cores those threads run on (one thread per core is what the
+	// engine wants when hyper-threads measured slower).
+	PerfCores int    `json:"perfCores,omitempty"`
+	RAMTotal  uint64 `json:"ramTotal"`
+	RAMAvail  uint64 `json:"ramAvail"`
+	GPUs      []GPU  `json:"gpus"`
+	DiskFree  uint64 `json:"diskFree"`
+	Musl      bool   `json:"musl"`
+	Version   string `json:"version"`
+	Limits    Limits `json:"limits"`
 	// HeldBytes is model memory this app's own processes hold right now, so that planning a
 	// restart does not count it as "in use by something else".
 	HeldBytes uint64 `json:"heldBytes"`
@@ -117,6 +121,42 @@ func run(timeout time.Duration, name string, args ...string) string {
 func readFile(path string) string { b, _ := os.ReadFile(path); return string(b) }
 
 // countCPUList counts the processors in a kernel list such as "0-7" or "0-3,8,10-11".
+// cpuList expands a list such as "0-3,8" into its CPU numbers.
+func cpuList(s string) []int {
+	var out []int
+	for _, part := range strings.Split(strings.TrimSpace(s), ",") {
+		lo, hi, isRange := strings.Cut(part, "-")
+		a, err := strconv.Atoi(strings.TrimSpace(lo))
+		if err != nil {
+			continue
+		}
+		b := a
+		if isRange {
+			if b, err = strconv.Atoi(strings.TrimSpace(hi)); err != nil {
+				continue
+			}
+		}
+		for c := a; c <= b; c++ {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// fastCores counts the physical cores behind a list of CPUs (hyper-threads of one core share
+// its thread_siblings_list).
+func fastCores(list string) int {
+	seen := map[string]bool{}
+	for _, c := range cpuList(list) {
+		sib := strings.TrimSpace(readFile(fmt.Sprintf("/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", c)))
+		if sib == "" {
+			sib = strconv.Itoa(c)
+		}
+		seen[sib] = true
+	}
+	return len(seen)
+}
+
 func countCPUList(s string) int {
 	n := 0
 	for _, part := range strings.Split(strings.TrimSpace(s), ",") {
@@ -173,6 +213,7 @@ func staticInfo(dataDir string) NodeInfo {
 		// Intel processors with two kinds of cores list the fast ones here.
 		if fast := countCPUList(readFile("/sys/devices/cpu_core/cpus")); fast > 0 && fast < n.Threads && readFile("/sys/devices/cpu_atom/cpus") != "" {
 			n.PerfThreads = fast
+			n.PerfCores = fastCores(readFile("/sys/devices/cpu_core/cpus"))
 		}
 		if n.CPU == "" {
 			n.CPU = runtime.GOARCH + " processor"

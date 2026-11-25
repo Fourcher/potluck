@@ -17,6 +17,7 @@ func TestThreadsFor(t *testing.T) {
 		{"4 cores 8 threads, all (desktop, measured)", NodeInfo{Cores: 4, Threads: 8, Limits: full}, true, 8},
 		{"4 cores 8 threads, per core", NodeInfo{Cores: 4, Threads: 8, Limits: full}, false, 4},
 		{"4 fast + 8 slow cores (laptop, measured)", NodeInfo{Cores: 12, Threads: 16, PerfThreads: 8, Limits: full}, true, 8},
+		{"4 fast + 8 slow cores, per core (pooled helper)", NodeInfo{Cores: 12, Threads: 16, PerfThreads: 8, PerfCores: 4, Limits: full}, false, 4},
 		{"no thread count known", NodeInfo{Cores: 6, Limits: full}, true, 6},
 		{"half pedal", NodeInfo{Cores: 4, Threads: 8, Limits: Limits{Pedal: 50}}, true, 4},
 	}
