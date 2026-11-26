@@ -1431,7 +1431,11 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			if local {
 				return nil // the file is already there
 			}
-			return h.call(p.id, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts, Vision: model.Vision, HFKey: currentHFKey()}, nil, 24*time.Hour)
+			err := h.call(p.id, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts, Vision: model.Vision, HFKey: currentHFKey(), Unchecked: model.Unchecked}, nil, 24*time.Hour)
+			if err != nil && strings.Contains(err.Error(), "download is damaged") && model.Repo != "" {
+				forgetTree(model.Repo) // it may have been uploaded again: look its checksum up afresh
+			}
+			return err
 		}
 		var res struct {
 			Port int `json:"port"`

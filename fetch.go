@@ -156,16 +156,24 @@ func fetchHeaderPart(ctx context.Context, u string, layersHint int) (*ModelInfo,
 	return nil, errors.New("model header is larger than 1 GB")
 }
 
+// downloaded says whether a file is here whole and was checked when it was downloaded.
+func downloaded(dest string, size int64) bool {
+	st, err := os.Stat(dest)
+	if err != nil || st.Size() != size {
+		return false
+	}
+	_, err = os.Stat(dest + ".ok")
+	return err == nil
+}
+
 // Progress reports how far a long job is.
 type Progress func(done, total int64, note string)
 
 // downloadFile fetches a big file over many parallel connections straight into its final
 // place, resumes after an interruption, and checks the SHA-256 at the end when one is known.
 func downloadFile(ctx context.Context, u, dest string, size int64, sha string, streams int, prog Progress) error {
-	if st, err := os.Stat(dest); err == nil && st.Size() == size {
-		if _, err := os.Stat(dest + ".ok"); err == nil {
-			return nil // already downloaded and verified
-		}
+	if downloaded(dest, size) {
+		return nil // already downloaded and verified
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
@@ -208,7 +216,28 @@ func downloadFile(ctx context.Context, u, dest string, size int64, sha string, s
 				b[i] = '1'
 			}
 		}
-		_ = os.WriteFile(stateFile, b, 0o644)
+		// Replaced whole, never half-written.
+		if os.WriteFile(stateFile+".new", b, 0o644) == nil {
+			_ = os.Rename(stateFile+".new", stateFile)
+		}
+	}
+	// A chunk counts as done only once its data is on the disk: after a power cut or a
+	// crash, a chunk marked done but never written would resume as zeros. Chunks are
+	// written to the disk eight at a time (256 MB), then marked.
+	var unsynced []int
+	markDone := func(i int) {
+		unsynced = append(unsynced, i)
+		if len(unsynced) < 8 {
+			return
+		}
+		if f.Sync() != nil {
+			return // the end of the download reports a disk that fails
+		}
+		for _, j := range unsynced {
+			done[j] = true
+		}
+		unsynced = unsynced[:0]
+		saveState()
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -251,8 +280,7 @@ func downloadFile(ctx context.Context, u, dest string, size int64, sha string, s
 					mu.Unlock()
 					return
 				}
-				done[i] = true
-				saveState()
+				markDone(i)
 				mu.Unlock()
 			}
 		}()

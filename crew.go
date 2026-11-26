@@ -222,7 +222,7 @@ func (h *Host) startCrew(ctx context.Context, c *CrewMember) error {
 	}
 	if model.Source != "local" {
 		h.crewNote(c, "Downloading "+humanBytes(model.Size))
-		if err := h.call(c.Node, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts, For: "aux:" + c.Name, HFKey: currentHFKey()}, nil, 24*time.Hour); err != nil {
+		if err := h.call(c.Node, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts, For: "aux:" + c.Name, HFKey: currentHFKey(), Unchecked: model.Unchecked}, nil, 24*time.Hour); err != nil {
 			return err
 		}
 	}

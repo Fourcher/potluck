@@ -428,32 +428,15 @@ func walkDeep(ctx context.Context, root string, seen map[string]bool, out *[]can
 func headerOfFiles(paths []string) (*ModelInfo, error) {
 	var infos []*ModelInfo
 	for i, path := range paths {
-		st, err := os.Stat(path)
+		_, err := os.Stat(path)
 		if err != nil {
 			return nil, fmt.Errorf("%s is missing", filepath.Base(path))
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, err
 		}
 		hint := 0
 		if i > 0 {
 			hint = infos[0].Layers
 		}
-		var info *ModelInfo
-		for size := int64(8 << 20); ; size *= 4 {
-			if size > st.Size() {
-				size = st.Size()
-			}
-			buf := make([]byte, size)
-			if _, err = f.ReadAt(buf, 0); err != nil {
-				break
-			}
-			if info, err = parseGGUFPart(buf, st.Size(), hint); err == nil || !errors.Is(err, errShort) || size == st.Size() {
-				break
-			}
-		}
-		f.Close()
+		info, err := readHeaderFile(path, hint)
 		if err != nil {
 			return nil, fmt.Errorf("%s does not look like a model file: %w", filepath.Base(path), err)
 		}

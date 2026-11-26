@@ -30,6 +30,10 @@ type ModelRef struct {
 	// Vision is the model's image add-on (an "mmproj" file from the same repository), loaded
 	// with it on the computer running the model so it can see pictures and screenshots.
 	Vision *ModelPart `json:"vision,omitempty"`
+	// Unchecked says why the model's files could not be looked up on Hugging Face (so its
+	// checksum and its other pieces are unknown). A file already downloaded and verified
+	// still runs; a new download waits until they can be looked up.
+	Unchecked string `json:"unchecked,omitempty"`
 }
 
 // ModelPart is one file of a model that is split across several.
@@ -89,9 +93,25 @@ func (h *Host) recommended() string {
 const recommendedRepo = "AtomicChat/Inkling-2-Mini-Uncensored-GGUF"
 
 var (
-	treeCache   = map[string][]hfEntry{}
+	treeCache   = map[string]treeEntry{}
 	treeCacheMu sync.Mutex
 )
+
+// A repository's file list is kept for ten minutes: a file uploaded again under the same
+// name (a new quantisation) has a new checksum, and an old one would fail every download.
+const treeFor = 10 * time.Minute
+
+type treeEntry struct {
+	files []hfEntry
+	at    time.Time
+}
+
+// forgetTree drops a repository's file list, after a download did not match it.
+func forgetTree(repo string) {
+	treeCacheMu.Lock()
+	delete(treeCache, repo)
+	treeCacheMu.Unlock()
+}
 
 type hfEntry struct {
 	Path string `json:"path"`
@@ -103,9 +123,9 @@ type hfEntry struct {
 
 func hfTree(repo string) ([]hfEntry, error) {
 	treeCacheMu.Lock()
-	if t, ok := treeCache[repo]; ok {
+	if t, ok := treeCache[repo]; ok && time.Since(t.at) < treeFor {
 		treeCacheMu.Unlock()
-		return t, nil
+		return t.files, nil
 	}
 	treeCacheMu.Unlock()
 	var t []hfEntry
@@ -113,7 +133,7 @@ func hfTree(repo string) ([]hfEntry, error) {
 		return nil, err
 	}
 	treeCacheMu.Lock()
-	treeCache[repo] = t
+	treeCache[repo] = treeEntry{files: t, at: time.Now()}
 	treeCacheMu.Unlock()
 	return t, nil
 }
@@ -356,7 +376,11 @@ func resolveModel(ctx context.Context, m *ModelRef) error {
 		hfURL := func(path string) string {
 			return "https://huggingface.co/" + m.Repo + "/resolve/main/" + (&url.URL{Path: path}).EscapedPath()
 		}
-		if tree, err := hfTree(m.Repo); err == nil {
+		tree, err := hfTree(m.Repo)
+		m.Unchecked = ""
+		if err != nil {
+			m.Unchecked = err.Error()
+		} else {
 			m.Vision = nil
 			for _, pref := range []string{"f16", "bf16", ""} { // full precision first: it is small
 				for _, e := range tree {

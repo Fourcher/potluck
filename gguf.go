@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -164,14 +165,24 @@ func (m *ModelInfo) expertBytes(l int) int64 {
 }
 
 type ggufReader struct {
-	b []byte
-	o int
+	b    []byte
+	o    int
+	size int64 // the whole file's size: nothing in the header reaches past it
 }
 
 var errShort = errors.New("need more header bytes")
 
+var errCorrupt = errors.New("corrupt GGUF header")
+
+// maxHeaderBytes is the most of a file read to find its header (the largest real headers,
+// with a big tokenizer, are tens of MB).
+const maxHeaderBytes = 1 << 30
+
 func (r *ggufReader) need(n int) error {
-	if n < 0 || r.o+n > len(r.b) {
+	if n < 0 || int64(r.o)+int64(n) > r.size && r.size > 0 {
+		return errCorrupt // a length that points past the end of the file
+	}
+	if r.o+n > len(r.b) {
 		return errShort
 	}
 	return nil
@@ -238,6 +249,11 @@ func (r *ggufReader) value(t uint32) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if et == 9 {
+			// Arrays of arrays: no model uses them, and each level costs a file only a few
+			// bytes, so a crafted file could nest them until the program runs out of stack.
+			return nil, errors.New("corrupt GGUF array (an array of arrays)")
+		}
 		if sz, ok := ggufScalarSize[et]; ok {
 			if n > 1<<40 {
 				return nil, errors.New("corrupt GGUF array")
@@ -260,6 +276,10 @@ func (r *ggufReader) value(t uint32) (any, error) {
 			}
 			r.o += int(n) * sz
 			return nil, nil
+		}
+		// Strings: each takes at least its 8-byte length.
+		if n > uint64(max(r.size, int64(len(r.b))))/8 {
+			return nil, errors.New("corrupt GGUF array")
 		}
 		for i := uint64(0); i < n; i++ {
 			if _, err := r.value(et); err != nil {
@@ -286,7 +306,7 @@ func parseGGUFPart(buf []byte, fileSize int64, layersHint int) (*ModelInfo, erro
 	if string(buf[:4]) != "GGUF" {
 		return nil, errors.New("not a GGUF model file")
 	}
-	r := &ggufReader{b: buf, o: 8}
+	r := &ggufReader{b: buf, o: 8, size: fileSize}
 	nTensors, err := r.u64()
 	if err != nil {
 		return nil, err
@@ -322,7 +342,7 @@ func parseGGUFPart(buf []byte, fileSize int64, layersHint int) (*ModelInfo, erro
 		typ  uint32
 		rel  uint64
 	}
-	raws := make([]raw, 0, nTensors)
+	raws := make([]raw, 0, min(nTensors, uint64(len(buf)-r.o)/24)) // each takes at least 24 bytes
 	for i := uint64(0); i < nTensors; i++ {
 		name, err := r.str()
 		if err != nil {
@@ -365,6 +385,11 @@ func parseGGUFPart(buf []byte, fileSize int64, layersHint int) (*ModelInfo, erro
 	m.Arch, _ = kv["general.architecture"].(string)
 	m.FileSampling = fileSampling(kv)
 	if v, ok := kv[m.Arch+".block_count"].(uint64); ok {
+		// More layers than any model has is a broken or crafted file, and the count sizes
+		// several lists below.
+		if v > 65536 {
+			return nil, errCorrupt
+		}
 		m.Layers = int(v)
 	}
 	if v, ok := kv[m.Arch+".context_length"].(uint64); ok {
@@ -1109,4 +1134,30 @@ func mergeParts(parts []*ModelInfo) *ModelInfo {
 		}
 	}
 	return &m
+}
+
+// readHeaderFile reads the header of a model file on this computer: the first 8 MB, then
+// more until the header is whole, at most maxHeaderBytes (a header that claims more is not
+// read further, so a crafted file cannot make Potluck read gigabytes into memory).
+func readHeaderFile(path string, layersHint int) (*ModelInfo, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	for size := int64(8 << 20); ; size *= 4 {
+		size = min(size, st.Size(), maxHeaderBytes)
+		buf := make([]byte, size)
+		if _, err := f.ReadAt(buf, 0); err != nil {
+			return nil, err
+		}
+		info, err := parseGGUFPart(buf, st.Size(), layersHint)
+		if err == nil || !errors.Is(err, errShort) || size == st.Size() || size == maxHeaderBytes {
+			return info, err
+		}
+	}
 }

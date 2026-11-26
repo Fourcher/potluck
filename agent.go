@@ -342,6 +342,9 @@ type (
 		Vision *ModelPart  `json:"vision,omitempty"` // the image add-on, fetched with the model
 		For    string      `json:"for,omitempty"`    // as RuntimeSpec.For
 		HFKey  string      `json:"hfKey,omitempty"`  // the person's Hugging Face key, for gated models (hfkey.go)
+		// Unchecked: the files could not be looked up (ModelRef.Unchecked). Only files already
+		// here and verified are used; nothing new is downloaded without its checksum.
+		Unchecked string `json:"unchecked,omitempty"`
 	}
 	SeedReq struct {
 		URL   string     `json:"url"`
@@ -549,6 +552,13 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		parts := in.Parts
 		if len(parts) == 0 {
 			parts = []ModelPart{{File: in.File, URL: in.URL, Size: in.Size, SHA256: in.SHA256}}
+		}
+		if in.Unchecked != "" {
+			for _, part := range parts {
+				if !downloaded(filepath.Join(a.dir, "models", filepath.Base(part.File)), part.Size) {
+					return nil, errors.New("could not look up this model's files on Hugging Face (" + in.Unchecked + "), so it cannot be downloaded and checked yet. Try again in a minute")
+				}
+			}
 		}
 		ctx := withHFKey(a.jobCtxFor("model:"+filepath.Base(in.File), in.For), in.HFKey)
 		var before int64
@@ -1121,32 +1131,15 @@ func (a *Agent) localHeader(file string) (*ModelInfo, error) {
 		if a.isFound(name) {
 			path = a.modelPath(name)
 		}
-		st, err := os.Stat(path)
+		_, err := os.Stat(path)
 		if err != nil {
 			return nil, fmt.Errorf("%s is missing from the models folder", name)
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, err
 		}
 		hint := 0
 		if i > 0 {
 			hint = infos[0].Layers
 		}
-		var info *ModelInfo
-		for size := int64(8 << 20); ; size *= 4 {
-			if size > st.Size() {
-				size = st.Size()
-			}
-			buf := make([]byte, size)
-			if _, err = f.ReadAt(buf, 0); err != nil {
-				break
-			}
-			if info, err = parseGGUFPart(buf, st.Size(), hint); err == nil || !errors.Is(err, errShort) || size == st.Size() {
-				break
-			}
-		}
-		f.Close()
+		info, err := readHeaderFile(path, hint)
 		if err != nil {
 			return nil, fmt.Errorf("%s does not look like a model file: %w", name, err)
 		}
