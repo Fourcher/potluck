@@ -103,6 +103,10 @@ func main() {
 		req.Header.Set("X-Potluck", "1")
 		if res, err := (&http.Client{Timeout: 2 * time.Second}).Do(req); err == nil {
 			res.Body.Close()
+			if *noBrowser && desktopShow == nil {
+				fmt.Println("Potluck is already running: " + ui)
+				return
+			}
 			fmt.Println("Potluck is already running. Opening its control panel.")
 			if desktopShow != nil {
 				desktopShow(ui)

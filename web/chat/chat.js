@@ -59,7 +59,7 @@ const S = {
 // ---------- small helpers ----------
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const num = n => Math.round(n || 0).toLocaleString();
-const bytes = n => n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " bytes";
+const bytes = v => { const n = Number(v) || 0; return n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " bytes"; };
 const gb = n => (n / 1e9).toFixed(1) + " GB";
 const today = () => new Date().toISOString().slice(0, 10);
 const estTokens = chars => Math.ceil(chars / 3.5);
@@ -145,11 +145,62 @@ function drawStatus() {
 }
 
 // ---------- chats ----------
+// cleanChat gives a chat from outside (an imported file, or one stored by an older page) the
+// exact shape this page makes: ids that are plain text, numbers that are numbers, lists that
+// are lists. A crafted export could otherwise put page script into the chat list (an id is
+// drawn inside an attribute) or stop the page from loading at all. Returns null for
+// something that is not a chat.
+function cleanChat(c) {
+  if (!c || typeof c !== "object" || Array.isArray(c)) return null;
+  const str = v => typeof v === "string" ? v : "";
+  const n = v => Number.isFinite(Number(v)) ? Number(v) : 0;
+  const msg = m => {
+    if (!m || typeof m !== "object" || !["user", "assistant", "tool", "system"].includes(m.role)) return null;
+    const o = { ...m, content: str(m.content) };
+    if ("reasoning" in m) o.reasoning = str(m.reasoning);
+    if ("bi" in m) o.bi = Math.max(0, Math.floor(n(m.bi)));
+    if ("callId" in m) o.callId = str(m.callId);
+    if ("name" in m) o.name = str(m.name);
+    o.files = Array.isArray(m.files) ? m.files.filter(f => f && typeof f === "object").map(f => ({ ...f, name: str(f.name), size: n(f.size), text: str(f.text), skipped: typeof f.skipped === "string" ? f.skipped : f.skipped ? "skipped" : "" })) : undefined;
+    if (!o.files) delete o.files;
+    o.calls = Array.isArray(m.calls) ? m.calls.filter(x => x && typeof x === "object").map(x => ({ ...x, id: str(x.id), name: str(x.name), args: str(x.args) })) : undefined;
+    if (!o.calls) delete o.calls;
+    // Versions of a turn: { content, files, tail } each (see branchFrom).
+    if ("branches" in m) {
+      o.branches = Array.isArray(m.branches) ? m.branches.filter(b => b && typeof b === "object" && !Array.isArray(b)).map(b => {
+        const v = msg({ role: "user", content: b.content, files: b.files }) || { content: "" };
+        const out = { content: v.content, files: v.files };
+        if (Array.isArray(b.tail)) out.tail = b.tail.map(msg).filter(Boolean);
+        return out;
+      }) : [];
+      if (!o.branches.length) { delete o.branches; delete o.bi; } else o.bi = Math.min(o.bi || 0, o.branches.length - 1);
+    }
+    return o;
+  };
+  const out = { ...newChat(), ...c };
+  out.id = /^[A-Za-z0-9_-]{1,64}$/.test(c.id) ? c.id : uid();
+  out.title = str(c.title);
+  out.summary = str(c.summary);
+  out.starred = !!c.starred;
+  out.created = n(c.created) || Date.now();
+  out.updated = n(c.updated) || out.created;
+  out.used = n(c.used);
+  out.messages = Array.isArray(c.messages) ? c.messages.map(msg).filter(Boolean) : [];
+  const t = c.totals && typeof c.totals === "object" ? c.totals : {};
+  out.totals = { in: n(t.in), out: n(t.out), ms: n(t.ms), replies: n(t.replies) };
+  out.grants = c.grants && typeof c.grants === "object" && !Array.isArray(c.grants) ? c.grants : {};
+  if ("session" in c) out.session = str(c.session);
+  return out;
+}
 function newChat() { return { id: uid(), title: "", titled: false, created: Date.now(), updated: Date.now(), starred: false, messages: [], totals: { in: 0, out: 0, ms: 0, replies: 0 }, used: 0, grants: {}, summary: "" }; }
+// Chats deleted on this page: a reply still being written (or a title being made) ends with a
+// save, which would otherwise put the chat back.
+const deletedChats = new Set();
 async function saveChat(c = S.cur) {
-  if (!c || !c.messages.length && !c.summary) return;
+  if (!c || !c.messages.length && !c.summary || deletedChats.has(c.id)) return;
   c.updated = Date.now();
-  await Store.putChat(c);
+  // A failed save is said, and the chat goes on in this page (it is not lost from the screen).
+  try { await Store.putChat(c); } catch (e) { toast("This chat could not be saved in the browser: " + (e.message || e)); return; }
   const i = S.chats.findIndex(x => x.id === c.id);
   const meta = { id: c.id, title: c.title, updated: c.updated, starred: c.starred, text: c.messages.filter(m => m.role !== "tool").map(m => m.content || "").join(" ").slice(0, 4000).toLowerCase() };
   if (i >= 0) S.chats[i] = meta; else S.chats.unshift(meta);
@@ -228,9 +279,15 @@ async function taskLoad() {
 function closeTask() { if (S.es) { S.es.close(); S.es = null; } S.task = S.task && isTask() ? S.task : null; }
 function taskFollow() {
   if (!S.cur.session || S.es) return;
-  const id = S.cur.session, chat = S.cur;
-  S.es = new EventSource("/potluck/sessions/" + id + "/events");
-  S.es.onmessage = e => {
+  const id = S.cur.session, chat = S.cur, es = new EventSource("/potluck/sessions/" + id + "/events");
+  S.es = es;
+  // After the connection dropped (the computer slept, the network changed) the browser
+  // reconnects by itself, but what was said meanwhile is not sent again: read the task afresh
+  // from Potluck instead of adding the next answer to a half one.
+  let dropped = false;
+  es.onerror = () => { dropped = true; };
+  es.onopen = () => { if (dropped && S.es === es && S.cur === chat) { dropped = false; S.task = null; taskLoad(); } };
+  es.onmessage = e => {
     if (S.cur !== chat) return;
     const ev = JSON.parse(e.data), t = S.task = S.task || {};
     if (ev.type === "delta") {
@@ -360,7 +417,7 @@ function projectsSheet() {
 
 async function openChat(id) {
   if (S.gen) return toast("Wait for the reply to finish, or stop it first.");
-  const c = id ? await Store.getChat(id) : null;
+  const c = id ? cleanChat(await Store.getChat(id)) : null;
   S.cur = c || newChat(); S.cur.grants = S.cur.grants || {};
   S.pending = []; S.folder = null;
   await restoreFolder();
@@ -372,6 +429,7 @@ async function openChat(id) {
 }
 function titleFrom(text) { const t = text.replace(/\s+/g, " ").trim(); return t.length > 48 ? t.slice(0, 46).replace(/\s+\S*$/, "") + "…" : t || "New chat"; }
 async function deleteChat(id) {
+  deletedChats.add(id);
   await Store.delChat(id); await Store.del("folder:" + id);
   S.chats = S.chats.filter(c => c.id !== id);
   if (S.cur && S.cur.id === id) { S.gen && stop(); S.cur = newChat(); S.folder = null; S.pending = []; drawAll(); } else drawList();
@@ -386,7 +444,7 @@ function drawList() {
   for (const [name, test] of groups) {
     const items = list.filter(c => !used.has(c.id) && test(c)); items.forEach(c => used.add(c.id));
     if (!items.length) continue;
-    h += `<h4>${name}</h4>` + items.map(c => `<div class="chat-item ${S.cur && c.id === S.cur.id ? "on" : ""}" data-id="${c.id}" tabindex="0" role="button">${c.starred ? `<span class="ic star">${icon("star")}</span>` : ""}<span class="t">${esc(c.title || "New chat")}</span><button class="icon" data-a="chat-more" data-id="${c.id}" title="More" aria-label="More">${ic("more")}</button></div>`).join("");
+    h += `<h4>${name}</h4>` + items.map(c => `<div class="chat-item ${S.cur && c.id === S.cur.id ? "on" : ""}" data-id="${esc(c.id)}" tabindex="0" role="button">${c.starred ? `<span class="ic star">${icon("star")}</span>` : ""}<span class="t">${esc(c.title || "New chat")}</span><button class="icon" data-a="chat-more" data-id="${esc(c.id)}" title="More" aria-label="More">${ic("more")}</button></div>`).join("");
   }
   $("#chat-list").innerHTML = h || `<div class="empty-list">${f ? "No chats match." : "Your chats will appear here. They are kept in this browser only."}</div>`;
 }
@@ -828,9 +886,9 @@ function systemPrompt() {
 function thinking(on = !!S.settings.thinking) {
   return { thinking: on ? "high" : "off" };
 }
-function apiMessages() {
+function apiMessages(msgs = S.cur.messages) {
   const out = [{ role: "system", content: systemPrompt() }];
-  for (const m of S.cur.messages) {
+  for (const m of msgs) {
     if (m.role === "user") {
       const files = (m.files || []).filter(f => !f.skipped && !f.image).map(f => `<file name="${f.name}">\n${f.text}\n</file>`).join("\n\n");
       const text = files ? files + "\n\n" + (m.content || "See the attached file.") : (m.content || "See the picture.");
@@ -1033,6 +1091,9 @@ async function send(text) {
   drawHeader(); drawChips(); drawThread(); scrollDown(true);
   await saveChat(c);
   if (conns().some(k => connOn(k.name))) await loadMCP();
+  // Another chat opened while the connectors started: this message waits in its own chat
+  // (Try again answers it) rather than being answered in the wrong one.
+  if (S.cur !== c) return toast("Your message is saved in its chat; open it and choose Try again to get the answer.");
   await generate();
 }
 // Versions. Trying again, or editing a message, starts a new version of that turn; the
@@ -1072,10 +1133,12 @@ function editMessage(i) {
 // longer fitted) is asked again there.
 async function compact(resend) {
   const c = S.cur; if (S.gen || !c.messages.length) return toast("There is nothing to summarize yet.");
-  let again = null;
+  // The chat itself is left as it is until the summary is made: the message to send again
+  // is only left out of what is summarized.
+  let again = null, msgs = c.messages;
   if (resend) {
     const i = c.messages.map(m => m.role).lastIndexOf("user");
-    if (i >= 0) { again = c.messages[i]; c.messages = c.messages.slice(0, i); }
+    if (i >= 0) { again = c.messages[i]; msgs = c.messages.slice(0, i); }
   }
   if (!running()) return toast("No model is running.");
   S.compacting = true; drawStatus();
@@ -1083,7 +1146,7 @@ async function compact(resend) {
   // The chat may itself be too long to summarize in one go: try it whole, then with tool
   // results and long messages cut short, then only its most recent part.
   const cut = (n) => m => ({ ...m, content: typeof m.content === "string" && m.content.length > n ? m.content.slice(0, n) + " […]" : m.content });
-  const full = apiMessages(), [sys, ...rest] = full;
+  const full = apiMessages(msgs), [sys, ...rest] = full;
   const tries = [full, [sys, ...rest.map(cut(1500))], [sys, ...rest.slice(-24).map(cut(800))]];
   try {
     let j;
@@ -1220,7 +1283,7 @@ function chatMenu(a, id) {
   showPop(a, mi("rename", "Rename", { icon: "edit" }) + mi("star", meta && meta.starred ? "Remove star" : "Star", { icon: "star" }) + mi("export", "Export as Markdown", { icon: "file" }) +
     (cur ? mi("compact", "Summarize and continue in a new chat", { icon: "retry" }) : "") + `<hr>` + mi("delete", "Delete", { icon: "trash", danger: 1 }),
     async v => {
-      const c = cur ? S.cur : await Store.getChat(id); if (!c) return;
+      const c = cur ? S.cur : cleanChat(await Store.getChat(id)); if (!c) return;
       if (v === "rename") { if (!cur) await openChat(id); startRename(); }
       else if (v === "star") { c.starred = !c.starred; await Store.putChat(c); const m = S.chats.find(x => x.id === c.id); if (m) m.starred = c.starred; drawHeader(); drawList(); }
       else if (v === "export") exportChat(c);
@@ -1275,8 +1338,8 @@ function settingsSheet() {
         saveSettings(); applyTheme(); closeSheet(); toast("Saved");
       },
       "export-all": async () => download("potluck-chats.json", JSON.stringify({ potluckChats: 1, chats: await Store.allChats() }), "application/json"),
-      "import-all": () => { const i = document.createElement("input"); i.type = "file"; i.accept = ".json,application/json"; i.onchange = async () => { try { const j = JSON.parse(await i.files[0].text()); if (!j.potluckChats) throw 0; for (const c of j.chats) await Store.putChat(c); await loadChats(); closeSheet(); toast(j.chats.length + " chats imported."); } catch { toast("That is not a Potluck chat export."); } }; i.click(); },
-      wipe: () => sheet(`<h3>Delete all chats?</h3><p>Every chat in this browser will be removed. This cannot be undone.</p><div class="foot"><button class="btn ghost" data-a="close">Cancel</button><button class="btn danger" data-a="yes">Delete all</button></div>`, { yes: async () => { await Store.clearChats(); S.chats = []; S.cur = newChat(); S.folder = null; closeSheet(); drawAll(); } }),
+      "import-all": () => { const i = document.createElement("input"); i.type = "file"; i.accept = ".json,application/json"; i.onchange = async () => { try { const j = JSON.parse(await i.files[0].text()); if (!j.potluckChats || !Array.isArray(j.chats)) throw 0; const ok = j.chats.map(cleanChat).filter(Boolean); for (const c of ok) await Store.putChat(c); await loadChats(); closeSheet(); toast(ok.length + " chats imported" + (ok.length < j.chats.length ? ` (${j.chats.length - ok.length} were not chats)` : "") + "."); } catch { toast("That is not a Potluck chat export."); } }; i.click(); },
+      wipe: () => sheet(`<h3>Delete all chats?</h3><p>Every chat in this browser will be removed. This cannot be undone.</p><div class="foot"><button class="btn ghost" data-a="close">Cancel</button><button class="btn danger" data-a="yes">Delete all</button></div>`, { yes: async () => { S.chats.forEach(c => deletedChats.add(c.id)); if (S.cur) deletedChats.add(S.cur.id); S.gen && stop(); await Store.clearChats(); S.chats = []; S.cur = newChat(); S.folder = null; closeSheet(); drawAll(); } }),
     });
 }
 function shortcutsSheet() {
@@ -1362,7 +1425,13 @@ function showPreview(lang, code) {
 
 // ---------- wiring ----------
 async function loadChats() {
-  const all = await Store.allChats();
+  const all = [];
+  for (const raw of await Store.allChats()) {
+    const c = cleanChat(raw);
+    if (!c) { if (raw && raw.id !== undefined) await Store.delChat(raw.id).catch(() => {}); continue; }
+    if (c.id !== raw.id) { await Store.delChat(raw.id).catch(() => {}); await Store.putChat(c).catch(() => {}); } // kept under a plain id
+    all.push(c);
+  }
   S.chats = all.map(c => ({ id: c.id, title: c.title, updated: c.updated, starred: c.starred, text: c.messages.filter(m => m.role !== "tool").map(m => m.content || "").join(" ").slice(0, 4000).toLowerCase() }));
   drawList();
 }
