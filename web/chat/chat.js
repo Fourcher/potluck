@@ -512,6 +512,7 @@ function drawThread() {
       const live = S.gen && S.gen.msg === m;
       h += `<div class="msg assistant ${endOfTurn && i > lastUser ? "last" : ""}" data-i="${i}"><div class="body">${assistantHTML(m, live)}</div>${(m.calls || []).map(cl => toolCard(cl, results[cl.id])).join("")}` +
         (m.error ? `<div class="err">${esc(m.error)}${m.overflow ? ` <button class="btn small" data-a="compact-retry">Summarize and continue</button>` : ""}</div>` : "") +
+        (m.cut && !live && endOfTurn ? `<div class="small muted">The answer reached its length limit before it was finished. <button class="btn small ghost" data-a="continue">Continue</button></div>` : "") +
         (live ? `<div class="waiting" data-wait>${m.content || m.reasoning ? "" : `<span class="spin"></span><span>${esc(S.gen.note || "Reading your message…")}</span>`}</div>` :
           endOfTurn ? `<div class="acts"><button class="icon" data-a="copy-msg" title="Copy" aria-label="Copy">${ic("copy")}</button><button class="icon" data-a="retry" title="Try again" aria-label="Try again">${ic("retry")}</button><button class="icon" data-a="speak" title="Read aloud" aria-label="Read aloud">${ic("speak")}</button><span class="stat">${esc(statLine(m.stats))}</span></div>` : "") + `</div>`;
     }
@@ -938,6 +939,7 @@ function parseToolCalls(raw) {
   return calls;
 }
 async function streamDirect(msg, signal) {
+  let cut = false; // stopped at the length limit
   const s = S.settings, tools = toolSpecs(), body = { messages: apiMessages(), ...thinking(false) };
   if (tools) body.tools = tools;
   const fail = async r => { let t = await r.text(); try { const j = JSON.parse(t); t = (j.error && (j.error.message || j.error)) || t; } catch { } return String(t); };
@@ -971,6 +973,7 @@ async function streamDirect(msg, signal) {
       if (j.error) throw new Error(j.error.message || "The model stopped with an error.");
       if (j.content) { raw += j.content; show(); }
       if (j.stop) {
+        if (j.stop_type === "limit") cut = true;
         const t = j.timings || {};
         msg.stats = { in: j.tokens_evaluated || (t.prompt_n || 0) + (t.cache_n || 0), out: j.tokens_predicted || t.predicted_n || 0, tps: t.predicted_per_second || 0, ptps: t.prompt_per_second || 0, ms: (t.prompt_ms || 0) + (t.predicted_ms || 0), fresh: t.prompt_n || 0 };
       }
@@ -979,7 +982,7 @@ async function streamDirect(msg, signal) {
   }
   msg.calls = tools ? parseToolCalls(raw) : [];
   show();
-  return msg.calls.length ? "tool_calls" : "stop";
+  return msg.calls.length ? "tool_calls" : cut ? "length" : "stop";
 }
 async function streamOnce(msg, signal) {
   const s = S.settings, tools = toolSpecs();
@@ -1067,6 +1070,8 @@ async function generate() {
         break;
       }
       addUsage(msg.stats);
+      // Cut off at the length limit, not finished: say so, with a way to carry on.
+      if (finish === "length") msg.cut = true;
       if (!msg.calls.length || finish !== "tool_calls") break;
       S.gen.msg = null; drawThread(); scrollDown(true);
       for (const call of msg.calls) {
@@ -1603,6 +1608,7 @@ function wire() {
     }
     else if (a === "retry") retry();
     else if (a === "compact-retry") compact(true);
+    else if (a === "continue") send("Continue exactly where you stopped.");
     else if (a === "task-changes") changesSheet();
     else if (a === "speak") speakText(m.content);
     else if (a === "edit-msg") editMessage(i);
