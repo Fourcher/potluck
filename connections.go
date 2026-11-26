@@ -167,8 +167,9 @@ func (h *Host) FoundConnections() []AIConnection {
 // mergedModels answers /v1/models with Potluck's model and the connections' models.
 // mergedModels answers /v1/models: Potluck's own model, with the conversation size it was
 // started with (context_length, so agents and other apps know when to trim), and for this
-// computer also crew members and the person's other AI setups.
-func (h *Host) mergedModels(w http.ResponseWriter, r *http.Request, api http.Handler, others bool) {
+// computer also the person's other AI setups. Crew members are listed for everyone: they
+// are Potluck's own models.
+func (h *Host) mergedModels(w http.ResponseWriter, r *http.Request, api http.Handler, shared bool) {
 	rec := httptest.NewRecorder()
 	api.ServeHTTP(rec, r)
 	var list struct {
@@ -187,11 +188,11 @@ func (h *Host) mergedModels(w http.ResponseWriter, r *http.Request, api http.Han
 			m["context_length"] = ctx
 		}
 	}
-	if !others {
-		writeJSON(w, list)
-		return
+	more := h.crewChatModels()
+	if !shared {
+		more = append(more, h.connChatModels()...)
 	}
-	for _, m := range append(h.crewChatModels(), h.connChatModels()...) {
+	for _, m := range more {
 		list.Data = append(list.Data, map[string]any{"id": m.File, "object": "model", "owned_by": m.NodeName})
 	}
 	writeJSON(w, list)

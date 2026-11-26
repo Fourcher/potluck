@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -79,13 +80,44 @@ func TestChatHandler(t *testing.T) {
 	if w := do(chatReq("POST", "/potluck/switch", local, "127.0.0.1:7720", map[string]string{"Content-Type": "text/plain"}, body)); w.Code != http.StatusForbidden {
 		t.Fatalf("a request without the page's header could switch models: %d", w.Code)
 	}
-	// Everything else is the model's own API.
+	// Everything else is the model's own API: for this computer's programs, and for the
+	// share and phone listeners' requests, which they mark as shared.
+	shared := func(r *http.Request) *http.Request {
+		return r.WithContext(context.WithValue(r.Context(), sharedReq{}, true))
+	}
 	for _, p := range []string{"/v1/chat/completions", "/completion", "/props", "/health"} {
-		if w := do(chatReq("POST", p, lan, "192.168.1.20:7720", nil, "{}")); w.Code != http.StatusTeapot {
+		if w := do(chatReq("POST", p, local, "127.0.0.1:7720", nil, "{}")); w.Code != http.StatusTeapot {
 			t.Fatalf("%s did not reach the model's API: %d", p, w.Code)
 		}
+		if w := do(shared(chatReq("POST", p, lan, "192.168.1.20:7720", nil, "{}"))); w.Code != http.StatusTeapot {
+			t.Fatalf("%s did not reach the model's API for a shared device: %d", p, w.Code)
+		}
+		// A web page whose address now points at 127.0.0.1 gets nothing, and neither does
+		// an unmarked request from elsewhere.
+		if w := do(chatReq("POST", p, local, "evil.example:7720", nil, "{}")); w.Code != http.StatusForbidden {
+			t.Fatalf("%s answered a renamed address: %d", p, w.Code)
+		}
+		if w := do(chatReq("POST", p, lan, "192.168.1.20:7720", nil, "{}")); w.Code != http.StatusForbidden {
+			t.Fatalf("%s answered an unmarked request from the network: %d", p, w.Code)
+		}
+	}
+	if w := do(chatReq("GET", "/v1/models", local, "evil.example:7720", nil, "")); w.Code != http.StatusForbidden {
+		t.Fatalf("the model list (with paid connections) answered a renamed address: %d", w.Code)
 	}
 	if w := do(chatReq("GET", "/potluck/nothing", local, "127.0.0.1:7720", nil, "")); w.Code != http.StatusNotFound {
 		t.Fatalf("unknown potluck path: %d", w.Code)
+	}
+}
+
+// A phone forgotten while a push request or an alert was in flight stays forgotten.
+func TestEditPhoneForgotten(t *testing.T) {
+	c := &Config{Phones: map[string]PhoneKey{"a": {Name: "iPhone", Hash: "h"}}}
+	c.editPhone("a", func(p *PhoneKey) { p.PushToken = "t" })
+	c.editPhone("gone", func(p *PhoneKey) { p.PushToken = "t" })
+	if c.Phones["a"].PushToken != "t" || c.Phones["a"].Name != "iPhone" {
+		t.Fatalf("a paired phone was not changed: %+v", c.Phones["a"])
+	}
+	if _, ok := c.Phones["gone"]; ok || len(c.Phones) != 1 {
+		t.Fatalf("a forgotten phone came back: %+v", c.Phones)
 	}
 }

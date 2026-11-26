@@ -222,9 +222,7 @@ func (h *Host) phoneHandler() http.Handler {
 				return
 			}
 			h.cfg.Update(func(c *Config) {
-				p := c.Phones[id]
-				p.PushToken, p.PushEnv = in.Token, in.Env
-				c.Phones[id] = p
+				c.editPhone(id, func(p *PhoneKey) { p.PushToken, p.PushEnv = in.Token, in.Env })
 			})
 			writeJSON(w, map[string]bool{"ok": true})
 		case phoneAPI[r.URL.Path] && chat != nil:
@@ -348,4 +346,16 @@ func (h *Host) StopPairing() {
 	h.pairSecret = ""
 	h.mu.Unlock()
 	h.applyPhones()
+}
+
+// editPhone changes a paired phone only if it is still paired. A request or an alert that
+// started before the person chose Forget must not write the phone back as an empty entry
+// (shown in the panel, holding the phone listener open, keeping a lost phone's push token).
+func (c *Config) editPhone(id string, f func(*PhoneKey)) {
+	p, ok := c.Phones[id]
+	if !ok {
+		return
+	}
+	f(&p)
+	c.Phones[id] = p
 }

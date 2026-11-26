@@ -261,8 +261,9 @@ func (h *Host) helperReserveLocked(node string) int64 {
 	return 0
 }
 
-// helperRoute passes a chat request for the "potluck-helper" model to the helper's engine.
-func (h *Host) helperRoute(w http.ResponseWriter, r *http.Request) bool {
+// helperRoute passes a chat request for a crew member to its engine, and one for the
+// "potluck-helper" model to the helper's engine (never for a shared device or phone).
+func (h *Host) helperRoute(w http.ResponseWriter, r *http.Request, shared bool) bool {
 	if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
 		return false
 	}
@@ -286,7 +287,7 @@ func (h *Host) helperRoute(w http.ResponseWriter, r *http.Request) bool {
 		h.proxyAux(w, r, c.Node, "aux:"+c.Name, nil)
 		return true
 	}
-	if peek.Model != "potluck-helper" {
+	if shared || peek.Model != "potluck-helper" {
 		return false
 	}
 	st := h.HelperStatus()

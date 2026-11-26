@@ -158,6 +158,16 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 		case strings.HasPrefix(r.URL.Path, "/potluck/"):
 			http.NotFound(w, r)
 		default:
+			// The model API answers this computer's own programs (a loopback Host) and the share
+			// and phone listeners, which mark their requests. Anything else reached 127.0.0.1 by a
+			// renamed address (a web page whose DNS now points here): it gets nothing, not the
+			// models and not the person's paid connections.
+			if !isShared(r) && !chatOwner(r) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "Potluck: use http://127.0.0.1:" + strconv.Itoa(portChat) + " or http://localhost:" + strconv.Itoa(portChat)}})
+				return
+			}
 			// Read a request's body once, with a limit, so every step below sees all of it
 			// and one that is too big is refused as such (not cut short and sent on).
 			if r.Body != nil && r.Method == http.MethodPost {
@@ -172,8 +182,9 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 			}
 			// One thinking switch for every client (thinking.go).
 			thinkingRequest(w, r)
-			// The Potluck helper's own small model, on this computer only.
-			if !isShared(r) && h.helperRoute(w, r) {
+			// Crew members (Potluck's own models, for shared devices too) and the Potluck
+			// helper's small model (this computer only).
+			if h.helperRoute(w, r, isShared(r)) {
 				return
 			}
 			// A model from one of the person's other AI setups goes to that server.
@@ -181,7 +192,7 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 				return
 			}
 			if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
-				h.mergedModels(w, r, api, !isShared(r))
+				h.mergedModels(w, r, api, isShared(r))
 				return
 			}
 			if r.Method == http.MethodPost && isModelRequest(r) {

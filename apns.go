@@ -185,7 +185,7 @@ func (h *Host) pushAlert(q *Question, task string) (sent int, first error) {
 				other = "production"
 			}
 			if r2, b2, err2 := h.apnsSend(other, p.PushToken, tok, c.Push.Topic, q.ID, payload); err2 == nil && r2 == 200 {
-				h.cfg.Update(func(c *Config) { pp := c.Phones[id]; pp.PushEnv = other; c.Phones[id] = pp })
+				h.cfg.Update(func(c *Config) { c.editPhone(id, func(p *PhoneKey) { p.PushEnv = other }) })
 				sent++
 				continue
 			} else {
@@ -200,9 +200,7 @@ func (h *Host) pushAlert(q *Question, task string) (sent int, first error) {
 			sent++
 		} else if res == 410 || strings.Contains(string(b), "BadDeviceToken") || strings.Contains(string(b), "Unregistered") {
 			h.cfg.Update(func(c *Config) { // the app was removed or the token changed
-				pp := c.Phones[id]
-				pp.PushToken = ""
-				c.Phones[id] = pp
+				c.editPhone(id, func(p *PhoneKey) { p.PushToken = "" })
 			})
 		} else {
 			problem(fmt.Errorf("Apple refused the alert (%d): %s", res, strings.TrimSpace(string(b))))
