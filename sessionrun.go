@@ -474,12 +474,9 @@ func (st *sessionStore) apiMessages(s *Session) []map[string]any {
 			out = append(out, map[string]any{"role": "user", "content": m.Content})
 		case "assistant":
 			a := map[string]any{"role": "assistant", "content": m.Content}
-			// Its thinking goes back too: a template that shows earlier thinking (Inkling 2)
-			// otherwise writes a different history from the one the engine read, and the
-			// engine reads everything after it again on every step.
-			if m.Reasoning != "" {
-				a["reasoning_content"] = m.Reasoning
-			}
+			// Earlier thinking is not sent back. Measured on Inkling 2 Q6_K (2026-11-25): with
+			// it, a follow-up read 11 new tokens; without it, 19 (only the last answer is read
+			// again), while every kept thought would fill the task's memory for good.
 			if len(m.Calls) > 0 {
 				var calls []map[string]any
 				for _, c := range m.Calls {

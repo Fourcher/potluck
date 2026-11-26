@@ -905,9 +905,6 @@ function apiMessages(msgs = S.cur.messages) {
       const calls = m.calls && m.calls.length ? m.calls : null;
       if (!m.content && !calls) continue;
       const a = { role: "assistant", content: m.content || "" };
-      // Its thinking goes back too, so a template that shows earlier thinking (Inkling 2)
-      // writes the same history the engine read, and only new messages are read again.
-      if (m.reasoning) a.reasoning_content = m.reasoning;
       if (calls) a.tool_calls = calls.map(c => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args || "{}" } }));
       out.push(a);
     } else if (m.role === "tool") out.push({ role: "tool", tool_call_id: m.callId, content: m.content });
