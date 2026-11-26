@@ -51,8 +51,19 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 		} else if status == "working" {
 			s.setStatus("idle", "")
 		}
+		// In a git repository, the files it changed however it changed them (commands too).
+		var gitFiles []string
 		s.mu.Lock()
-		s.Report = taskReport(s.Messages[max(from, 0):], time.Since(began), s.Status, s.Error)
+		base, untracked, proj := s.GitBase, s.GitUntracked, s.Project
+		s.mu.Unlock()
+		if base != "" && proj != nil {
+			gitFiles = []string{}
+			for _, c := range gitChanges(mustReal(proj.Root), base, untracked) {
+				gitFiles = append(gitFiles, c.Path+map[string]string{"created": " (new)", "deleted": " (deleted)"}[c.Kind])
+			}
+		}
+		s.mu.Lock()
+		s.Report = taskReport(s.Messages[max(from, 0):], time.Since(began), s.Status, s.Error, gitFiles)
 		end, waitingMsgs := s.Status, s.Inbox
 		if end == "idle" {
 			s.Inbox = nil
@@ -1088,7 +1099,7 @@ func compactLog(old []SMsg, limit int) string {
 // taskReport sums up one run of a task from its own log (no model asked): how long it took,
 // the files it changed, the commands that failed, what it decided because nobody answered and
 // what waited for approval. Shown at the top of the task and sent with its end alert.
-func taskReport(msgs []SMsg, took time.Duration, status, errText string) string {
+func taskReport(msgs []SMsg, took time.Duration, status, errText string, gitFiles []string) string {
 	calls := map[string]SToolCall{}
 	steps := 0
 	for _, m := range msgs {
@@ -1159,6 +1170,9 @@ func taskReport(msgs []SMsg, took time.Duration, status, errText string) string 
 			}
 			fmt.Fprintf(&b, "\n- %s", x)
 		}
+	}
+	if gitFiles != nil {
+		changed = gitFiles // since the task started, by any means (its git starting point)
 	}
 	list("Files changed", changed)
 	list("Commands that failed", failed)

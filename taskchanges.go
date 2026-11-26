@@ -1,10 +1,14 @@
 package main
 
 // What a task changed in its project, and undoing it. A task left to work on a codebase for
-// the night is reviewed in the morning: before a task first changes or creates a file with
-// edit_file or write_file, the file as it was is kept with the task. The task's changes are
-// then shown file by file against that, and each file (or all of them) can be put back.
-// Changes made by commands (a build, git, a script) are not kept; the page says so.
+// the night is reviewed in the morning.
+//
+// In a git repository the task's starting point is recorded when it starts (git stash create:
+// the files as they were, uncommitted changes included, without touching them), with the list
+// of untracked files then. Its changes are everything that differs from that, however they
+// were made (its file tools, sed, a build, a script), and undo puts files back from it.
+// Elsewhere, a file is kept before the task first changes it with edit_file or write_file;
+// changes made by commands are not kept there, and the page says so.
 
 import (
 	"errors"
@@ -87,6 +91,12 @@ func (st *sessionStore) changes(s *Session) ([]TaskChange, error) {
 		return nil, errors.New("this task has no project folder")
 	}
 	root := mustReal(proj.Root)
+	s.mu.Lock()
+	base, untracked := s.GitBase, s.GitUntracked
+	s.mu.Unlock()
+	if base != "" {
+		return gitChanges(root, base, untracked), nil
+	}
 	m := st.backupManifest(s)
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -131,6 +141,12 @@ func (st *sessionStore) revert(s *Session, path string) (int, error) {
 		return 0, errors.New("stop the task first: it may be changing these files right now")
 	}
 	root := mustReal(proj.Root)
+	s.mu.Lock()
+	base, untracked := s.GitBase, s.GitUntracked
+	s.mu.Unlock()
+	if base != "" {
+		return gitRevert(root, base, untracked, path)
+	}
 	m := st.backupManifest(s)
 	n := 0
 	for k, e := range m {
@@ -285,4 +301,104 @@ func gitContext(root string) string {
 		out += "\n\n$ git log --oneline -5\n" + log
 	}
 	return out
+}
+
+// gitStart records where a task in a git repository starts from (see the top of this file).
+func gitStart(root string) (base string, untracked []string) {
+	if _, err := os.Stat(filepath.Join(root, ".git")); err != nil {
+		return "", nil
+	}
+	if b := gitOut(root, "stash", "create"); b != "" {
+		base = b // the uncommitted state, as a commit nobody sees
+	} else {
+		base = gitOut(root, "rev-parse", "HEAD")
+	}
+	if base == "" {
+		return "", nil
+	}
+	if u := gitOut(root, "ls-files", "--others", "--exclude-standard", "-z"); u != "" {
+		untracked = strings.Split(strings.TrimRight(u, "\x00"), "\x00")
+	}
+	return base, untracked
+}
+
+// gitOut runs git in root and gives its output, or "" when it fails or takes too long.
+func gitOut(root string, args ...string) string {
+	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+	hideWindow(cmd)
+	done := make(chan []byte, 1)
+	go func() {
+		b, err := cmd.Output()
+		if err != nil {
+			b = nil
+		}
+		done <- b
+	}()
+	select {
+	case b := <-done:
+		return strings.TrimSpace(string(b))
+	case <-time.After(20 * time.Second):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return ""
+	}
+}
+
+// gitChanges lists what differs from the task's starting point.
+func gitChanges(root, base string, untrackedThen []string) []TaskChange {
+	was := map[string]bool{}
+	for _, u := range untrackedThen {
+		was[u] = true
+	}
+	var out []TaskChange
+	for _, l := range strings.Split(gitOut(root, "diff", "--name-status", "--no-renames", base, "--"), "\n") {
+		st, path, ok := strings.Cut(l, "\t")
+		if !ok {
+			continue
+		}
+		kind := map[string]string{"M": "changed", "A": "created", "D": "deleted", "T": "changed"}[st[:1]]
+		if kind == "" {
+			kind = "changed"
+		}
+		out = append(out, TaskChange{Path: path, Kind: kind, Diff: trimTo(gitOut(root, "diff", "--no-color", base, "--", path), 200<<10)})
+	}
+	if u := gitOut(root, "ls-files", "--others", "--exclude-standard", "-z"); u != "" {
+		for _, f := range strings.Split(strings.TrimRight(u, "\x00"), "\x00") {
+			if f == "" || was[f] {
+				continue
+			}
+			b, _ := os.ReadFile(filepath.Join(root, filepath.FromSlash(f)))
+			out = append(out, TaskChange{Path: f, Kind: "created", Diff: unifiedDiff(f, "", string(b))})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
+}
+
+// gitRevert puts one file (or every changed file) back as it was at the task's start.
+func gitRevert(root, base string, untrackedThen []string, path string) (int, error) {
+	n := 0
+	for _, c := range gitChanges(root, base, untrackedThen) {
+		if path != "" && c.Path != path {
+			continue
+		}
+		p, err := inRoot(root, c.Path)
+		if err != nil {
+			return n, err
+		}
+		if exec.Command("git", "-C", root, "cat-file", "-e", base+":"+c.Path).Run() != nil {
+			// Not there at the start: the task made it.
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				return n, err
+			}
+		} else if err := exec.Command("git", "-C", root, "checkout", base, "--", c.Path).Run(); err != nil {
+			return n, fmt.Errorf("could not put %s back: %v", c.Path, err)
+		}
+		n++
+	}
+	if path != "" && n == 0 {
+		return 0, fmt.Errorf("%s is as it was when the task started", path)
+	}
+	return n, nil
 }

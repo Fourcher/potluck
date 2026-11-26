@@ -62,4 +62,3 @@ func TestScheduleRuns(t *testing.T) {
 	}
 	waitStatus(t, s, "idle")
 }
-

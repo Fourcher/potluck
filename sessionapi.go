@@ -148,7 +148,17 @@ func (st *sessionStore) handle(w http.ResponseWriter, r *http.Request, mutate bo
 			fail(w, err)
 			return
 		}
-		writeJSON(w, map[string]any{"changes": ch, "note": "Changes this task made with its file tools. Changes made by commands it ran (builds, git, scripts) are not kept here."})
+		if ch == nil {
+			ch = []TaskChange{}
+		}
+		s.mu.Lock()
+		gitted := s.GitBase != ""
+		s.mu.Unlock()
+		note := "Changes this task made with its file tools. Changes made by commands it ran (builds, scripts) are not kept here."
+		if gitted {
+			note = "Everything that differs from where the task started (git), however it was changed. Undo puts files back as they were then; commits it made stay."
+		}
+		writeJSON(w, map[string]any{"changes": ch, "note": note})
 		return
 	case action == "revert":
 		n, err := st.revert(s, in.Path)

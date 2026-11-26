@@ -70,3 +70,45 @@ func TestGitContext(t *testing.T) {
 		t.Fatal("a folder without git got a git context")
 	}
 }
+
+// In a git repository a task's changes are everything since it started, made however,
+// and undo puts them back; what was uncommitted at the start stays as it was then.
+func TestGitTaskChanges(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	dir := t.TempDir()
+	git := func(a ...string) { c := exec.Command("git", append([]string{"-C", dir}, a...)...); c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t"); _ = c.Run() }
+	git("init", "-q", "-b", "main")
+	_ = os.WriteFile(filepath.Join(dir, "app.py"), []byte("print('hi')\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("1\n"), 0o644)
+	git("add", ".")
+	git("commit", "-q", "-m", "start")
+	_ = os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("1\n2 (uncommitted before the task)\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "mine.txt"), []byte("untracked before\n"), 0o644)
+	base, untracked := gitStart(dir)
+	if base == "" {
+		t.Fatal("no starting point")
+	}
+	// The task, by command: sed, a new file, a deletion.
+	_ = os.WriteFile(filepath.Join(dir, "app.py"), []byte("print('hello')\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("done\n"), 0o644)
+	ch := gitChanges(dir, base, untracked)
+	got := map[string]string{}
+	for _, c := range ch {
+		got[c.Path] = c.Kind
+	}
+	if len(ch) != 2 || got["app.py"] != "changed" || got["notes.txt"] != "created" {
+		t.Fatalf("changes %v", got)
+	}
+	if n, err := gitRevert(dir, base, untracked, ""); err != nil || n != 2 {
+		t.Fatalf("undo %d %v", n, err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "app.py"))
+	k, _ := os.ReadFile(filepath.Join(dir, "keep.txt"))
+	_, notes := os.Stat(filepath.Join(dir, "notes.txt"))
+	_, mine := os.Stat(filepath.Join(dir, "mine.txt"))
+	if string(b) != "print('hi')\n" || !strings.Contains(string(k), "uncommitted before") || notes == nil || mine != nil {
+		t.Fatalf("after undo: app.py %q keep %q notes gone %v mine kept %v", b, k, notes != nil, mine == nil)
+	}
+}

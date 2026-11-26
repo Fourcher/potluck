@@ -124,9 +124,12 @@ type Session struct {
 	// Inbox: messages the person sent while the task worked, given to it at its next step.
 	Inbox []string `json:"inbox,omitempty"`
 	// Resumed: how often it carried on by itself after Potluck restarted (resumeInterrupted).
-	Resumed     int    `json:"resumed,omitempty"`
-	Schedule    string `json:"schedule,omitempty"` // the schedule that started it (schedules.go)
-	interrupted bool   // Potluck restarted while it ran
+	Resumed  int    `json:"resumed,omitempty"`
+	Schedule string `json:"schedule,omitempty"` // the schedule that started it (schedules.go)
+	// In a git repository: where the task started (taskchanges.go), for its changes and undo.
+	GitBase      string   `json:"gitBase,omitempty"`
+	GitUntracked []string `json:"gitUntracked,omitempty"`
+	interrupted  bool     // Potluck restarted while it ran
 
 	lastPrompt  int // tokens the model read last time, to know when to make room
 	lastPromptN int // how many messages the task had then
@@ -306,7 +309,9 @@ func (st *sessionStore) send(s *Session, text string) error {
 		root := s.Project.Root
 		s.mu.Unlock()
 		g := gitContext(root)
+		base, untracked := gitStart(root)
 		s.mu.Lock()
+		s.GitBase, s.GitUntracked = base, untracked
 		if g != "" && len(s.Messages) == 0 {
 			s.Messages = append(s.Messages, SMsg{Role: "user", Content: g, At: time.Now()})
 		}

@@ -396,13 +396,13 @@ func (c *Config) editPhone(id string, f func(*PhoneKey)) {
 
 // PhoneTask is a task as the phone shows it: what it is doing, its report, its last words.
 type PhoneTask struct {
-	ID       string    `json:"id"`
-	Title    string    `json:"title"`
-	Status   string    `json:"status"`
-	Error    string    `json:"error,omitempty"`
-	Updated  time.Time `json:"updated"`
-	Report   string    `json:"report,omitempty"`
-	Question *Question `json:"question,omitempty"`
+	ID       string     `json:"id"`
+	Title    string     `json:"title"`
+	Status   string     `json:"status"`
+	Error    string     `json:"error,omitempty"`
+	Updated  time.Time  `json:"updated"`
+	Report   string     `json:"report,omitempty"`
+	Question *Question  `json:"question,omitempty"`
 	Messages []PhoneMsg `json:"messages,omitempty"`
 }
 

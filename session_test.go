@@ -409,7 +409,7 @@ func TestTaskReport(t *testing.T) {
 		{Role: "tool", CallID: "c", State: "denied", Content: awayAnswer("run", 30*time.Minute)},
 		{Role: "tool", CallID: "d", State: "ok", Content: awayAnswer("ask", 30*time.Minute)},
 		{Role: "assistant", Content: "Done."}}
-	r := taskReport(msgs, 90*time.Minute, "idle", "")
+	r := taskReport(msgs, 90*time.Minute, "idle", "", nil)
 	for _, want := range []string{"Finished after 1.5 hours, 3 steps, 1 command run.", "Files changed (1):\n- main.go", "Commands that failed (1):\n- go test ./...", "Decided without you (nobody answered) (1):\n- Which branch?", "Waiting for your approval (not done) (1):\n- run_command git push"} {
 		if !strings.Contains(r, want) {
 			t.Fatalf("report misses %q:\n%s", want, r)
