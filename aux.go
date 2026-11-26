@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -62,7 +63,7 @@ func (a *Agent) startAux(in StartAuxReq) (any, error) {
 		return nil, errors.New("a slot name is lowercase letters, digits and dashes")
 	}
 	a.mu.Lock()
-	rt := a.rtDir
+	rt, gpuDev := a.rtDir, a.gpuDev
 	old := a.aux[name]
 	a.mu.Unlock()
 	if rt == "" {
@@ -97,8 +98,14 @@ func (a *Agent) startAux(in StartAuxReq) (any, error) {
 		"--alias", name}
 	args = append(args, placementArgs(in.NGL, in.ExpertCPU, in.KVKeyQ8)...)
 	args = append(args, safeSampling(in.Sampling)...)
-	if base := strings.ToLower(rt); in.NGL == 0 && (strings.Contains(base, "cuda") || strings.Contains(base, "vulkan")) {
+	// Name the device, as the main model does (headArgs): with nothing planned on a card,
+	// none at all, on every build (a Mac's engine would otherwise still use the graphics
+	// chip for its working memory); with layers on one, that card only, not a second card
+	// or the processor's own graphics, which the plan did not count.
+	if base := strings.ToLower(filepath.Base(rt)); in.NGL == 0 {
 		args = append(args, "-dev", "none")
+	} else if gpuDev != "" && (strings.Contains(base, "cuda") || strings.Contains(base, "vulkan")) {
+		args = append(args, "-dev", gpuDev)
 	}
 	p, err := a.startProc("aux-"+name, rt, findBin(rt, "llama-server"), args, true, true)
 	if err != nil {

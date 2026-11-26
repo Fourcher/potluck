@@ -225,13 +225,35 @@ func (h *Host) startHelper(gen int) error {
 // computer, so it can answer right away; and again if its computer goes away.
 func (h *Host) helperLoop() {
 	time.Sleep(20 * time.Second)
-	for {
-		if !h.cfg.Get().HelperOff {
+	var restAfterGuard time.Time // the guard stopped it: wait an hour before trying again
+	for i := 0; ; i++ {
+		// A ready helper is checked on its computer: its engine can end there (the guard, a
+		// crash, Potluck restarting) without the computer going away. Until noticed, the
+		// helper would be listed as ready and its memory kept out of the main model's plans.
+		if st := h.HelperStatus(); st.Phase == "ready" {
+			var as AuxStatus
+			if err := h.call(st.Node, "aux_status", nil, &as, 15*time.Second); err == nil && !as.Running {
+				note := "Its engine stopped"
+				if as.Log != "" {
+					note += ": " + as.Log
+				}
+				if as.Guarded {
+					note += ". It ran out of memory; Potluck tries again in an hour"
+					restAfterGuard = time.Now().Add(time.Hour)
+				}
+				h.helperMu.Lock()
+				if h.helper.Node == st.Node && h.helper.Phase == "ready" {
+					h.helper.Phase, h.helper.Note = "off", note
+				}
+				h.helperMu.Unlock()
+			}
+		}
+		if i%4 == 0 && !h.cfg.Get().HelperOff && time.Now().After(restAfterGuard) {
 			if p := h.HelperStatus().Phase; p == "off" {
 				h.EnsureHelper()
 			}
 		}
-		time.Sleep(2 * time.Minute)
+		time.Sleep(30 * time.Second)
 	}
 }
 

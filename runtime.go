@@ -264,11 +264,14 @@ func (a *Agent) ensureRuntime(ctx context.Context, spec RuntimeSpec, note func(s
 	if findBin(dir, "llama-server") == "" || findBin(dir, "ggml-rpc-server", "rpc-server") == "" {
 		return "", errors.New("the AI engine download is missing its programs")
 	}
-	if err := a.ensureGlibc(ctx, note); err != nil {
+	_ = os.RemoveAll(tmp)
+	// The engine is whole: mark it before the C library step (which has its own mark), so a
+	// failure there (its server unreachable) does not throw the engine away and download it
+	// again on every try. The early return above runs that step again.
+	if err := os.WriteFile(filepath.Join(dir, ".ok"), []byte(time.Now().Format(time.RFC3339)+"\n"), 0o644); err != nil {
 		return "", err
 	}
-	_ = os.RemoveAll(tmp)
-	return dir, os.WriteFile(filepath.Join(dir, ".ok"), []byte(time.Now().Format(time.RFC3339)+"\n"), 0o644)
+	return dir, a.ensureGlibc(ctx, note)
 }
 
 func max64(a, b int64) int64 {
