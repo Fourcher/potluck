@@ -37,12 +37,14 @@ type AuxStatus struct {
 	Ready   bool   `json:"ready"`
 	File    string `json:"file"`
 	Log     string `json:"log,omitempty"`
+	Guarded bool   `json:"guarded,omitempty"` // the memory guard stopped it (guard.go)
 }
 
 type auxEngine struct {
-	proc *proc
-	port int
-	file string
+	proc    *proc
+	port    int
+	file    string
+	guarded bool // the memory guard stopped it: never started again by itself
 }
 
 var auxNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
@@ -149,6 +151,9 @@ func (a *Agent) auxStatus(name string) AuxStatus {
 	if e == nil {
 		return st
 	}
+	a.mu.Lock()
+	st.Guarded = e.guarded
+	a.mu.Unlock()
 	st.Running, st.File = e.proc.Running(), e.file
 	if st.Running {
 		res, err := (&http.Client{Timeout: 2 * time.Second}).Get("http://127.0.0.1:" + strconv.Itoa(e.port) + "/health")

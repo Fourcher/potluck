@@ -117,11 +117,12 @@ type Host struct {
 	mu             sync.Mutex
 	nodes          map[string]*Node
 	sessOnce       sync.Once
-	sess           *sessionStore // agent sessions (sessions.go)
-	pushErr        string        // the last problem sending a phone alert
-	pushTestAnswer string        // what the phone answered to the last test alert
-	vision         bool          // the running model can see images
-	guardWhy       string        // why the guard stopped the model, shown instead of "stopped"
+	sess           *sessionStore        // agent sessions (sessions.go)
+	pushErr        string               // the last problem sending a phone alert
+	pushTestAnswer string               // what the phone answered to the last test alert
+	vision         bool                 // the running model can see images
+	guardWhy       string               // why the guard stopped the model, shown instead of "stopped"
+	guardSeen      map[string]time.Time // each computer's last guard event acted on
 	pending        map[string]*Pending
 	tunnels        map[string]chan net.Conn
 	cluster        ClusterState
@@ -940,6 +941,12 @@ func offer(info NodeInfo, held int64) (cpu, gpu int64, unified bool) {
 	cpu = usable * pedal / 100
 	if g := info.usableGPU(); g != nil {
 		if g.Unified {
+			// Everything planned here goes on the graphics chip, which macOS lets hold only
+			// part of the RAM (metal.go; VRAMTotal is that limit). Past it the chip runs out
+			// of memory, as it did on the Mac mini on 2026-11-23.
+			if lim := int64(g.VRAMTotal) - (500 << 20); g.VRAMTotal > 0 && cpu > lim {
+				cpu = max(lim, 0)
+			}
 			return 0, cpu, true
 		}
 		v := int64(g.VRAMFree) - (500 << 20)
@@ -1517,6 +1524,9 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		budget := map[string]int64{}
 		for _, pn := range h.planNodes() {
 			budget[pn.ID] = (pn.CPUBytes + pn.GPUBytes) >> 20
+			if pn.ID == plan.Head && !pn.Unified && plan.Overflow == 0 {
+				budget[hostBudget] = pn.CPUBytes >> 20
+			}
 		}
 		var visionMiB int64
 		if model.Vision != nil {
@@ -1538,6 +1548,11 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			h.mu.Unlock()
 		}
 		h.setProgress(plan.Head, ProgressNote{Msg: f.Note})
+		if f.Measured && f.Short > 0 {
+			err := fmt.Errorf("it does not fit: the AI engine needs %s more than there is at the smallest size tried. Choose a smaller conversation size (or Auto), a smaller version of the model, or add a computer", humanBytes(f.Short<<20))
+			done(err)
+			return err
+		}
 		done(nil)
 	}
 	if len(plan.WorkerOrder) == 0 {
@@ -1545,7 +1560,6 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 	} else {
 		done = h.step("Loading the model across the computers")
 	}
-	loadStart := time.Now()
 	if err := h.call(plan.Head, "start_head", req, nil, time.Minute); err != nil {
 		done(err)
 		return err
@@ -1584,8 +1598,20 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			}
 			if !st.Head {
 				why := lastLogLine(st.HeadLog)
-				if st.Guard != nil && st.Guard.At.After(loadStart) {
-					why = st.Guard.Why // the guard stopped it, and says why
+				if st.Guard == nil {
+					// The guard reads an ended engine's log within a second: give it that.
+					time.Sleep(2 * time.Second)
+					_ = h.call(plan.Head, "status", nil, &st, 20*time.Second)
+				}
+				if st.Guard != nil && h.newGuardEvent(plan.Head, st.Guard) {
+					// It ran out of memory while loading (the event is this start's: the head
+					// cleared its guard when asked to start). Say so, and give it less next time.
+					h.learnCeiling(plan.Head, st.Guard, plan)
+					h.mu.Lock()
+					err := errors.New(h.guardWhy)
+					h.mu.Unlock()
+					done(err)
+					return err
 				}
 				err := errors.New("the AI engine stopped while loading: " + why)
 				done(err)

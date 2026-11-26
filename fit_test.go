@@ -70,8 +70,8 @@ func TestFitStartShrinksBatchThenContext(t *testing.T) {
 func TestFitStartKeepsChosenSize(t *testing.T) {
 	var calls []string
 	got := fitStart(fakeMonolith(t, &calls), "m", StartHeadReq{Ctx: 65536}, false, 0, nil, nil)
-	// The person chose 64k: only the batch may change, and nothing fits, so it stands.
-	if got.Ctx != 65536 || got.UBatch != 0 || len(calls) != 3 {
+	// The person chose 64k: only the batch may change, and nothing fits, so it is not loaded.
+	if got.Ctx != 65536 || got.UBatch != 0 || len(calls) != 3 || !got.Measured || got.Short <= 0 {
 		t.Fatalf("got %+v after %v", got, calls)
 	}
 }
@@ -169,5 +169,19 @@ func TestFileErrSaysWhatToDo(t *testing.T) {
 	}
 	if e := errors.New("Hugging Face answered 503"); fileErr(e, "/d/m.gguf", 1) != e {
 		t.Fatal("a network error must pass through")
+	}
+}
+
+// What the engine keeps in this computer's own memory counts against what it lends.
+func TestCardShortCountsHostMemory(t *testing.T) {
+	res := MeasureRes{Host: DevMem{Name: "Host", Self: 20000}}
+	if s := cardShortMiB(res, 0, map[string]int64{hostBudget: 24000}); s != 0 {
+		t.Fatalf("fits in 24000 MiB, short %d", s)
+	}
+	if s := cardShortMiB(res, 0, map[string]int64{hostBudget: 18000}); s != 20000+cardMarginMiB-18000 {
+		t.Fatalf("short %d", s)
+	}
+	if s := cardShortMiB(res, 0, nil); s != 0 {
+		t.Fatalf("no host budget given, short %d", s)
 	}
 }

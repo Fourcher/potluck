@@ -450,7 +450,7 @@ func (p *proc) Stop() {
 	}
 	p.mu.Lock()
 	p.stopped = true
-	cmd := p.cmd
+	cmd := p.cmd // nil once it has ended: its process number may belong to another program by now
 	p.mu.Unlock()
 	if cmd != nil && cmd.Process != nil {
 		killTree(cmd.Process.Pid)
@@ -558,11 +558,25 @@ func (a *Agent) startProc(name, rtDir, bin string, args []string, restart, lowPr
 		runtime.LockOSThread()
 		defer close(p.done)
 		defer logf.Close()
-		quick := 0
+		var ends []time.Time // when it ended, over the last ten minutes
 		for i := 0; ; i++ {
 			cmd := build()
-			started := time.Now()
+			// Starting and recording it happen together, after a last look at whether it was
+			// stopped: a Stop in between would otherwise kill the previous (already ended)
+			// engine and leave this one running, unwatched.
+			p.mu.Lock()
+			if p.stopped {
+				p.mu.Unlock()
+				if i == 0 {
+					first <- errors.New("stopped before it started")
+				}
+				return
+			}
 			err := cmd.Start()
+			if err == nil {
+				p.cmd, p.running = cmd, true
+			}
+			p.mu.Unlock()
 			if i == 0 {
 				first <- err
 			}
@@ -572,9 +586,6 @@ func (a *Agent) startProc(name, rtDir, bin string, args []string, restart, lowPr
 				}
 				return
 			}
-			p.mu.Lock()
-			p.cmd, p.running = cmd, true
-			p.mu.Unlock()
 			// Engines always run below normal priority. With the computer otherwise idle that
 			// costs nothing; when memory or the processor get tight, the desktop, remote logins
 			// and Potluck's guard still get their turn instead of freezing behind the engine.
@@ -587,25 +598,25 @@ func (a *Agent) startProc(name, rtDir, bin string, args []string, restart, lowPr
 			_ = cmd.Wait()
 			forgetEngine(cmd.Process.Pid)
 			p.mu.Lock()
-			p.running = false
+			p.cmd, p.running = nil, false
 			stopped := p.stopped
 			p.mu.Unlock()
 			if stopped || !restart {
 				return
 			}
-			// Start it again, but not forever: an engine that keeps dying within a minute of
-			// starting has a cause a restart will not fix (a bad file, no memory, a broken
-			// driver). After five such ends in a row it stays down, and its log says why.
-			if time.Since(started) < time.Minute {
-				quick++
-			} else {
-				quick = 0
+			// Start it again, but not forever: an engine that keeps ending has a cause a restart
+			// will not fix (a bad file, no memory, a broken driver), however long each load takes.
+			// After five ends within ten minutes it stays down, and its log says why.
+			now := time.Now()
+			ends = append(ends, now)
+			for len(ends) > 0 && now.Sub(ends[0]) > 10*time.Minute {
+				ends = ends[1:]
 			}
-			if quick >= 5 {
-				fmt.Fprintf(logf, "\n[potluck] %s ended %d times in a row within a minute of starting; not starting it again\n", name, quick)
+			if len(ends) >= 5 {
+				fmt.Fprintf(logf, "\n[potluck] %s ended %d times within ten minutes; not starting it again\n", name, len(ends))
 				return
 			}
-			wait := time.Second << quick // 1, 2, 4, 8, 16 seconds
+			wait := time.Second << (len(ends) - 1) // 1, 2, 4, 8 seconds
 			fmt.Fprintf(logf, "\n[potluck] %s stopped, starting it again in %s\n", name, wait)
 			time.Sleep(wait)
 			p.mu.Lock()

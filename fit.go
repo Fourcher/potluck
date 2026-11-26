@@ -33,14 +33,21 @@ type fitOutcome struct {
 	VisionCPU bool
 	ExpertCPU []int
 	Measured  bool   // false: the engine could not be asked; the plan's estimate stands
+	Short     int64  // MiB missing at the closest size tried, when nothing fits
 	Note      string // for the progress list
 }
+
+// hostBudget is the key in fitStart's budget for this computer's own memory (not a card):
+// what it lends, in MiB. Left out when the plan reads part of the model from the disk on
+// purpose, or the memory is the graphics chip's (a Mac).
+const hostBudget = "@host"
 
 // fitStart checks a one-computer start against the engine's own report and, if it does not
 // fit, finds the closest start that does: first a smaller prompt batch (a little slower
 // reading, same conversation size), then, when the size was chosen automatically, a smaller
 // conversation. The image add-on goes on the card only when there is room left for it.
-// When nothing fits, the original start stands and the engine's own error will say why.
+// When nothing fits, the outcome says by how much (Short) and the start is not loaded: past
+// a card's or a computer's memory an engine runs out, and on a Mac that froze the computer.
 //
 // allExperts lists every layer with experts: when the plan put some experts on the card, the
 // card can have them back in memory (slower writing) before the prompt batch shrinks.
@@ -60,6 +67,7 @@ func fitStart(measure measurer, node string, req StartHeadReq, auto bool, vision
 	}
 	keep := fitOutcome{Ctx: req.Ctx, UBatch: req.UBatch, ExpertCPU: req.ExpertCPU}
 	first := true
+	var least int64 // the smallest shortfall seen
 	for _, c := range sizes {
 		for _, experts := range placements {
 			for _, ub := range []int{0, 256, 128} {
@@ -76,6 +84,9 @@ func fitStart(measure measurer, node string, req StartHeadReq, auto bool, vision
 				first = false
 				short := cardShortMiB(res, 0, budget)
 				if short > 0 {
+					if least == 0 || short < least {
+						least = short
+					}
 					continue
 				}
 				out := fitOutcome{Ctx: c, UBatch: ub, ExpertCPU: experts, Measured: true}
@@ -106,8 +117,9 @@ func fitStart(measure measurer, node string, req StartHeadReq, auto bool, vision
 			}
 		}
 	}
-	keep.Note = "The engine reports it will not fit at any size tried"
 	keep.Measured = !first
+	keep.Short = least
+	keep.Note = fmt.Sprintf("The engine reports it will not fit at any size tried (%s short)", humanBytes(least<<20))
 	return keep
 }
 
@@ -141,6 +153,11 @@ func cardShortMiB(res MeasureRes, extra int64, budget map[string]int64) int64 {
 		if b := budget[n]; b > 0 && self+cardMarginMiB > b {
 			short = max(short, self+cardMarginMiB-b)
 		}
+	}
+	// This computer's own memory: what the engine keeps there (the layers and experts left
+	// off the card, the image add-on on the processor) against what it lends.
+	if b := budget[hostBudget]; b > 0 && res.Host.Self+cardMarginMiB > b {
+		short = max(short, res.Host.Self+cardMarginMiB-b)
 	}
 	return short
 }

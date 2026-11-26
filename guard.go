@@ -37,11 +37,54 @@ type GuardEvent struct {
 	Why string    `json:"why"`
 }
 
-func (a *Agent) guardLoop() {
-	bad := 0
+// guardScan reads the engines' logs for out-of-memory lines.
+type guardScan struct {
 	// How far each engine's log has been read, by engine (not by file name: a new engine
 	// writes a new log at the same path, and must be read from its start).
-	logOffsets := map[*proc]int64{}
+	offsets map[*proc]int64
+	// Engines whose log was read once more after they ended: an engine that runs out of
+	// memory often exits before the next check, and its last lines are the reason.
+	readAfterEnd map[*proc]bool
+}
+
+func newGuardScan() *guardScan {
+	return &guardScan{offsets: map[*proc]int64{}, readAfterEnd: map[*proc]bool{}}
+}
+
+// oom returns a new out-of-memory line from p's log: while it runs, and once more after it
+// has ended.
+func (g *guardScan) oom(p *proc) string {
+	if p == nil {
+		return ""
+	}
+	if !p.Running() {
+		if g.readAfterEnd[p] {
+			return ""
+		}
+		g.readAfterEnd[p] = true
+	} else {
+		delete(g.readAfterEnd, p) // running again (a restart): read it again when it ends
+	}
+	return newOOMLine(p, g.offsets)
+}
+
+// forget drops engines that are gone.
+func (g *guardScan) forget(live map[*proc]bool) {
+	for p := range g.offsets {
+		if !live[p] {
+			delete(g.offsets, p)
+		}
+	}
+	for p := range g.readAfterEnd {
+		if !live[p] {
+			delete(g.readAfterEnd, p)
+		}
+	}
+}
+
+func (a *Agent) guardLoop() {
+	bad := 0
+	g := newGuardScan()
 	for {
 		time.Sleep(time.Second)
 		a.mu.Lock()
@@ -51,31 +94,17 @@ func (a *Agent) guardLoop() {
 			aux[name] = e.proc
 		}
 		a.mu.Unlock()
-		auxUp := false
-		for _, p := range aux {
-			auxUp = auxUp || p.Running()
-		}
-		if !rpc.Running() && !head.Running() && !auxUp {
-			bad = 0
-			clear(logOffsets)
-			continue
-		}
 		live := map[*proc]bool{rpc: true, head: true}
 		for _, p := range aux {
 			live[p] = true
 		}
-		for p := range logOffsets { // forget engines that are gone
-			if !live[p] {
-				delete(logOffsets, p)
-			}
-		}
+		g.forget(live)
 		// 1. An engine says an allocation failed: stop it now. On a Mac a graphics chip that
-		// runs out of memory can take the window server down with it if it keeps trying.
+		// runs out of memory can take the window server down with it if it keeps trying. One
+		// that already ended of it is reported the same way, so the main computer learns
+		// how much this computer could hold.
 		for _, p := range []*proc{rpc, head} {
-			if p == nil || !p.Running() {
-				continue
-			}
-			if line := newOOMLine(p, logOffsets); line != "" {
+			if line := g.oom(p); line != "" {
 				a.guardStop("the AI engine ran out of memory (" + line + ")")
 				bad = 0
 				break
@@ -84,11 +113,17 @@ func (a *Agent) guardLoop() {
 		// The extra engines (the Potluck helper's model, crew members) are watched the same
 		// way; one that runs out is stopped on its own, leaving the main model alone.
 		for name, p := range aux {
-			if p.Running() {
-				if line := newOOMLine(p, logOffsets); line != "" {
-					a.guardStopAux(name, "it ran out of memory ("+line+")")
-				}
+			if line := g.oom(p); line != "" {
+				a.guardStopAux(name, "it ran out of memory ("+line+")")
 			}
+		}
+		auxUp := false
+		for _, p := range aux {
+			auxUp = auxUp || p.Running()
+		}
+		if !rpc.Running() && !head.Running() && !auxUp {
+			bad = 0
+			continue
 		}
 		// 2. The system as a whole has run out of memory and stays out: stop the main model's
 		// engines, or the extra engines when they are all that is running.
@@ -116,6 +151,9 @@ func (a *Agent) guardLoop() {
 func (a *Agent) guardStopAux(name, why string) {
 	a.mu.Lock()
 	e := a.aux[name]
+	if e != nil {
+		e.guarded = true
+	}
 	a.mu.Unlock()
 	if e != nil {
 		if f, err := os.OpenFile(e.proc.logPath, os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
@@ -156,7 +194,8 @@ func newOOMLine(p *proc, offsets map[*proc]int64) string {
 	n, _ := f.ReadAt(buf, from)
 	offsets[p] = from + int64(n)
 	for _, line := range strings.Split(string(buf[:n]), "\n") {
-		if oomInLog.MatchString(line) {
+		// Not the guard's own note of why it stopped the engine.
+		if oomInLog.MatchString(line) && !strings.HasPrefix(strings.TrimSpace(line), "[potluck]") {
 			line = strings.TrimSpace(line)
 			if len(line) > 160 {
 				line = line[:160]
@@ -179,4 +218,13 @@ func (a *Agent) guardStop(why string) {
 		fmt.Fprintf(f, "%s stopped the engine: %s\n", ev.At.Format(time.RFC3339), why)
 		f.Close()
 	}
+}
+
+// clearGuard forgets the guard's last event when a new start begins here, so what the main
+// computer reads afterwards is about this start, never an earlier one. (The two computers'
+// clocks are never compared: they may differ by minutes.)
+func (a *Agent) clearGuard() {
+	a.mu.Lock()
+	a.guard = nil
+	a.mu.Unlock()
 }

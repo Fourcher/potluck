@@ -22,11 +22,13 @@ func (h *Host) guardWatch() {
 	for {
 		time.Sleep(3 * time.Second)
 		h.mu.Lock()
-		phase, since, plan := h.cluster.Phase, h.cluster.Since, h.cluster.Plan
+		phase, plan := h.cluster.Phase, h.cluster.Plan
 		var ids []string
-		if phase == "running" || phase == "starting" {
-			for id, n := range h.nodes {
-				if n.Online {
+		if (phase == "running" || phase == "starting") && plan != nil {
+			// The computers in this start: each clears its guard's event when it is asked to
+			// start, so an event there now is about this start.
+			for _, id := range planIDs(plan) {
+				if n := h.nodes[id]; n != nil && n.Online {
 					ids = append(ids, id)
 				}
 			}
@@ -34,7 +36,7 @@ func (h *Host) guardWatch() {
 		h.mu.Unlock()
 		for _, id := range ids {
 			var ev *GuardEvent
-			if err := h.call(id, "guard", nil, &ev, 5*time.Second); err != nil || ev == nil || ev.At.Before(since) {
+			if err := h.call(id, "guard", nil, &ev, 5*time.Second); err != nil || ev == nil || !h.newGuardEvent(id, ev) {
 				continue
 			}
 			h.guardTripped(id, ev, plan)
@@ -43,7 +45,44 @@ func (h *Host) guardWatch() {
 	}
 }
 
+// planIDs is every computer a plan uses: the head and each one holding a share.
+func planIDs(p *Plan) []string {
+	ids := []string{p.Head}
+	for _, s := range p.Shares {
+		if s.ID != p.Head {
+			ids = append(ids, s.ID)
+		}
+	}
+	return ids
+}
+
+// newGuardEvent says whether this event from a computer has not been acted on yet. Events
+// are told apart by the time the computer wrote on them, only ever compared with that same
+// computer's earlier events.
+func (h *Host) newGuardEvent(id string, ev *GuardEvent) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.guardSeen == nil {
+		h.guardSeen = map[string]time.Time{}
+	}
+	if h.guardSeen[id].Equal(ev.At) {
+		return false
+	}
+	h.guardSeen[id] = ev.At
+	return true
+}
+
 func (h *Host) guardTripped(id string, ev *GuardEvent, plan *Plan) {
+	h.learnCeiling(id, ev, plan)
+	h.Stop()
+	h.mu.Lock()
+	h.cluster.Phase, h.cluster.Error = "error", h.guardWhy
+	h.mu.Unlock()
+}
+
+// learnCeiling remembers how much a computer held when its guard stopped it, and says so
+// in guardWhy.
+func (h *Host) learnCeiling(id string, ev *GuardEvent, plan *Plan) {
 	h.mu.Lock()
 	name := "A computer"
 	if n := h.nodes[id]; n != nil {
@@ -81,10 +120,6 @@ func (h *Host) guardTripped(id string, ev *GuardEvent, plan *Plan) {
 			cf.Ceilings[id] = *ceil
 		})
 	}
-	h.Stop()
-	h.mu.Lock()
-	h.cluster.Phase, h.cluster.Error = "error", h.guardWhy
-	h.mu.Unlock()
 }
 
 // capByCeiling trims a computer's offer to what it held without running out (see above).

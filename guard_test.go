@@ -239,3 +239,23 @@ func TestSoloLoop(t *testing.T) {
 		}
 	}
 }
+
+// An engine that ran out of memory and ended between two checks is still reported, once;
+// the guard's own note in the log is not taken for a new one.
+func TestGuardReadsEndedEngine(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "head.log")
+	_ = os.WriteFile(log, []byte("loading\nggml_metal: error: insufficient memory\n"), 0o644)
+	p := &proc{name: "head", logPath: log} // not running: it already ended
+	g := newGuardScan()
+	if line := g.oom(p); !strings.Contains(line, "insufficient memory") {
+		t.Fatalf("an engine that ended of it was not reported: %q", line)
+	}
+	if line := g.oom(p); line != "" {
+		t.Fatalf("reported twice: %q", line)
+	}
+	q := &proc{name: "aux", logPath: filepath.Join(t.TempDir(), "aux.log")}
+	_ = os.WriteFile(q.logPath, []byte("[potluck] the guard stopped this engine: it ran out of memory (x)\n"), 0o644)
+	if line := g.oom(q); line != "" {
+		t.Fatalf("the guard's own note was taken for a new one: %q", line)
+	}
+}

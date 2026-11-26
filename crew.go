@@ -30,6 +30,7 @@ type CrewMember struct {
 	Note     string    `json:"note,omitempty"`
 	Error    string    `json:"error,omitempty"`
 	Since    time.Time `json:"since"`
+	Guarded  bool      `json:"guarded,omitempty"` // the memory guard stopped it: started again only by the person
 	bytes    int64     // memory it holds on its computer
 	cancel   context.CancelFunc
 }
@@ -41,6 +42,9 @@ type CrewSaved struct {
 	Node  string   `json:"node"`
 	Model ModelRef `json:"model"`
 	Ctx   int      `json:"ctx"`
+	// The memory guard stopped it: it is not brought back by itself, even after a restart,
+	// until the person starts it again.
+	Guarded bool `json:"guarded,omitempty"`
 }
 
 var errCrewStopped = errors.New("stopped")
@@ -230,18 +234,26 @@ func (h *Host) startCrew(ctx context.Context, c *CrewMember) error {
 	if ngl > info.EngineLayers() {
 		ngl = 999
 	}
-	if err := h.call(c.Node, "start_aux", StartAuxReq{Name: c.Name, File: model.File, Ctx: c.Ctx, NGL: ngl, ExpertCPU: plan.ExpertCPU, KVKeyQ8: plan.KVKeyQ8, Sampling: samplingArgs(info)}, nil, time.Minute); err != nil {
-		return err
-	}
 	// Stopped while loading, or before this start was sent: take its engine down again (the
 	// stop may have reached the computer before the start did).
 	stopIt := func() error {
 		_ = h.call(c.Node, "stop_aux", map[string]string{"name": c.Name}, nil, 30*time.Second)
 		return errCrewStopped
 	}
+	// From here on, a start that does not end ready takes its engine down: extra engines
+	// restart themselves, and one left behind holds memory the next plan gives to others.
+	ready := false
+	defer func() {
+		if !ready {
+			_ = stopIt()
+		}
+	}()
+	if err := h.call(c.Node, "start_aux", StartAuxReq{Name: c.Name, File: model.File, Ctx: c.Ctx, NGL: ngl, ExpertCPU: plan.ExpertCPU, KVKeyQ8: plan.KVKeyQ8, Sampling: samplingArgs(info)}, nil, time.Minute); err != nil {
+		return err
+	}
 	for deadline := time.Now().Add(30 * time.Minute); time.Now().Before(deadline); time.Sleep(3 * time.Second) {
 		if !current() {
-			return stopIt()
+			return errCrewStopped
 		}
 		var st AuxStatus
 		if err := h.call(c.Node, "aux_status", map[string]string{"name": c.Name}, &st, 20*time.Second); err != nil {
@@ -249,15 +261,15 @@ func (h *Host) startCrew(ctx context.Context, c *CrewMember) error {
 		}
 		if st.Ready {
 			if !current() {
-				return stopIt()
+				return errCrewStopped
 			}
+			ready = true
 			return nil
 		}
 		if !st.Running {
 			return errors.New("the engine stopped while loading: " + st.Log)
 		}
 	}
-	_ = stopIt()
 	return errors.New("loading took too long")
 }
 
@@ -310,11 +322,23 @@ func (h *Host) crewWatch() {
 			if st.Log != "" {
 				why += ": " + st.Log
 			}
+			if st.Guarded {
+				why += ". It ran out of memory, so Potluck will not start it again by itself: start it with a smaller conversation size, or on another computer"
+			}
 			h.mu.Lock()
 			if m := h.crew[c.Name]; m != nil && m.Phase == "running" {
-				m.Phase, m.Error = "error", why
+				m.Phase, m.Error, m.Guarded = "error", why, st.Guarded
 			}
 			h.mu.Unlock()
+			if st.Guarded {
+				h.cfg.Update(func(cf *Config) {
+					for i := range cf.Crew {
+						if cf.Crew[i].Name == c.Name {
+							cf.Crew[i].Guarded = true
+						}
+					}
+				})
+			}
 		}
 	}
 }
@@ -348,12 +372,18 @@ func (h *Host) crewKeep() {
 			online[s.Node] = up
 			var phase string
 			var since time.Time
+			guarded := s.Guarded
 			if c := h.crew[s.Name]; c != nil {
 				phase, since = c.Phase, c.Since
+				guarded = guarded || c.Guarded
 			}
 			h.mu.Unlock()
 			switch {
-			case phase == "running" && time.Since(since) > 10*time.Minute:
+			case guarded:
+				// It ran out of memory: starting it again would do the same (that is how the
+				// Mac mini froze). The person starts it again, with less.
+				continue
+			case phase == "running" && time.Since(since) > time.Hour:
 				t.fails = 0
 				continue
 			case phase == "starting" || phase == "running":

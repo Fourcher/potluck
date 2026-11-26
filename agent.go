@@ -586,6 +586,7 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		return nil, nil
 
 	case "start_rpc":
+		a.clearGuard()
 		return a.startRPC()
 
 	case "measure_head":
@@ -600,6 +601,7 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		if err := json.Unmarshal(raw, &in); err != nil {
 			return nil, err
 		}
+		a.clearGuard()
 		return a.startHead(in)
 
 	case "status":
