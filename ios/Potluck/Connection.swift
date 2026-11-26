@@ -330,6 +330,27 @@ final class PotluckClient: @unchecked Sendable {
         try await post("/phone/answer", ["session": session, "question": question, "answer": answer])
     }
 
+    // MARK: tasks: read them and tell one to carry on (the computer decides what it may do)
+
+    func tasks() async throws -> [PhoneTask] {
+        if isDemo { return [] }
+        struct R: Decodable { let tasks: [PhoneTask]? }
+        let r: R = try await get("/phone/tasks")
+        return r.tasks ?? []
+    }
+
+    func task(_ id: String) async throws -> PhoneTask {
+        try await get("/phone/tasks/\(id)")
+    }
+
+    func taskMessage(_ id: String, _ text: String) async throws {
+        try await post("/phone/tasks/\(id)/message", ["text": text])
+    }
+
+    func taskStop(_ id: String) async throws {
+        try await post("/phone/tasks/\(id)/stop", [:])
+    }
+
     func registerPush(token: String, development: Bool) async throws {
         if isDemo { return }
         try await post("/phone/push", ["token": token, "env": development ? "development" : "production"])
@@ -433,6 +454,21 @@ enum Keychain {
 
 
 /// Something a task running in Potluck is waiting on: yes, no, or an answer in your own words.
+struct PhoneTask: Decodable, Identifiable, Equatable {
+    struct Msg: Decodable, Equatable, Identifiable {
+        let role: String
+        let text: String
+        var id: String { role + String(text.hashValue) }
+    }
+    let id: String
+    let title: String
+    let status: String
+    let error: String?
+    let report: String?
+    let question: TaskQuestion?
+    let messages: [Msg]?
+}
+
 struct TaskQuestion: Codable, Identifiable, Equatable {
     let id: String
     let session: String

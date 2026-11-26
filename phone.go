@@ -225,6 +225,40 @@ func (h *Host) phoneHandler() http.Handler {
 				c.editPhone(id, func(p *PhoneKey) { p.PushToken, p.PushEnv = in.Token, in.Env })
 			})
 			writeJSON(w, map[string]bool{"ok": true})
+		case r.URL.Path == "/phone/tasks" && r.Method == http.MethodGet:
+			writeJSON(w, map[string]any{"tasks": h.sessionStore().phoneTasks()})
+		case strings.HasPrefix(r.URL.Path, "/phone/tasks/"):
+			// One task: read it, add a message to it (it carries on under the permissions it
+			// was given on the computer), or stop it. A phone starts no new work this way.
+			st := h.sessionStore()
+			tid, action, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/phone/tasks/"), "/")
+			s := st.get(tid)
+			if s == nil || s.Kind == "helper" {
+				http.NotFound(w, r)
+				return
+			}
+			switch {
+			case action == "" && r.Method == http.MethodGet:
+				writeJSON(w, st.phoneTask(s))
+			case action == "message" && r.Method == http.MethodPost:
+				var in struct {
+					Text string `json:"text"`
+				}
+				if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&in); err != nil || strings.TrimSpace(in.Text) == "" {
+					fail(w, errors.New("write a message"))
+					return
+				}
+				if err := st.send(s, in.Text); err != nil {
+					fail(w, err)
+					return
+				}
+				writeJSON(w, map[string]bool{"ok": true})
+			case action == "stop" && r.Method == http.MethodPost:
+				st.stop(s)
+				writeJSON(w, map[string]bool{"ok": true})
+			default:
+				http.NotFound(w, r)
+			}
 		case phoneAPI[r.URL.Path] && chat != nil:
 			// Under the same rules as any other device: Potluck's own models only, never the
 			// person's (often paid) external AI connections, which stay with this computer.
@@ -358,4 +392,74 @@ func (c *Config) editPhone(id string, f func(*PhoneKey)) {
 	}
 	f(&p)
 	c.Phones[id] = p
+}
+
+// PhoneTask is a task as the phone shows it: what it is doing, its report, its last words.
+type PhoneTask struct {
+	ID       string    `json:"id"`
+	Title    string    `json:"title"`
+	Status   string    `json:"status"`
+	Error    string    `json:"error,omitempty"`
+	Updated  time.Time `json:"updated"`
+	Report   string    `json:"report,omitempty"`
+	Question *Question `json:"question,omitempty"`
+	Messages []PhoneMsg `json:"messages,omitempty"`
+}
+
+type PhoneMsg struct {
+	Role string `json:"role"` // user | assistant | step (a tool the task used)
+	Text string `json:"text"`
+}
+
+// phoneTasks lists the tasks, newest first (not the Potluck helper's own conversations).
+func (st *sessionStore) phoneTasks() []PhoneTask {
+	st.mu.Lock()
+	list := make([]*Session, 0, len(st.sessions))
+	for _, s := range st.sessions {
+		list = append(list, s)
+	}
+	st.mu.Unlock()
+	var out []PhoneTask
+	for _, s := range list {
+		s.mu.Lock()
+		if s.Kind != "helper" {
+			out = append(out, PhoneTask{ID: s.ID, Title: s.Title, Status: s.Status, Error: s.Error, Updated: s.Updated, Report: firstLine(s.Report), Question: s.Question})
+		}
+		s.mu.Unlock()
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Updated.After(out[j].Updated) })
+	if len(out) > 50 {
+		out = out[:50]
+	}
+	return out
+}
+
+// phoneTask is one task with its latest messages (tool results shortened to the tool's name).
+func (st *sessionStore) phoneTask(s *Session) PhoneTask {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := PhoneTask{ID: s.ID, Title: s.Title, Status: s.Status, Error: s.Error, Updated: s.Updated, Report: s.Report, Question: s.Question}
+	msgs := s.Messages
+	if len(msgs) > 60 {
+		msgs = msgs[len(msgs)-60:]
+	}
+	for _, m := range msgs {
+		switch m.Role {
+		case "user":
+			t.Messages = append(t.Messages, PhoneMsg{"user", trimTo(m.Content, 4000)})
+		case "assistant":
+			if strings.TrimSpace(m.Content) != "" {
+				t.Messages = append(t.Messages, PhoneMsg{"assistant", trimTo(m.Content, 8000)})
+			}
+			for _, c := range m.Calls {
+				t.Messages = append(t.Messages, PhoneMsg{"step", c.Name + " " + trimTo(c.Args, 160)})
+			}
+		}
+	}
+	return t
+}
+
+func firstLine(s string) string {
+	l, _, _ := strings.Cut(s, "\n")
+	return l
 }

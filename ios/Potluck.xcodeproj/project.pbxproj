@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1A42E21141518B8BAE423AF1 /* TasksView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96068002E0654C1F2017B03B /* TasksView.swift */; };
 		2785446FE5E6ED4E1C669F5D /* ScreensTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0B0EF5DB61EA1FC61A6C897 /* ScreensTests.swift */; };
 		350F91AB645880288AABED1C /* PairView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F35E0FF40C74F0576FBEB727 /* PairView.swift */; };
 		3FED520E5BDF0588C2C64616 /* Sheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88FA9445D5CBB10AA015AEFF /* Sheets.swift */; };
@@ -36,6 +37,7 @@
 		5A1C2E1B8CA33B2C454687FE /* Markdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Markdown.swift; sourceTree = "<group>"; };
 		74195ED9694CDC1F323B3C13 /* Potluck.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Potluck.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		88FA9445D5CBB10AA015AEFF /* Sheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sheets.swift; sourceTree = "<group>"; };
+		96068002E0654C1F2017B03B /* TasksView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TasksView.swift; sourceTree = "<group>"; };
 		9A00FC8EC8EBAF5AC83BE792 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B111BC0DD755FF8FA2F25834 /* Questions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Questions.swift; sourceTree = "<group>"; };
 		B2BFA04A4B9E09375407F6AF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -81,6 +83,7 @@
 				CB765A4C926AC3C5BCBE26E7 /* PrivacyInfo.xcprivacy */,
 				B111BC0DD755FF8FA2F25834 /* Questions.swift */,
 				88FA9445D5CBB10AA015AEFF /* Sheets.swift */,
+				96068002E0654C1F2017B03B /* TasksView.swift */,
 			);
 			path = Potluck;
 			sourceTree = "<group>";
@@ -198,6 +201,7 @@
 				E53EBCD3F2C1E861B37969CF /* PotluckApp.swift in Sources */,
 				AF0CEAF157A8C229C65F440A /* Questions.swift in Sources */,
 				3FED520E5BDF0588C2C64616 /* Sheets.swift in Sources */,
+				1A42E21141518B8BAE423AF1 /* TasksView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

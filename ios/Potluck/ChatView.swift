@@ -9,6 +9,7 @@ struct ChatView: View {
     @State private var importing = false
     @State private var showChats = false
     @State private var showModels = false
+    @State private var showTasks = false
     @State private var note: String?
     @FocusState private var focused: Bool
 
@@ -58,6 +59,11 @@ struct ChatView: View {
                     .accessibilityLabel("Chats and settings")
             }
             ToolbarItem(placement: .topBarTrailing) {
+                Button { showTasks = true } label: { Image(systemName: "checklist") }
+                    .accessibilityLabel("Tasks")
+                    .disabled(model.isDemo)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Button { model.newChat(); draft = ""; attachments = []; focused = true } label: { Image(systemName: "square.and.pencil") }
                     .accessibilityLabel("New chat")
                     .disabled(model.current?.messages.isEmpty ?? true)
@@ -65,6 +71,7 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showChats) { ChatsSheet() }
         .sheet(isPresented: $showModels) { ModelsSheet() }
+        .sheet(isPresented: $showTasks) { TasksSheet() }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.plainText, .text, .sourceCode, .json, .commaSeparatedText, .xml, .html, .pdf, .data],
                       allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { add(urls) }
