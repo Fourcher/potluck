@@ -73,6 +73,20 @@ Open `http://127.0.0.1:7720` on the main computer (or "Open chat" in the control
 
 Two things make it quick on slow hardware. Follow-up messages read only what is new: for Qwen-style models the page sends the conversation back exactly as it was written, where the standard route made the engine read every earlier token again on every turn (measured: 23 new tokens instead of 78). And there are no hidden extra requests, such as asking the model for a title.
 
+## Tasks: work that keeps going
+
+Local models are slow, so long work runs as a **task**: started from the chat page's Tasks list (with a project folder or without), it runs inside Potluck, not the browser, and keeps going with the page closed. It plans, reads and edits files, runs commands and tests, uses connectors, the browser and the screen, and hands sub-tasks to crew members on your other computers.
+
+- **Permissions up front.** At the start a task asks once for everything it is likely to need; yes is kept for the project's later tasks. Approve-everything is there too, after a warning.
+- **Questions reach your phone** with Yes, No and Reply. If nobody answers within 30 minutes (a setting; or wait for ever), the task carries on: it decides its own questions as safely as it can, leaves out anything that needed approval, and lists both in its report.
+- **Messages while it works** are kept for its next step, so you never stop a long answer to add a note.
+- **A report at the end** of every run, made by Potluck from what actually happened: time, steps, files changed, commands that failed, what it decided without you and what waits for approval. The phone gets an alert when a task that ran a while finishes or stops.
+- **See what it changed, and undo it.** Before a task first changes a file, the file as it was is kept; "See what it changed" shows each diff, with Undo for one file or all. Changes made by commands it ran are not kept, and the view says so. In a git repository a task starts knowing the branch, what is uncommitted and the latest commits.
+- **Scheduled tasks:** "every night at 2:00, pull, run the tests, fix what fails, report": what to do, the project, when (daily, weekdays, every few hours) and what it may do are set once. A run is skipped while the last one still goes; a time missed while the computer was off runs once when Potluck is back.
+- **It holds on.** A dropped connection or a model being reloaded is waited out and the step tried again; a model that was stopped is waited for (never started by the task). A task cut off by Potluck restarting carries on by itself. Tasks take turns for the model run by run, not step by step, so the engine never re-reads one task's conversation because of another's.
+- **Memory:** a task can save short notes (`remember`), for its project or everywhere, read at the start of every later task.
+- **Long results** (a whole file, a long build log) are cut to fit the model's memory and saved whole; the task reads the rest in parts.
+
 ## Ask Potluck
 
 Potluck has a helper of its own: a small model (LFM3 1.7B, 1.1 GB) that sets Potluck up and answers questions about it, using Potluck's own controls. Ask "install the best model my computers can run", "help me add my other computers", "put Potluck on my D drive", "connect my iPhone" or "use my LM Studio models too". It asks before anything big (downloading a model, stopping the running model, moving Potluck's folder). On a Mac: Ask Potluck… in the menu bar or the welcome window; on Windows and Linux: the Ask Potluck button in the control panel.
@@ -102,6 +116,7 @@ The Potluck iPhone app (in `ios/`) chats with the model running on your computer
 
 - The connection is encrypted with your computer's own certificate, and the app accepts no other: the pairing code carries its fingerprint. Each phone gets a key of its own; **Remove** in the control panel takes it away at once.
 - The phone can chat (with thinking on or off, and with text files or PDFs attached), see what is running, and start another model that is already on your computers. It cannot run commands on your computer or change settings: agent mode stays on the computer's own chat page, where each command is shown before it runs.
+- **Tasks:** follow every task running in Potluck: its state, report and latest messages; tell one to carry on (or add a note while it works), or stop it. Its questions arrive as alerts you answer from the lock screen, and an alert says when a long task finishes. The phone carries on a task under the permissions it was given on the computer; it starts no new work.
 - A model resting to free memory loads again with the phone's message.
 - Your computer only listens for phones while one is paired or a pairing code is showing, and only on its home-network and Tailscale addresses (port 7721). Chats are kept on the phone.
 
