@@ -72,7 +72,8 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 			go st.notifyEnd(s)
 		}
 	}()
-	cuts := 0 // answers in a row cut off at the length limit
+	cuts := 0    // answers in a row cut off at the length limit
+	retries := 0 // model failures in a row (waitForModel)
 	for steps := 0; ; steps++ {
 		if ctx.Err() != nil {
 			return
@@ -88,11 +89,16 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 		}
 		msg, err := st.complete(ctx, s)
 		if err != nil {
+			if ctx.Err() == nil && st.waitForModel(ctx, s, err, &retries) {
+				steps--
+				continue // the same step again, now that the model answers
+			}
 			if ctx.Err() == nil {
 				s.setStatus("error", err.Error())
 			}
 			return
 		}
+		retries = 0
 		st.addMsg(s, msg)
 		if msg.cut && len(msg.Calls) == 0 {
 			// Cut off at the length limit, not finished. Ask it to carry on (the next step
@@ -1184,4 +1190,59 @@ func (st *sessionStore) hasInbox(s *Session) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.Inbox) > 0
+}
+
+// Waiting out the model. A task runs for hours on computers that also live their lives: a
+// helper's link drops, the model is reloaded, the guard stops it. One such moment used to end
+// the task. Now it waits and tries the same step again; a model that was stopped is waited for
+// (up to half a day) but never started by the task: starting one again by itself is how a
+// computer that ran out of memory would run out again.
+var (
+	modelRetryBase = 30 * time.Second
+	modelWaitMax   = 12 * time.Hour
+)
+
+func (st *sessionStore) waitForModel(ctx context.Context, s *Session, err error, retries *int) bool {
+	msg := err.Error()
+	low := strings.ToLower(msg)
+	for _, lasting := range []string{"too long", "context", "exceed", "n_ctx", "invalid", "not valid", "no longer fits"} {
+		if strings.Contains(low, lasting) {
+			return false // the request itself is wrong: trying it again gives the same answer
+		}
+	}
+	if *retries >= 8 {
+		return false
+	}
+	*retries++
+	wait := min(modelRetryBase<<(*retries-1), 10*time.Minute)
+	s.setStatus("working", fmt.Sprintf("The model did not answer (%s); trying again in %s", trimTo(msg, 160), roundDur(wait)))
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(wait):
+	}
+	if s.Kind == "helper" {
+		return true
+	}
+	// A model that is not running and not resting will not answer: wait until one is.
+	deadline := time.Now().Add(modelWaitMax)
+	for {
+		h := st.host
+		h.mu.Lock()
+		phase, resting := h.cluster.Phase, h.asleep != nil
+		h.mu.Unlock()
+		if phase == "running" || phase == "starting" || resting {
+			s.setStatus("working", "")
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		s.setStatus("working", "Waiting for a model to be started in Potluck; the task carries on by itself once one runs")
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(min(15*time.Second, max(time.Until(deadline), time.Millisecond))):
+		}
+	}
 }

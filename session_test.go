@@ -216,6 +216,11 @@ func TestPermissionScopes(t *testing.T) {
 // An engine failure partway through an answer stops the task with the reason, instead of
 // ending it "done" with half an answer (found by the 2026-11-24 code review).
 func TestSessionStreamFailures(t *testing.T) {
+	// The task waits for the model and tries again; with no model coming back it then stops
+	// with the reason (short waits here).
+	ob, ow := modelRetryBase, modelWaitMax
+	modelRetryBase, modelWaitMax = time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { modelRetryBase, modelWaitMax = ob, ow })
 	for _, tc := range []struct{ reply, want string }{
 		{"error:out of memory", "out of memory"},
 		{"cut:half", "broke off"},
@@ -444,5 +449,27 @@ func TestMessageWhileWorking(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the model never saw the message (%d requests)", len(f.seen))
+	}
+}
+
+// A failure while the model runs is retried: the same step goes again and the task finishes.
+func TestSessionRetriesModelFailure(t *testing.T) {
+	ob := modelRetryBase
+	modelRetryBase = time.Millisecond
+	t.Cleanup(func() { modelRetryBase = ob })
+	f, st := withFakeModel(t, "cut:half", "text:all done")
+	st.host.cluster.Phase = "running"
+	s := st.create(nil, Policy{})
+	_ = st.send(s, "go")
+	waitStatus(t, s, "idle", "error")
+	s.mu.Lock()
+	status := s.Status
+	last := s.Messages[len(s.Messages)-1].Content
+	s.mu.Unlock()
+	f.mu.Lock()
+	n := len(f.seen)
+	f.mu.Unlock()
+	if status != "idle" || last != "all done" || n != 2 {
+		t.Fatalf("status %s, last %q, %d requests", status, last, n)
 	}
 }
