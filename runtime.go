@@ -44,6 +44,9 @@ type RuntimeSpec struct {
 	// Solo: the model runs on this computer alone, so an engine already installed here may
 	// be used instead (helpers need Potluck's own build on every computer).
 	Solo bool `json:"solo,omitempty"`
+	// For: what the engine is for: "" the main model, "aux:<slot>" the helper or a crew
+	// member. Stopping the main model cancels only its own jobs.
+	For string `json:"for,omitempty"`
 }
 
 func safeJoin(root, name string) (string, error) {
@@ -193,12 +196,19 @@ func simpleDownload(ctx context.Context, u, dest, sha string) error {
 
 // ensureRuntime installs the llama.cpp build described by spec and returns its folder.
 func (a *Agent) ensureRuntime(ctx context.Context, spec RuntimeSpec, note func(string)) (string, error) {
+	// One install at a time on a computer: the main model, the helper, a crew member and the
+	// early preparation can all ask at once, and share the same folder. A second asker waits
+	// and then finds the engine ready.
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
 	dir := filepath.Join(a.dir, "runtime", spec.Tag+"-"+spec.Variant)
 	if _, err := os.Stat(filepath.Join(dir, ".ok")); err == nil {
 		return dir, a.ensureGlibc(ctx, note)
 	}
 	_ = os.RemoveAll(dir)
-	tmp := filepath.Join(a.dir, "tmp")
+	// Its own download folder: an engine install and a disk-streaming install can run at
+	// once, and each removes only its own half-finished files (resumed after a restart).
+	tmp := filepath.Join(a.dir, "tmp", "engine-"+filepath.Base(dir))
 	if err := os.MkdirAll(tmp, 0o755); err != nil {
 		return "", err
 	}
@@ -254,11 +264,14 @@ func (a *Agent) ensureRuntime(ctx context.Context, spec RuntimeSpec, note func(s
 	if findBin(dir, "llama-server") == "" || findBin(dir, "ggml-rpc-server", "rpc-server") == "" {
 		return "", errors.New("the AI engine download is missing its programs")
 	}
-	if err := a.ensureGlibc(ctx, note); err != nil {
+	_ = os.RemoveAll(tmp)
+	// The engine is whole: mark it before the C library step (which has its own mark), so a
+	// failure there (its server unreachable) does not throw the engine away and download it
+	// again on every try. The early return above runs that step again.
+	if err := os.WriteFile(filepath.Join(dir, ".ok"), []byte(time.Now().Format(time.RFC3339)+"\n"), 0o644); err != nil {
 		return "", err
 	}
-	_ = os.RemoveAll(tmp)
-	return dir, os.WriteFile(filepath.Join(dir, ".ok"), []byte(time.Now().Format(time.RFC3339)+"\n"), 0o644)
+	return dir, a.ensureGlibc(ctx, note)
 }
 
 func max64(a, b int64) int64 {
@@ -292,6 +305,9 @@ func (a *Agent) ensureGlibc(ctx context.Context, note func(string)) error {
 		return err
 	}
 	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return fmt.Errorf("the Debian package list answered %s", res.Status)
+	}
 	gz, err := gzip.NewReader(res.Body)
 	if err != nil {
 		return err
@@ -437,15 +453,21 @@ func (p *proc) Stop() {
 	}
 	p.mu.Lock()
 	p.stopped = true
-	cmd := p.cmd
+	cmd := p.cmd // nil once it has ended: its process number may belong to another program by now
 	p.mu.Unlock()
 	if cmd != nil && cmd.Process != nil {
 		killTree(cmd.Process.Pid)
 		_ = cmd.Process.Kill()
 	}
+	// Wait for it to be gone, so its memory is free when the caller plans again. A kill that
+	// has not taken after half a minute is said so in the log rather than passed over.
 	select {
 	case <-p.done:
-	case <-time.After(8 * time.Second):
+	case <-time.After(30 * time.Second):
+		if f, err := os.OpenFile(p.logPath, os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+			fmt.Fprintf(f, "\n[potluck] %s did not end within 30 seconds of being stopped\n", p.name)
+			f.Close()
+		}
 	}
 }
 
@@ -529,43 +551,83 @@ func (a *Agent) startProc(name, rtDir, bin string, args []string, restart, lowPr
 	build := func() *exec.Cmd {
 		cmd := a.engineCmd(bin, args...)
 		cmd.Stdout, cmd.Stderr = logf, logf
+		tieToParent(cmd)
 		return cmd
 	}
 	first := make(chan error, 1)
 	go func() {
+		// The engine is tied to the thread that starts it on Linux (tieToParent), so this
+		// goroutine keeps its thread for the engine's whole life.
+		runtime.LockOSThread()
 		defer close(p.done)
 		defer logf.Close()
+		var ends []time.Time // when it ended, over the last ten minutes
 		for i := 0; ; i++ {
 			cmd := build()
+			// Starting and recording it happen together, after a last look at whether it was
+			// stopped: a Stop in between would otherwise kill the previous (already ended)
+			// engine and leave this one running, unwatched.
+			p.mu.Lock()
+			if p.stopped {
+				p.mu.Unlock()
+				if i == 0 {
+					first <- errors.New("stopped before it started")
+				}
+				return
+			}
 			err := cmd.Start()
+			if err == nil {
+				p.cmd, p.running = cmd, true
+			}
+			p.mu.Unlock()
 			if i == 0 {
 				first <- err
 			}
 			if err != nil {
+				if i > 0 {
+					fmt.Fprintf(logf, "[potluck] could not start %s again: %v\n", name, err)
+				}
 				return
 			}
-			p.mu.Lock()
-			p.cmd, p.running = cmd, true
-			p.mu.Unlock()
 			// Engines always run below normal priority. With the computer otherwise idle that
 			// costs nothing; when memory or the processor get tight, the desktop, remote logins
 			// and Potluck's guard still get their turn instead of freezing behind the engine.
 			// lowPrio (a pedal below 100%) used to be the only case; it now changes nothing.
 			_ = lowPrio
+			adoptEngine(cmd.Process.Pid)
 			lowerPriority(cmd.Process.Pid)
 			lastResort(cmd.Process.Pid)
 			noteEngine(cmd.Process.Pid, cmd.Path)
 			_ = cmd.Wait()
 			forgetEngine(cmd.Process.Pid)
 			p.mu.Lock()
-			p.running = false
+			p.cmd, p.running = nil, false
 			stopped := p.stopped
 			p.mu.Unlock()
 			if stopped || !restart {
 				return
 			}
-			fmt.Fprintf(logf, "\n[potluck] %s stopped, starting it again\n", name)
-			time.Sleep(time.Second)
+			// Start it again, but not forever: an engine that keeps ending has a cause a restart
+			// will not fix (a bad file, no memory, a broken driver), however long each load takes.
+			// After five ends within ten minutes it stays down, and its log says why.
+			now := time.Now()
+			ends = append(ends, now)
+			for len(ends) > 0 && now.Sub(ends[0]) > 10*time.Minute {
+				ends = ends[1:]
+			}
+			if len(ends) >= 5 {
+				fmt.Fprintf(logf, "\n[potluck] %s ended %d times within ten minutes; not starting it again\n", name, len(ends))
+				return
+			}
+			wait := time.Second << (len(ends) - 1) // 1, 2, 4, 8 seconds
+			fmt.Fprintf(logf, "\n[potluck] %s stopped, starting it again in %s\n", name, wait)
+			time.Sleep(wait)
+			p.mu.Lock()
+			stopped = p.stopped
+			p.mu.Unlock()
+			if stopped {
+				return
+			}
 		}
 	}()
 	if err := <-first; err != nil {

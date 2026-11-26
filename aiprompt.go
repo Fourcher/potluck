@@ -10,9 +10,9 @@ import (
 // the like) so it can use Potluck's model directly. It is written from live state, so the
 // addresses, model names and context size in it are the real ones. The same text is served at
 // /potluck/ai on the chat address, which the AI can read again later for fresh details.
-func (h *Host) aiGuide() string {
-	st := h.chatState(true)
-	models := h.chatModels()
+func (h *Host) aiGuide(owner, fromShare bool) string {
+	st := h.chatState(owner)
+	models := h.visibleModels(fromShare)
 	base := "http://127.0.0.1:" + strconv.Itoa(portChat)
 	shared := ""
 	if h.cfg.Get().ShareChat {
@@ -72,12 +72,11 @@ func (h *Host) aiGuide() string {
 	w("curl -s %s/v1/chat/completions -H 'Content-Type: application/json' --max-time 600 -d '{", base)
 	w("  \"model\": \"potluck\",")
 	w("  \"messages\": [{\"role\": \"user\", \"content\": \"Summarise this in 3 bullets: ...\"}],")
-	w("  \"chat_template_kwargs\": {\"enable_thinking\": false},")
-	w("  \"reasoning_budget_tokens\": 1")
+	w("  \"thinking\": \"off\"")
 	w("}'")
 	w("```")
 	w("- The answer is in choices[0].message.content. If the model reasons first, its reasoning is in choices[0].message.reasoning_content.")
-	w("- reasoning_budget_tokens caps the model's thinking: 1 for none (0 makes some models repeat themselves) (some models think at length otherwise, even with enable_thinking false). For harder questions set \"enable_thinking\": true with a budget such as 4096.")
+	w("- \"thinking\" is Potluck's one switch for reasoning first: \"off\", \"low\", \"medium\" or \"high\". Potluck turns it into what the loaded model understands. Use \"high\" for hard questions; it is slower.")
 	w("- Add \"stream\": true to stream the answer as server-sent events.")
 	w("- It accepts OpenAI-style \"tools\" for function calling, if the loaded model supports them.")
 	w("- Python: openai.OpenAI(base_url=\"%s/v1\", api_key=\"potluck\").chat.completions.create(model=\"potluck\", messages=[...])", base)

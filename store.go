@@ -30,6 +30,10 @@ type ModelRef struct {
 	// Vision is the model's image add-on (an "mmproj" file from the same repository), loaded
 	// with it on the computer running the model so it can see pictures and screenshots.
 	Vision *ModelPart `json:"vision,omitempty"`
+	// Unchecked says why the model's files could not be looked up on Hugging Face (so its
+	// checksum and its other pieces are unknown). A file already downloaded and verified
+	// still runs; a new download waits until they can be looked up.
+	Unchecked string `json:"unchecked,omitempty"`
 }
 
 // ModelPart is one file of a model that is split across several.
@@ -83,26 +87,31 @@ func (h *Host) recommended() string {
 	return recommendedRepo
 }
 
-// recommendedRepo is the model Potluck suggests first (starred in the model store).
+// recommendedRepo is the model Potluck suggests first when no catalog can be read at all; the
+// catalog built into Potluck (catalog/models-v2.json, made from catalog/picks.json) always has
+// picks, so this is a last resort, not a second list to keep in step.
 const recommendedRepo = "AtomicChat/Inkling-2-Mini-Uncensored-GGUF"
 
-// featured is the starting shelf: the recommended model, then popular open models from small
-// to very large.
-var featured = []struct{ Repo, Blurb string }{
-	{recommendedRepo, "Our pick to start with: Inkling 2 Mini, 26 billion parameters, whose smallest size runs on a 12 GB laptop. This version has had its refusals removed: it answers what it is asked."},
-	{"unsloth/gemma-4-12B-it-GGUF", "Small and quick. Runs on almost anything."},
-	{"unsloth/Qwen3.8-27B-GGUF", "Strong all-rounder."},
-	{"unsloth/gemma-4-26B-A4B-it-GGUF", "Fast for its size: only part of it runs per word."},
-	{"unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF", "Fast mixture-of-experts model, good first test."},
-	{"unsloth/Qwen3.6-35B-A3B-GGUF", "Good at tools and agent work."},
-	{"NousResearch/Hermes-4.3-36B-GGUF", "Large general model."},
-	{"unsloth/Qwen3.5-122B-A10B-GGUF", "Very large. Needs several computers pooled together."},
-}
-
 var (
-	treeCache   = map[string][]hfEntry{}
+	treeCache   = map[string]treeEntry{}
 	treeCacheMu sync.Mutex
 )
+
+// A repository's file list is kept for ten minutes: a file uploaded again under the same
+// name (a new quantisation) has a new checksum, and an old one would fail every download.
+const treeFor = 10 * time.Minute
+
+type treeEntry struct {
+	files []hfEntry
+	at    time.Time
+}
+
+// forgetTree drops a repository's file list, after a download did not match it.
+func forgetTree(repo string) {
+	treeCacheMu.Lock()
+	delete(treeCache, repo)
+	treeCacheMu.Unlock()
+}
 
 type hfEntry struct {
 	Path string `json:"path"`
@@ -114,9 +123,9 @@ type hfEntry struct {
 
 func hfTree(repo string) ([]hfEntry, error) {
 	treeCacheMu.Lock()
-	if t, ok := treeCache[repo]; ok {
+	if t, ok := treeCache[repo]; ok && time.Since(t.at) < treeFor {
 		treeCacheMu.Unlock()
-		return t, nil
+		return t.files, nil
 	}
 	treeCacheMu.Unlock()
 	var t []hfEntry
@@ -124,13 +133,14 @@ func hfTree(repo string) ([]hfEntry, error) {
 		return nil, err
 	}
 	treeCacheMu.Lock()
-	treeCache[repo] = t
+	treeCache[repo] = treeEntry{files: t, at: time.Now()}
 	treeCacheMu.Unlock()
 	return t, nil
 }
 
 var (
 	splitRe = regexp.MustCompile(`-(\d{5})-of-(\d{5})\.gguf$`)
+	shaHex  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	quantRe = regexp.MustCompile(`(?i)[-.]((?:UD-)?(?:IQ\d[_A-Z0-9]*|Q\d[_A-Z0-9]*|BF16|F16|F32|MXFP4[_A-Z0-9]*))\.gguf$`)
 )
 
@@ -161,7 +171,9 @@ func hfFiles(repo string) ([]StoreFile, error) {
 			} else {
 				f.Quant = strings.TrimSuffix(key[strings.LastIndex(key, "/")+1:], ".gguf")
 			}
-			if e.LFS != nil {
+			// A gated repository shows the checksum only to an account allowed to download it
+			// (otherwise "****…"); without it the file is not checked, so take only a real one.
+			if e.LFS != nil && shaHex.MatchString(e.LFS.OID) {
 				f.SHA256 = e.LFS.OID
 			}
 			byKey[key] = f
@@ -172,6 +184,26 @@ func hfFiles(repo string) ([]StoreFile, error) {
 	var out []StoreFile
 	for _, k := range order {
 		out = append(out, *byKey[k])
+	}
+	// Names with no standard size in them (e.g. "Model-Mix-16G"): show what tells them apart.
+	var plain []*StoreFile
+	for i := range out {
+		if quantRe.FindStringSubmatch(out[i].File) == nil {
+			plain = append(plain, &out[i])
+		}
+	}
+	if len(plain) > 1 {
+		pre := plain[0].Quant
+		for _, f := range plain[1:] {
+			for !strings.HasPrefix(f.Quant, pre) {
+				pre = pre[:len(pre)-1]
+			}
+		}
+		if i := strings.LastIndexAny(pre, "-_."); i > 0 {
+			for _, f := range plain {
+				f.Quant = f.Quant[i+1:]
+			}
+		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Size < out[j].Size })
 	// Drop stray small files that sit beside the real model (anything under a tenth of the biggest).
@@ -251,11 +283,6 @@ func (h *Host) storeSearch(source, q string) ([]StoreModel, error) {
 		for _, p := range cat.Picks {
 			out = append(out, StoreModel{Source: "hf", Repo: p.Repo, Blurb: p.Blurb, GoodFor: p.GoodFor, Sources: p.Sources, Section: "pick", Recommended: p.Repo == rec})
 		}
-		if len(out) == 0 {
-			for _, f := range featured {
-				out = append(out, StoreModel{Source: "hf", Repo: f.Repo, Blurb: f.Blurb, Section: "pick", Recommended: f.Repo == rec})
-			}
-		}
 		var wg sync.WaitGroup
 		for i := range out {
 			wg.Add(1)
@@ -289,7 +316,7 @@ func (h *Host) storeSearch(source, q string) ([]StoreModel, error) {
 	}
 	out := make([]StoreModel, 0, len(res))
 	for _, r := range res {
-		out = append(out, StoreModel{Source: "hf", Repo: r.ID, Downloads: r.Downloads, Likes: r.Likes, Recommended: r.ID == recommendedRepo})
+		out = append(out, StoreModel{Source: "hf", Repo: r.ID, Downloads: r.Downloads, Likes: r.Likes, Recommended: r.ID == h.recommended()})
 	}
 	return out, nil
 }
@@ -349,14 +376,18 @@ func resolveModel(ctx context.Context, m *ModelRef) error {
 		hfURL := func(path string) string {
 			return "https://huggingface.co/" + m.Repo + "/resolve/main/" + (&url.URL{Path: path}).EscapedPath()
 		}
-		if tree, err := hfTree(m.Repo); err == nil {
+		tree, err := hfTree(m.Repo)
+		m.Unchecked = ""
+		if err != nil {
+			m.Unchecked = err.Error()
+		} else {
 			m.Vision = nil
 			for _, pref := range []string{"f16", "bf16", ""} { // full precision first: it is small
 				for _, e := range tree {
 					low := strings.ToLower(e.Path)
 					if m.Vision == nil && strings.Contains(low, "mmproj") && strings.HasSuffix(low, pref+".gguf") {
 						sha := ""
-						if e.LFS != nil {
+						if e.LFS != nil && shaHex.MatchString(e.LFS.OID) {
 							sha = e.LFS.OID
 						}
 						m.Vision = &ModelPart{File: e.Path[strings.LastIndex(e.Path, "/")+1:], URL: hfURL(e.Path), Size: e.Size, SHA256: sha}
@@ -368,7 +399,7 @@ func resolveModel(ctx context.Context, m *ModelRef) error {
 			m.Parts, m.Size = nil, 0
 			for _, e := range tree {
 				sha := ""
-				if e.LFS != nil {
+				if e.LFS != nil && shaHex.MatchString(e.LFS.OID) {
 					sha = e.LFS.OID
 				}
 				switch {

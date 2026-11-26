@@ -56,6 +56,10 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "__engine-guard" {
+		runEngineGuard(os.Args[2:])
+		return
+	}
 	if desktopBefore != nil && desktopBefore() {
 		return
 	}
@@ -95,8 +99,14 @@ func main() {
 	// Already running? Just bring up its window.
 	if c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(portUI), 400*time.Millisecond); err == nil {
 		c.Close()
-		if res, err := (&http.Client{Timeout: 2 * time.Second}).Get(ui + "/api/state"); err == nil {
+		req, _ := http.NewRequest("GET", ui+"/api/state", nil)
+		req.Header.Set("X-Potluck", "1")
+		if res, err := (&http.Client{Timeout: 2 * time.Second}).Do(req); err == nil {
 			res.Body.Close()
+			if *noBrowser && desktopShow == nil {
+				fmt.Println("Potluck is already running: " + ui)
+				return
+			}
 			fmt.Println("Potluck is already running. Opening its control panel.")
 			if desktopShow != nil {
 				desktopShow(ui)

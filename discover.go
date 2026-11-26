@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -251,7 +253,17 @@ func fileKey(real string) string {
 
 var unsafeChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
-func safeName(s string) string { return strings.Trim(unsafeChars.ReplaceAllString(s, "_"), "_.") }
+// safeName makes a file or folder name from any text. It is never empty: a name with no
+// letters it can keep (written in Japanese, or just "!!") becomes "n-" and a short hash of
+// it, so it can never stand for its parent folder (a skill called "..." once meant the whole
+// skills folder) and two such names stay apart.
+func safeName(s string) string {
+	if n := strings.Trim(unsafeChars.ReplaceAllString(s, "_"), "_."); n != "" {
+		return n
+	}
+	sum := sha256.Sum256([]byte(s))
+	return "n-" + hex.EncodeToString(sum[:4])
+}
 
 // spotlightModels asks macOS's own file index for every .gguf file on the computer. It
 // answers in a fraction of a second and does not read the disk.
@@ -416,32 +428,15 @@ func walkDeep(ctx context.Context, root string, seen map[string]bool, out *[]can
 func headerOfFiles(paths []string) (*ModelInfo, error) {
 	var infos []*ModelInfo
 	for i, path := range paths {
-		st, err := os.Stat(path)
+		_, err := os.Stat(path)
 		if err != nil {
 			return nil, fmt.Errorf("%s is missing", filepath.Base(path))
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, err
 		}
 		hint := 0
 		if i > 0 {
 			hint = infos[0].Layers
 		}
-		var info *ModelInfo
-		for size := int64(8 << 20); ; size *= 4 {
-			if size > st.Size() {
-				size = st.Size()
-			}
-			buf := make([]byte, size)
-			if _, err = f.ReadAt(buf, 0); err != nil {
-				break
-			}
-			if info, err = parseGGUFPart(buf, st.Size(), hint); err == nil || !errors.Is(err, errShort) || size == st.Size() {
-				break
-			}
-		}
-		f.Close()
+		info, err := readHeaderFile(path, hint)
 		if err != nil {
 			return nil, fmt.Errorf("%s does not look like a model file: %w", filepath.Base(path), err)
 		}

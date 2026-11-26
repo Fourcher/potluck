@@ -69,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 center.add(UNNotificationRequest(identifier: q.id, content: c, trigger: nil))
             }
             engine.begin()
+            updater.beforeRestart = { [engine] in await engine.shutDown() }
             updater.checkSoon()
         }
     }
@@ -309,18 +310,51 @@ struct WebView: NSViewRepresentable {
     func updateNSView(_ v: WKWebView, context: Context) {}
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+        /// Only web and mail links go to the system: a file:// link to a program or an app in
+        /// a page the model wrote would otherwise start it with one click.
+        private func openOutside(_ u: URL) {
+            if ["http", "https", "mailto"].contains(u.scheme?.lowercased() ?? "") { NSWorkspace.shared.open(u) }
+        }
         // Links to other sites open in the person's browser; Potluck's own pages stay here.
+        // Saving a file (Export all chats, Export as Markdown) is a download, kept here.
         func webView(_ w: WKWebView, decidePolicyFor a: WKNavigationAction) async -> WKNavigationActionPolicy {
+            if a.shouldPerformDownload || ["blob", "data"].contains(a.request.url?.scheme ?? "") && a.navigationType == .linkActivated {
+                return .download
+            }
             if let u = a.request.url, a.navigationType == .linkActivated, u.host != "127.0.0.1", u.host != "localhost" {
-                NSWorkspace.shared.open(u)
+                openOutside(u)
                 return .cancel
             }
             return .allow
         }
         func webView(_ w: WKWebView, createWebViewWith c: WKWebViewConfiguration, for a: WKNavigationAction, windowFeatures f: WKWindowFeatures) -> WKWebView? {
-            if let u = a.request.url { NSWorkspace.shared.open(u) }
+            if let u = a.request.url { openOutside(u) }
             return nil
+        }
+        func webView(_ w: WKWebView, navigationAction a: WKNavigationAction, didBecome d: WKDownload) { d.delegate = self }
+        func webView(_ w: WKWebView, navigationResponse r: WKNavigationResponse, didBecome d: WKDownload) { d.delegate = self }
+        /// Where a download goes: the person picks, the way a browser asks.
+        func download(_ d: WKDownload, decideDestinationUsing r: URLResponse, suggestedFilename name: String) async -> URL? {
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = name
+            panel.canCreateDirectories = true
+            guard panel.runModal() == .OK, let url = panel.url else { return nil }
+            try? FileManager.default.removeItem(at: url) // the person chose to replace it
+            return url
+        }
+        // File and folder choosers (attachments in the chat): WebKit on the Mac shows none unless
+        // the app provides it.
+        func webView(_ w: WKWebView, runOpenPanelWith p: WKOpenPanelParameters, initiatedByFrame f: WKFrameInfo) async -> [URL]? {
+            let panel = NSOpenPanel()
+            panel.allowsMultipleSelection = p.allowsMultipleSelection
+            panel.canChooseDirectories = p.allowsDirectories
+            panel.canChooseFiles = true
+            return panel.runModal() == .OK ? panel.urls : nil
+        }
+        // The microphone, for dictation in the chat: only for Potluck's own pages on this computer.
+        func webView(_ w: WKWebView, decideMediaCapturePermissionsFor o: WKSecurityOrigin, initiatedBy f: WKFrameInfo, type: WKMediaCaptureType) async -> WKPermissionDecision {
+            (o.host == "127.0.0.1" || o.host == "localhost") && type == .microphone ? .grant : .deny
         }
         func webView(_ w: WKWebView, runJavaScriptConfirmPanelWithMessage m: String, initiatedByFrame f: WKFrameInfo) async -> Bool {
             let alert = NSAlert()

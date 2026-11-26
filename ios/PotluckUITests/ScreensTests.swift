@@ -70,5 +70,16 @@ final class ScreensTests: XCTestCase {
         sleep(1)
         shot("7-settings")
         app.buttons["Done"].firstMatch.tap()
+
+        // Tasks: the list, then the newest task.
+        app.buttons["Tasks"].tap()
+        sleep(3)
+        shot("8-tasks")
+        let first = app.cells.firstMatch
+        if first.waitForExistence(timeout: 5) {
+            first.tap()
+            sleep(3)
+            shot("9-task")
+        }
     }
 }

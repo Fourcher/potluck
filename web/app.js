@@ -15,7 +15,7 @@ let disk = { data: null, loading: false, sums: {} };   // what Potluck keeps on 
 let found = { data: null, loading: false, deep: false, error: "" };   // models other apps keep on this computer
 
 async function api(path, body) {
-  const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify(body) };
+  const opt = body === undefined ? { headers: { "X-Potluck": "1" } } : { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify(body) };
   const r = await fetch(path, opt);
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || "Something went wrong.");
@@ -63,10 +63,26 @@ function readLimits(box) {
   return { enabled: v("enabled").checked, pedal: +v("pedal").value, schedOn: v("schedOn").checked, schedStart: v("schedStart").value, schedEnd: v("schedEnd").value };
 }
 
-function progress(msg, done, total) {
+// rateOf follows a download's bytes between polls to say how fast it goes and how long is left
+// (smoothed, so one slow moment doesn't swing the estimate).
+const rates = {};
+function rateOf(key, done, total) {
+  const now = Date.now(), r = rates[key];
+  if (!r || done < r.done || total !== r.total) { rates[key] = { done, total, t: now, bps: 0 }; return ""; }
+  if (now - r.t >= 1500 && done > r.done) {
+    const bps = (done - r.done) * 1000 / (now - r.t);
+    r.bps = r.bps ? r.bps * 0.7 + bps * 0.3 : bps; r.done = done; r.t = now;
+  } else if (now - r.t > 20000 && done === r.done) return " · waiting for data…";
+  if (!r.bps || total <= done) return "";
+  const left = (total - done) / r.bps;
+  const t = left < 90 ? Math.max(1, Math.round(left)) + " s" : left < 5400 ? Math.round(left / 60) + " min" : (left / 3600).toFixed(1) + " h";
+  return ` · ${(r.bps / 1048576).toFixed(r.bps < 10485760 ? 1 : 0)} MB/s · ${t} left`;
+}
+function progress(msg, done, total, key) {
   if (!msg) return `<div class="status"></div>`;
   const pct = total > 0 ? Math.min(100, Math.round(done * 100 / total)) : -1;
-  return `<div class="status">${esc(msg)}${pct >= 0 ? ` · ${pct}%${total > 1048576 ? " of " + gb(total) : ""}` : ""}${pct >= 0 ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ""}</div>`;
+  const rate = pct >= 0 && pct < 100 && total > 1048576 ? rateOf(key || msg.replace(/[\d.,%]+/g, ""), done, total) : "";
+  return `<div class="status">${esc(msg)}${pct >= 0 ? ` · ${pct}%${total > 1048576 ? " of " + gb(total) : ""}${rate}` : ""}${pct >= 0 ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ""}</div>`;
 }
 
 // ---------- first run ----------
@@ -140,7 +156,8 @@ function nodeCard(n) {
     ${specs(i)}
     <div class="lend">${lend}</div>${slow}${profileLine(n)}
     ${limitsUI(i.id, L, n.isMain)}
-    ${progress(n.status, n.done, n.total)}
+    ${progress(n.status, n.done, n.total, n.info.id)}
+    ${n.prepareErr ? `<div class="err small">Its AI engine could not be set up: ${esc(n.prepareErr)}. Potluck tries again by itself, waiting longer each time.</div>` : ""}
     <div class="row small" style="margin-top:6px"><button class="link" data-a="rename" data-id="${esc(i.id)}" data-name="${esc(i.name)}">Rename</button>
       ${n.isMain ? "" : `<button class="link" data-a="forget" data-id="${esc(i.id)}" data-name="${esc(i.name)}">Remove</button>`}</div>
   </div>`;
@@ -191,12 +208,19 @@ function phonesView() {
   const ago = t => { if (!t) return "not connected yet"; const s = (Date.now() - new Date(t)) / 1000; return s < 90 ? "connected just now" : s < 3600 ? `last connected ${Math.round(s / 60)} minutes ago` : `last connected ${new Date(t).toLocaleString()}`; };
   const rows = paired.map(p => `<div class="file"><span class="q">${esc(p.name)}</span><span></span><span class="n muted small">Paired ${new Date(p.added).toLocaleDateString()} · ${ago(p.seen)}</span>
     <span class="row"><button class="btn sm quiet" data-a="phoneforget" data-id="${esc(p.id)}">Remove</button></span></div>`).join("");
-  const code = phones.code ? `<div class="row" style="gap:18px;align-items:flex-start;margin-top:10px"><img src="${phones.code.qr}" alt="Pairing code" width="220" height="220" style="image-rendering:pixelated;background:#fff;border-radius:8px;padding:6px">
-      <div class="small"><p><b>In the Potluck app on your iPhone, tap "Scan the pairing code" and point the camera at this code.</b></p>
-      <p class="muted" style="margin-top:6px">It works once, for ${phones.code.minutes} minutes. The phone will reach this computer at ${phones.code.addrs.map(esc).join(" or ")}${phones.code.addrs.some(a => a.startsWith("100.")) ? " (the 100. address works away from home through Tailscale)" : ""}.</p>
+  // One QR at a time: first the app's App Store page, then (once they have the app) the pairing code.
+  const c = phones.code;
+  const step = phones.step || "app";
+  const code = !c ? "" : step === "app" && c.appQR ? `<div class="row" style="gap:18px;align-items:flex-start;margin-top:10px"><img src="${c.appQR}" alt="QR code for the Potluck app on the App Store" width="220" height="220" style="image-rendering:pixelated;background:#fff;border-radius:8px;padding:6px">
+      <div class="small"><p><b>Step 1: get the Potluck app.</b> Point your iPhone's camera at this code to open the Potluck app on the App Store, then install it.</p>
+      <p class="muted" style="margin-top:6px">Or search the App Store for "Potluck: Private Home AI", or open <a href="${esc(c.appURL)}" target="_blank" rel="noopener">${esc(c.appURL)}</a> on the phone.</p>
+      <p style="margin-top:10px"><button class="btn sm" data-a="phonestep" data-step="pair">I have the app: show the pairing code</button> <button class="btn sm quiet" data-a="phonestop">Cancel</button></p></div></div>`
+    : `<div class="row" style="gap:18px;align-items:flex-start;margin-top:10px"><img src="${c.qr}" alt="Pairing code" width="220" height="220" style="image-rendering:pixelated;background:#fff;border-radius:8px;padding:6px">
+      <div class="small"><p><b>Step 2: pair.</b> In the Potluck app on your iPhone, tap "Scan the pairing code" and point the camera at this code.</p>
+      <p class="muted" style="margin-top:6px">It works once, for ${c.minutes} minutes. The phone will reach this computer at ${c.addrs.map(esc).join(" or ")}${c.addrs.some(a => a.startsWith("100.")) ? " (the 100. address works away from home through Tailscale)" : ""}.</p>
       <p class="muted" style="margin-top:6px">No camera handy? Copy this link into the app instead:</p>
-      <p><input type="text" readonly value="${esc(phones.code.link)}" style="width:100%;min-width:260px" onclick="this.select()" aria-label="Pairing link"></p>
-      <p style="margin-top:8px"><button class="btn sm quiet" data-a="phonestop">Hide the code</button></p></div></div>` : "";
+      <p><input type="text" readonly value="${esc(c.link)}" style="width:100%;min-width:260px" onclick="this.select()" aria-label="Pairing link"></p>
+      <p style="margin-top:8px">${c.appQR ? `<button class="btn sm quiet" data-a="phonestep" data-step="app">Don't have the app yet?</button> ` : ""}<button class="btn sm quiet" data-a="phonestop">Hide the code</button></p></div></div>`;
   return `<h2>Your iPhone</h2><div class="card">
     <p class="muted small">Chat with your model from the Potluck iPhone app, at home or, with Tailscale, anywhere. The phone can chat, see what is running and switch models. It cannot run commands on this computer or change settings. The connection is encrypted and only phones you pair here get in.</p>
     ${phones.error ? `<div class="err">${esc(phones.error)}</div>` : ""}
@@ -321,6 +345,30 @@ function shelf(list) {
   }).join("");
 }
 
+// Ranked lists other people made (catalog/lists.json), with how old each one is.
+let lists = null, listsLoading = false;
+function listsView() {
+  if (lists === null) {
+    if (!listsLoading) { listsLoading = true; api("/api/lists").then(r => { lists = r || []; }).catch(() => { lists = []; }).finally(() => { listsLoading = false; draw(true); }); }
+    return "";
+  }
+  if (!lists.length) return "";
+  const day = 864e5, today = Date.now();
+  return `<h2>Ranked lists</h2><p class="muted small">Rankings other people made, with their age: models move fast. Potluck has not measured these; open one to check its sizes against your computers.</p>` + lists.map(l => {
+    const age = Math.max(0, Math.floor((today - Date.parse(l.added)) / day));
+    const old = l.expires && today > Date.parse(l.expires) + day;
+    const ageText = age === 0 ? "added today" : age === 1 ? "added 1 day ago" : `added ${age} days ago`;
+    const tiers = (l.tiers || []).map(t => `<div class="tier"><span class="tier-name tier-${esc(t.tier)}">${esc(t.tier)}</span><div class="tier-items">${(t.items || []).map(i => {
+      const open = i.repo || i.search;
+      return `<div class="tier-item">${open ? `<button class="btn sm ghost" data-a="listopen" data-q="${esc(i.repo || i.search)}">${esc(i.name)}</button>` : `<b class="small">${esc(i.name)}</b>`}
+        <span class="muted small">${i.maker ? esc(i.maker) + ". " : ""}${esc(i.note || "")}</span></div>`;
+    }).join("")}</div></div>`).join("");
+    return `<details class="model"${old ? "" : " open"}><summary><b>${esc(l.title)}</b> <span class="muted small">${esc(l.by)}, ${esc(l.asOf)}</span>
+        <span class="badge ${old ? "bad" : age > 30 ? "warn" : ""}">${old ? "Out of date: " : ""}${ageText}</span></summary>
+      <p class="muted small" style="margin:8px 0">${esc(l.about)}</p>${tiers}</details>`;
+  }).join("");
+}
+
 // The person's other AI setups (connections.go).
 let conns = null, connsLoading = false;
 function loadConns() {
@@ -359,6 +407,7 @@ function viewModels() {
     ${pf ? `<div class="note">PirateFace lists community torrents of Hugging Face models, for when Hugging Face is unreachable. Potluck only reads the list. Download with your own torrent app, then compare the file's SHA-256 with the one Hugging Face publishes before you trust it. Downloading torrents inside Potluck is planned.</div>` : ""}
     ${store.error ? `<div class="err">${esc(store.error)}</div>` : ""}
     ${store.loading ? `<p class="muted">Searching…</p>` : shelf(store.results || []) || `<p class="muted">Nothing found.</p>`}
+    ${pf || store.q ? "" : listsView()}
     ${pf ? "" : diskView()}
     ${pf ? "" : localSettings()}
     ${pf ? "" : `<h2>Have a direct link?</h2><div class="tools"><input type="text" id="url" placeholder="https://…/model.gguf" style="flex:1;min-width:260px" aria-label="Direct link to a model file"><button class="btn quiet" data-a="planurl">Check it</button></div>`}`;
@@ -382,8 +431,8 @@ function diskView() {
         <span class="row"><button class="btn sm" data-a="planlocal" data-node="${esc(id)}" data-file="${esc(f.file)}">Set up</button>
         <button class="btn sm quiet" data-a="forget" data-node="${esc(id)}" data-file="${esc(f.file)}">Remove from list</button></span></div>`;
       return `<div class="file"><span class="q">${esc(f.file.replace(/\.gguf$/, ""))}</span><span>${gb(f.size)}</span>
-        <span class="n muted small">${f.complete ? (later ? "Part of a model that comes in several files" : "On " + esc(n.info.name)) : "Unfinished download"}${sum ? `<br>SHA-256: <span style="user-select:all;overflow-wrap:anywhere">${esc(sum)}</span>` : ""}</span>
-        <span class="row">${f.complete && !later ? `<button class="btn sm" data-a="planlocal" data-node="${esc(id)}" data-file="${esc(f.file)}">Set up</button>` : ""}
+        <span class="n muted small">${f.complete ? (f.addOn ? "A model's helper file (image add-on or similar)" : later ? "Part of a model that comes in several files" : "On " + esc(n.info.name)) : "Unfinished download"}${sum ? `<br>SHA-256: <span style="user-select:all;overflow-wrap:anywhere">${esc(sum)}</span>` : ""}</span>
+        <span class="row">${f.complete && !later && !f.addOn ? `<button class="btn sm" data-a="planlocal" data-node="${esc(id)}" data-file="${esc(f.file)}">Set up</button>` : ""}
         ${f.complete ? `<button class="btn sm quiet" data-a="checksum" data-node="${esc(id)}" data-file="${esc(f.file)}">${sum === "…" ? "Working…" : "Checksum"}</button>` : ""}
         <button class="btn sm quiet" data-a="delmodel" data-node="${esc(id)}" data-file="${esc(f.file)}" data-name="${esc(n.info.name)}">Delete</button></span></div>`;
     }).join("");
@@ -440,6 +489,8 @@ function localSettings() {
       <span class="muted">It loads again by itself with your next message.</span></p>
     <p class="small" style="margin-top:10px"><label>AI engine when a model runs here alone <select data-local="engine" style="max-width:100%">${engSel}</select></label></p>
     <p class="small" style="margin-top:10px"><label>Agent mode in the chat starts commands in <input type="text" data-local="agentdir" value="${esc(m.agentDir || "")}" style="min-width:300px"></label> <button class="btn sm quiet" data-a="agentdir">Save</button></p>
+    <p class="small" style="margin-top:10px"><label>Hugging Face key, for gated models <input type="password" data-local="hfkey" placeholder="${m.hasHFKey ? "Saved. Type a new one to replace it" : "hf_…"}" autocomplete="off" style="min-width:260px"></label> <button class="btn sm quiet" data-a="hfkey">Save</button>${m.hasHFKey ? ` <button class="btn sm quiet" data-a="hfkeyrm">Remove</button>` : ""}</p>
+    <p class="muted small">Some models only download after you accept their terms on their Hugging Face page while signed in. Then make a key that can read them at <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co/settings/tokens</a> and paste it here. Potluck sends it only to Hugging Face, and to your own computers when they download for you.</p>
   </div>`;
 }
 
@@ -468,18 +519,23 @@ function planBar(plan) {
   return `<div class="plan" role="img" aria-label="How the model's layers are spread over the computers">${segs.join("")}</div><div class="legend">${legend.join("")}</div><p class="muted small">Striped parts sit on a graphics card, out of ${total} layers in all.${plan.cardTrunk ? " For this kind of model the card holds the part of each layer that is used for every word, and memory holds the rest." : ""}</p>`;
 }
 
+// details tucks the technical picture (which computer holds which layers) behind a click.
+function details(inner) {
+  return `<details class="small" style="margin-top:10px"><summary>Details: how it is split between your computers</summary>${inner}</details>`;
+}
+
 function viewSheet() {
   if (!sheet) return "";
   if (sheet.loading) return `<div class="sheet"><div class="card"><p>Reading the model's blueprint and working out a layout…</p></div></div>`;
   const p = sheet.plan, solo = sheet.solo, stream = sheet.stream, m = sheet.model, info = sheet.info;
   const isLocal = m.source === "local";
   const go = isLocal ? "Run it" : "Download and run";
-  const ctx = `<label class="small">Conversation memory <select id="ctx"><option value="4096">Short (4,096 tokens)</option><option value="8192" selected>Normal (8,192)</option><option value="16384">Very long (16,384)</option></select></label>`;
+  const ctx = `<label class="small">Conversation memory <select id="ctx"><option value="0" selected>Automatic (as long as fits without slowing down)</option><option value="8192">8,192 tokens</option><option value="16384">16,384</option><option value="32768">32,768</option><option value="65536">65,536</option></select></label>`;
   let body;
   if (p.fits) {
     const verdict = p.needsPool ? `<div class="banner" style="border-color:var(--ok);background:var(--ok-soft)"><b>Too big for the memory of any one of your computers. Runs across ${p.machines} of them together.</b></div>`
       : `<div class="note">Fits in ${esc(p.shares[0].name)}'s memory, so it runs there${p.machines > 1 ? " with help from the others" : ""}.</div>`;
-    body = `${verdict}${planBar(p)}
+    body = `${verdict}${p.kvKeyQ8 ? `<p class="small muted">To fit, Potluck stores the conversation memory a little more compactly. Answers are practically the same.</p>` : ""}${details(planBar(p))}
       <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start">${go}</button></div>
       <p class="muted small">${isLocal ? "The file is already on " + esc(p.shares[0].name) + (p.machines > 1 ? ". Helpers receive their share from it over your network, which is slower the first time than a download." : ", so nothing is downloaded.")
         : "Each computer downloads its own share. The first start takes as long as the download; later starts take a few minutes."}</p>`;
@@ -492,7 +548,7 @@ function viewSheet() {
   } else if (solo && solo.fits) {
     body = `<div class="note"><b>Does not fit in your computers' pooled memory.</b> ${esc(p.reason)}</div>
       <h2 style="font-size:16px">It can still run on ${esc(solo.shares[0].name)}${solo.overflow > 0 ? ", with help from its disk" : ""}</h2>
-      <p class="muted small">${solo.overflow > 0 ? `About ${gb(solo.overflow)} of it will not fit in memory and is read from disk as needed. Fine with an SSD, slow with a hard disk.` : "It needs nearly all the memory this computer has; close big apps first if it is slow."}</p>${planBar(solo)}
+      <p class="muted small">${solo.overflow > 0 ? `About ${gb(solo.overflow)} of it will not fit in memory and is read from disk as needed. Fine with an SSD, slow with a hard disk.` : "It needs nearly all the memory this computer has; close big apps first if it is slow."}</p>${details(planBar(solo))}
       <div class="row" style="margin-top:16px">${ctx}<button class="btn" data-a="start" data-solo="${esc(solo.head)}">${go} on ${esc(solo.shares[0].name)}</button></div>`;
   } else if (stream && stream.fits) {
     body = `<div class="note"><b>Too big for your computers' memory, pooled or alone.</b> ${esc(p.reason)}</div>`;
@@ -511,7 +567,7 @@ function viewSheet() {
   }
   return `<div class="sheet" data-a="closesheet"><div class="card" data-stop>
     <div class="row spread"><h1 style="font-size:21px">${esc(m.title || m.file)}</h1><button class="link" data-a="closesheet">Close</button></div>
-    <p class="muted small">${gb(m.size)} · ${info.layers} layers · ${esc(isLocal ? "already on one of your computers" : m.repo || "direct link")}${m.parts && m.parts.length > 1 ? ` · comes as ${m.parts.length} files` : ""}</p>
+    <p class="muted small">${gb(m.size)} · ${esc(isLocal ? "already on one of your computers" : m.repo || "direct link")}</p>
     ${body}
   </div></div>`;
 }
@@ -525,7 +581,41 @@ async function openPlan(model) {
 
 // ---------- main computer: running ----------
 
-function viewRun() { return viewRunMain() + aiCard(); }
+function viewRun() { return viewRunMain() + crewView() + aiCard(); }
+
+// ---------- the crew: extra models, each on one computer (crew.go) ----------
+let crew = { list: null, at: 0, storage: null, msg: "" };
+function loadCrew() {
+  crew.at = Date.now();
+  Promise.all([api("/api/crew"), crew.storage ? Promise.resolve(crew.storage) : api("/api/storage")])
+    .then(([c, st]) => { crew.list = c.crew || []; crew.storage = st; draw(true); }).catch(e => { crew.msg = e.message; draw(true); });
+}
+function crewView() {
+  if (!S.main) return "";
+  if (crew.list === null || Date.now() - crew.at > 5000) loadCrew();
+  const nodes = (S.main.nodes || []).filter(n => n.online && n.info.limits && n.info.limits.enabled);
+  const list = (crew.list || []).map(c => `<div class="file"><span class="q">${esc(c.name)}</span><span class="small muted">${esc(c.nodeName)}</span>
+      <span class="n small">${esc((c.model.title || c.model.file || "").replace(/\.gguf$/, ""))} · ${c.phase === "running" ? `<span class="badge ok">Running</span>` : c.phase === "error" ? `<span class="badge bad">Stopped</span> ${esc(c.error || "")}` : `${esc(c.note || "Starting")}…`}</span>
+      <button class="btn sm quiet" data-a="crewstop" data-name="${esc(c.name)}">Stop</button></div>`).join("");
+  // Models already on each computer, to start one without downloading.
+  const local = [];
+  for (const [id, rep] of Object.entries(crew.storage || {})) for (const m of (rep.models || [])) if (m.complete && !/-0000[2-9]-of-/.test(m.file)) local.push({ id, file: m.file, size: m.size });
+  const nodeOpts = nodes.map(n => `<option value="${esc(n.info.id)}">${esc(n.info.name)}</option>`).join("");
+  const modelOpts = local.map(m => `<option value="${esc(m.id + "|" + m.file)}">${esc(m.file.replace(/\.gguf$/, ""))} (${gb(m.size)}, on ${esc(((S.main.nodes || []).find(n => n.info.id === m.id) || { info: { name: "?" } }).info.name)})</option>`).join("");
+  return `<div class="card" style="margin-top:16px"><h3>Crew: more models at once</h3>
+    <p class="muted small">Run extra models on your other computers, next to the main one. Chat with any of them from the chat's model menu, or let a task hand them parts of a big job at the same time (it uses them by itself when they are running).</p>
+    ${crew.msg ? `<div class="err">${esc(crew.msg)}</div>` : ""}
+    ${list ? `<div class="files" style="margin-top:8px">${list}</div>` : `<p class="small muted" style="margin-top:8px">No crew members yet.</p>`}
+    <div class="tools" style="margin-top:10px;flex-wrap:wrap">
+      <select id="crew-node" aria-label="Computer">${nodeOpts}</select>
+      <select id="crew-model" aria-label="Model" style="min-width:240px"><option value="">A model already downloaded…</option>${modelOpts}</select>
+      <input type="text" id="crew-repo" placeholder="or Hugging Face repo, e.g. unsloth/gemma-4-12B-it-GGUF" style="min-width:260px" aria-label="Hugging Face repository">
+      <input type="text" id="crew-file" placeholder="file, e.g. gemma-4-12B-it-Q4_K_M.gguf" style="min-width:220px" aria-label="Model file">
+      <button class="btn" data-a="crewstart">Start</button></div>
+    <p class="small muted">A model already on a computer runs there; a Hugging Face model is downloaded to the computer you pick.</p></div>`;
+}
+
+const quick = { busy: false, error: "" };
 
 function viewRunMain() {
   const m = S.main, c = m.cluster;
@@ -535,13 +625,31 @@ function viewRunMain() {
     if (m.asleep) return `<h1>${esc(m.asleep.title || m.asleep.file)} is resting</h1>
       <p class="muted">It was let go after ${m.idleUnload} minutes without use, so its memory is free for other apps. It loads again by itself with your next chat message.</p>
       <p style="margin-top:14px"><a class="btn" href="${esc(m.chatURL)}" target="_blank" rel="noopener">Open chat</a> <button class="btn ghost" data-a="again">Load it now</button></p>`;
+    if (!m.lastModel) {
+      // Say what the one click will run before it runs: the model, its size, where it fits.
+      if (quick.choice === undefined && !quick.looking) {
+        quick.looking = true;
+        api("/api/quickstart").then(r => { quick.choice = r; }).catch(e => { quick.choice = null; quick.lookErr = e.message; }).finally(() => { quick.looking = false; draw(); });
+      }
+      const ch = quick.choice, mm = ch && ch.model;
+      const pick = mm ? `<div class="card" style="margin-top:14px"><div class="row spread"><h3>${esc(mm.title || mm.file)}</h3>
+          <span class="badge ${ch.verdict === "pool" ? "main" : "ok"}">${ch.verdict === "pool" ? "Runs pooled across your computers" : "Runs on one computer"}</span></div>
+          ${ch.blurb ? `<p class="muted small">${esc(ch.blurb)}</p>` : ""}
+          <p class="small">${ch.local ? esc(ch.note) : `Download ${gb(ch.download)}. ${esc(ch.note || "")}`}</p></div>`
+        : quick.looking ? `<p class="muted small" style="margin-top:14px">Finding the best model for your computers…</p>`
+        : quick.lookErr ? `<div class="note">${esc(quick.lookErr)}</div>` : "";
+      return `<h1>Ready when you are</h1><p class="muted">One click downloads the best model your computers can run and starts it. A model you already have (from LM Studio, Ollama or Hugging Face) is used where it is.</p>
+      ${pick}
+      ${quick.error ? `<div class="note">${esc(quick.error)}</div>` : ""}
+      <p style="margin-top:14px"><button class="btn" data-a="quick" ${quick.busy || (!mm && quick.looking) ? "disabled" : ""}>${quick.busy ? "Starting…" : mm && mm.source === "local" ? "Start it" : "Download and start"}</button> <button class="btn ghost" data-a="tab" data-tab="models">Choose a model myself</button></p>`;
+    }
     return `<h1>Nothing is running</h1><p class="muted">Pick a model and Potluck spreads it over your computers.</p>
       <p style="margin-top:14px"><button class="btn" data-a="tab" data-tab="models">Choose a model</button>
       ${m.lastModel ? ` <button class="btn ghost" data-a="again">Run ${esc(m.lastModel.title || m.lastModel.file)} again</button>` : ""}</p>`;
   }
   const title = c.model ? esc(c.model.title || c.model.file) : "Model";
   const steps = `<ul class="steps">${(c.steps || []).map(s => `<li class="${esc(s.state)}">${esc(s.text)}</li>`).join("")}</ul>`;
-  const nodes = m.nodes.filter(n => n.role).map(n => `<div class="card"><div class="row spread"><h3>${esc(n.info.name)}</h3><span class="badge ok">${n.role === "head" ? "Runs the model" : "Holds part of it"}</span></div>${progress(n.status, n.done, n.total)}</div>`).join("");
+  const nodes = m.nodes.filter(n => n.role).map(n => `<div class="card"><div class="row spread"><h3>${esc(n.info.name)}</h3><span class="badge ok">${n.role === "head" ? "Runs the model" : "Holds part of it"}</span></div>${progress(n.status, n.done, n.total, n.info.id)}</div>`).join("");
   if (c.phase === "starting" || c.phase === "stopping") {
     return `<h1>${c.phase === "stopping" ? "Stopping" : "Getting " + title + " ready"}</h1>${steps}
       ${c.plan && c.plan.fits ? planBar(c.plan) : ""}<div class="grid" style="margin-top:16px">${nodes}</div>
@@ -678,18 +786,23 @@ const actions = {
   planurl() { const u = $("#url").value.trim(); if (u) openPlan({ source: "url", url: u }); },
   closesheet(t, e) { if (e.target.closest("[data-stop]") && !e.target.closest("[data-a=closesheet]:not(.sheet)")) return; sheet = null; draw(true); },
   start(t) {
-    const m = sheet.model, ctx = +($("#ctx") ? $("#ctx").value : 4096), solo = t.dataset.solo || "";
+    const m = sheet.model, ctx = +($("#ctx") ? $("#ctx").value : 0), solo = t.dataset.solo || "";
     sheet = null; tab = "run"; location.hash = tab;
     act(() => api("/api/start", { ...m, ctx, solo }));
   },
+  quick() {
+    quick.busy = true; quick.error = ""; draw(true);
+    api("/api/quickstart", {}).then(() => { quick.busy = false; tab = "run"; draw(true); }).catch(e => { quick.busy = false; quick.error = e.message; draw(true); });
+  },
   again() {
     const c = S.main.cluster, m = c.model || S.main.lastModel;
-    if (m) { logText = ""; act(() => api("/api/start", { ...m, ctx: S.main.lastCtx || 8192, solo: c.plan && c.plan.stream ? "stream:" + c.plan.head : c.plan && c.plan.solo ? c.plan.head : "" })); }
+    if (m) { logText = ""; act(() => api("/api/start", { ...m, ctx: S.main.lastCtx || 0, solo: c.plan && c.plan.stream ? "stream:" + c.plan.head : c.plan && c.plan.solo ? c.plan.head : "" })); }
   },
   stop() { logText = ""; act(() => api("/api/stop", {})); },
   test() { act(() => api("/api/test", {})); },
   planlocal(t) { openPlan({ source: "local", node: t.dataset.node, file: t.dataset.file }); },
-  phonepair() { phones.error = ""; api("/api/phones", { action: "pair" }).then(r => { phones.code = r; loadPhones(); }).catch(e => { phones.error = e.message; draw(true); }); },
+  phonepair() { phones.error = ""; api("/api/phones", { action: "pair" }).then(r => { phones.code = r; phones.step = phones.list && phones.list.some(p => !p.pairing) ? "pair" : "app"; loadPhones(); }).catch(e => { phones.error = e.message; draw(true); }); },
+  phonestep(t) { phones.step = t.dataset.step; draw(true); },
   phonestop() { phones.code = null; api("/api/phones", { action: "stop" }).then(loadPhones).catch(e => toast(e.message)); },
   pushon() {
     const v = k => (document.querySelector(`[data-push=${k}]`) || {}).value || "";
@@ -701,6 +814,16 @@ const actions = {
     api("/api/connections", { action: "add", name, baseURL, key }).then(r => { toast(`Added ${r.name}. Its models are in the chat's model menu.`); conns = null; draw(true); }).catch(e => toast(e.message));
   },
   connrm(t) { if (confirm("Remove this connection? Its models leave Potluck's chat.")) api("/api/connections", { action: "remove", id: t.dataset.id }).then(() => { conns = null; draw(true); }).catch(e => toast(e.message)); },
+  crewstart() {
+    const node = $("#crew-node").value, pick = $("#crew-model").value, repo = $("#crew-repo").value.trim(), file = $("#crew-file").value.trim();
+    let body;
+    if (pick) { const [id, f] = pick.split("|"); body = { action: "start", node: id, file: f }; }
+    else if (repo && file) body = { action: "start", node, repo, file };
+    else return toast("Pick a downloaded model, or type a Hugging Face repo and file.");
+    crew.msg = "";
+    api("/api/crew", body).then(r => { toast("Starting " + r.name + "…"); loadCrew(); }).catch(e => { crew.msg = e.message; draw(true); });
+  },
+  crewstop(t) { api("/api/crew", { action: "stop", name: t.dataset.name }).then(loadCrew).catch(e => toast(e.message)); },
   copytext(t) { navigator.clipboard.writeText(t.dataset.text).then(() => toast("Copied.")).catch(() => toast(t.dataset.text)); },
   newsharekey() { if (confirm("Make a new key? Devices and apps using the old key stop working until you give them the new one.")) act(() => api("/api/share", { rotate: true })); },
   pushtest() { api("/api/phones", { action: "test" }).then(() => { toast("Test alert sent. Answer it on your phone."); setTimeout(loadPhones, 8000); setTimeout(loadPhones, 30000); }).catch(e => toast(e.message)); },
@@ -719,6 +842,9 @@ const actions = {
   foundagain() { loadFound(false); },
   adddir() { const v = $("#adddir").value.trim(); if (v) act(() => api("/api/local", { modelDirs: [...(S.main.modelDirs || []), v] }).then(() => loadFound(false))); },
   deldir(t) { act(() => api("/api/local", { modelDirs: (S.main.modelDirs || []).filter(x => x !== t.dataset.dir) }).then(() => loadFound(false))); },
+  listopen(t) { store.source = "hf"; store.q = t.dataset.q; store.results = null; draw(true); window.scrollTo(0, 0); },
+  hfkey() { const v = $("[data-local=hfkey]").value.trim(); if (!v) return; act(() => api("/api/local", { hfKey: v }).then(() => toast("Hugging Face key saved"))); },
+  hfkeyrm() { act(() => api("/api/local", { hfKey: "" }).then(() => toast("Hugging Face key removed"))); },
   agentdir() { const v = $("[data-local=agentdir]").value.trim(); act(() => api("/api/local", { agentDir: v }).then(() => toast("Saved"))); },
   checksum(t) {
     const k = t.dataset.node + "/" + t.dataset.file;

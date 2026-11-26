@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net"
 	"net/http"
@@ -58,7 +59,11 @@ type Config struct {
 	// EnginePath: "" = use an engine found on this computer when it is new enough and the
 	// model runs here alone; "potluck" = always Potluck's own; else that llama-server.
 	EnginePath string `json:"enginePath,omitempty"`
-	Single     bool   `json:"single,omitempty"` // set up for one computer
+	// Crew: the crew members the person started (crew.go), brought back after a restart.
+	Crew []CrewSaved `json:"crew,omitempty"`
+	// HFKey: the person's own Hugging Face key, for gated models (hfkey.go). Main only.
+	HFKey  string `json:"hfKey,omitempty"`
+	Single bool   `json:"single,omitempty"` // set up for one computer
 	// IdleUnload: minutes without a request after which the model is let go to free the
 	// memory (0 = keep it loaded). It loads again with the next message.
 	IdleUnload int `json:"idleUnload,omitempty"`
@@ -87,25 +92,42 @@ func loadConfig(dir string) *ConfigStore {
 	return s
 }
 
+// Get returns the settings as they are now. Its maps and lists are shared with every other
+// Get, so they must only be read: Update never changes them in place (it works on a fresh
+// copy and swaps it in), so a reader can never meet a half-made change.
 func (s *ConfigStore) Get() Config {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c := s.c
-	c.Trusted = map[string]string{}
-	for k, v := range s.c.Trusted {
-		c.Trusted[k] = v
-	}
-	return c
+	return s.c
 }
 
+// Update changes the settings and saves them. fn works on a deep copy, so the maps and lists
+// that Get handed out before stay as they were (two goroutines touching one map at once is
+// a crash Go cannot recover from).
 func (s *ConfigStore) Update(fn func(c *Config)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fn(&s.c)
-	b, _ := json.MarshalIndent(s.c, "", "  ")
-	tmp := s.path + ".tmp"
-	if os.WriteFile(tmp, b, 0o600) == nil {
-		_ = os.Rename(tmp, s.path)
+	b, err := json.Marshal(s.c)
+	if err != nil {
+		panic("potluck: settings cannot be copied: " + err.Error()) // every field is plain data
+	}
+	var c Config
+	if err := json.Unmarshal(b, &c); err != nil {
+		panic("potluck: settings cannot be copied: " + err.Error())
+	}
+	if c.Trusted == nil {
+		c.Trusted = map[string]string{}
+	}
+	fn(&c)
+	s.c = c
+	if b, err = json.MarshalIndent(s.c, "", "  "); err == nil {
+		tmp := s.path + ".tmp"
+		if err = os.WriteFile(tmp, b, 0o600); err == nil {
+			err = os.Rename(tmp, s.path)
+		}
+	}
+	if err != nil {
+		log.Printf("could not save the settings: %v", err)
 	}
 }
 
@@ -121,15 +143,17 @@ type Agent struct {
 	rtDir     string
 	gpuDev    string // the engine's name for this computer's graphics card, "" if none is used
 	rpc, head *proc
+	// headLog: the last head engine's log, kept after a stop so the reason it ended can still be read.
+	headLog   string
 	guard     *GuardEvent // the guard's last stop (guard.go)
 	vision    bool        // the model running here was loaded with its image add-on
 	rpcPort   int
 	apiPort   int
-	aux       *proc // the Potluck helper's own small engine (aux.go)
-	auxPort   int
-	auxFile   string
+	aux       map[string]*auxEngine // extra engines: the helper and crew members (aux.go)
 	listeners []net.Listener
-	jobCancel context.CancelFunc
+	jobs      map[string]context.CancelFunc // jobs in progress (jobCtx)
+	jobOwner  map[string]string             // whose each job is: "" the main model, "aux:<slot>" an extra engine
+	rtMu      sync.Mutex                    // one engine install at a time (ensureRuntime)
 	status    string
 	done      int64
 	total     int64
@@ -218,14 +242,25 @@ func (a *Agent) note(msg string, done, total int64) {
 	}
 }
 
-func (a *Agent) jobCtx() context.Context {
+// jobCtx starts a job (an engine install, a download): a new request for the same thing
+// replaces the one in progress, but different jobs run side by side, so the helper's and crew
+// members' downloads on this computer don't cancel the main model's or each other's.
+// Stop ends them all.
+func (a *Agent) jobCtx(key string) context.Context { return a.jobCtxFor(key, "") }
+
+// jobCtxFor starts a job for an owner ("" the main model, "aux:<slot>" an extra engine).
+func (a *Agent) jobCtxFor(key, owner string) context.Context {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.jobCancel != nil {
-		a.jobCancel()
+	if a.jobs == nil {
+		a.jobs = map[string]context.CancelFunc{}
+		a.jobOwner = map[string]string{}
+	}
+	if c := a.jobs[key]; c != nil {
+		c()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	a.jobCancel = cancel
+	a.jobs[key], a.jobOwner[key] = cancel, owner
 	return ctx
 }
 
@@ -238,14 +273,25 @@ func freePort() (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-// threadsFor turns the pedal into a number of CPU threads. The base is one thread per
-// processor core; on processors that mix fast and slow cores it is the fast cores' threads
-// (measured on a 4 fast + 8 slow core laptop: 8 threads beat 12 by 14% writing and 24%
-// reading). all asks for every hardware thread instead.
+// threadsFor turns the pedal into a number of CPU threads. With all, the base is every
+// hardware thread of the processor's fast cores (all of them when the cores are alike);
+// otherwise one thread per fast core. The main computer decides which from measurements:
+//   - one computer, experts in memory, 4-core 8-thread desktop: 8 threads beat 4 (prompt
+//     17.5 vs 12.6 tokens/s, writing 4.5 vs 3.9);
+//   - pooled, the card holding the trunk of the head's layers: all threads 3.8 vs 3.3 words/s;
+//   - pooled with whole layers on the processor or the disk in play: all threads slower
+//     (1.1 to 1.8 against 2.3 to 2.8).
+//
+// On a 4 fast + 8 slow core laptop the fast cores' 8 threads beat all 12 (14% writing, 24%
+// reading), so slow cores are never counted.
 func threadsFor(info NodeInfo, all bool) int {
 	base := info.Cores
 	if info.PerfThreads > 0 {
+		// Two kinds of cores: only the fast ones, all their threads or one per core.
 		base = info.PerfThreads
+		if !all && info.PerfCores > 0 {
+			base = info.PerfCores
+		}
 	} else if all && info.Threads > base {
 		base = info.Threads
 	}
@@ -254,6 +300,35 @@ func threadsFor(info NodeInfo, all bool) int {
 		t = 1
 	}
 	return t
+}
+
+// placementArgs are the engine flags that say where a model's weights and cache go, shared
+// by every engine Potluck starts (the main model, the helper's model, crew members), so a
+// rule learned for one applies to all.
+func placementArgs(ngl int, expertCPU []int, kvKeyQ8 bool) []string {
+	args := []string{"-ngl", strconv.Itoa(ngl)}
+	if kvKeyQ8 {
+		args = append(args, "-ctk", "q8_0")
+	}
+	if len(expertCPU) > 0 {
+		// Keep these layers' expert weights in memory; the rest of each layer goes to the card.
+		// Any ffn_...exps tensor, as isExpertTensor counts them: models fuse them differently
+		// (Inkling 2 has ffn_gate_up_exps; a pattern for up/down/gate alone left two thirds of
+		// its experts on a 4 GB card, 15 GB in all).
+		nums := make([]string, len(expertCPU))
+		for i, l := range expertCPU {
+			nums[i] = strconv.Itoa(l)
+		}
+		args = append(args, "-ot", `blk\.(`+strings.Join(nums, "|")+`)\.ffn_[a-z_]*exps=CPU`)
+		// And work on them where they are. By default the engine copies experts kept in memory
+		// to the card for long prompts ("op offload") and reserves room for that on the card:
+		// 14 GB for Inkling 2 at 32k (measured on a 4 GB card). Windows' NVIDIA driver then
+		// quietly spills it into system memory, which filled a 30 GB computer and had it
+		// reading 6,500 pages a second from disk, the card idle. Short benchmarks hide this
+		// (22.8 vs 15.1 tokens/s reading at an 8k depth, where it still fits).
+		args = append(args, "--no-op-offload")
+	}
+	return args
 }
 
 // Requests the main computer can make.
@@ -265,14 +340,22 @@ type (
 		SHA256 string      `json:"sha256"`
 		Parts  []ModelPart `json:"parts,omitempty"`
 		Vision *ModelPart  `json:"vision,omitempty"` // the image add-on, fetched with the model
+		For    string      `json:"for,omitempty"`    // as RuntimeSpec.For
+		HFKey  string      `json:"hfKey,omitempty"`  // the person's Hugging Face key, for gated models (hfkey.go)
+		// Unchecked: the files could not be looked up (ModelRef.Unchecked). Only files already
+		// here and verified are used; nothing new is downloaded without its checksum.
+		Unchecked string `json:"unchecked,omitempty"`
 	}
 	SeedReq struct {
 		URL   string     `json:"url"`
 		Items []SeedItem `json:"items"`
+		HFKey string     `json:"hfKey,omitempty"`
 	}
 	StartHeadReq struct {
+		KVKeyQ8 bool       `json:"kvKeyQ8,omitempty"` // the cache's keys in 8 bits (-ctk q8_0): the plan needed the room
 		File    string     `json:"file"`
 		Vision  *ModelPart `json:"vision,omitempty"` // the image add-on to fetch (if not here yet) and load
+		HFKey   string     `json:"hfKey,omitempty"`  // for fetching the add-on from a gated model
 		Workers []string   `json:"workers"`          // node ids, in --rpc order
 		NGL     int        `json:"ngl"`
 		Split   string     `json:"split"`
@@ -289,9 +372,17 @@ type (
 		// DenseBytes is the size of the part of the model every word uses. InferSSD puts it on
 		// the graphics card; when the card is too small for it, the card is left out.
 		DenseBytes int64 `json:"denseBytes,omitempty"`
-		// AllThreads: use every hardware thread instead of one per core. The main computer
-		// asks for it only in the layout where that measured faster.
+		// AllThreads: every hardware thread of the fast cores instead of one per core, where
+		// that measured faster (see threadsFor).
 		AllThreads bool `json:"allThreads,omitempty"`
+		// UBatch: how many prompt words the engine reads at once (-ub); 0 is the engine's
+		// default (512). Smaller needs less card memory (see measureHead) and reads a little slower.
+		UBatch int `json:"ubatch,omitempty"`
+		// VisionCPU keeps the image add-on off the card, which is too small for it and the
+		// conversation both.
+		VisionCPU bool `json:"visionCPU,omitempty"`
+		// Sampling: the maker's settings the model file leaves out, as engine flags (sampling.go).
+		Sampling []string `json:"sampling,omitempty"`
 	}
 	AgentStatus struct {
 		RPC     bool   `json:"rpc"`
@@ -389,7 +480,7 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 				return map[string]string{"dir": dir, "gpuDevice": dev, "local": le}, nil
 			}
 		}
-		dir, err := a.ensureRuntime(a.jobCtx(), spec, func(s string) { a.note(s, 0, 0) })
+		dir, err := a.ensureRuntime(a.jobCtxFor("runtime:"+spec.For, spec.For), spec, func(s string) { a.note(s, 0, 0) })
 		if err != nil {
 			return nil, err
 		}
@@ -433,7 +524,7 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
-		dir, err := a.ensureStream(a.jobCtx(), p, func(s string) { a.note(s, 0, 0) })
+		dir, err := a.ensureStream(a.jobCtx("stream"), p, func(s string) { a.note(s, 0, 0) })
 		if err != nil {
 			return nil, err
 		}
@@ -462,7 +553,14 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		if len(parts) == 0 {
 			parts = []ModelPart{{File: in.File, URL: in.URL, Size: in.Size, SHA256: in.SHA256}}
 		}
-		ctx := a.jobCtx()
+		if in.Unchecked != "" {
+			for _, part := range parts {
+				if !downloaded(filepath.Join(a.dir, "models", filepath.Base(part.File)), part.Size) {
+					return nil, errors.New("could not look up this model's files on Hugging Face (" + in.Unchecked + "), so it cannot be downloaded and checked yet. Try again in a minute")
+				}
+			}
+		}
+		ctx := withHFKey(a.jobCtxFor("model:"+filepath.Base(in.File), in.For), in.HFKey)
 		var before int64
 		for _, part := range parts {
 			err := downloadFile(ctx, part.URL, filepath.Join(a.dir, "models", filepath.Base(part.File)), part.Size, part.SHA256, 24, func(d, t int64, s string) {
@@ -488,7 +586,7 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		if err := json.Unmarshal(raw, &in); err != nil {
 			return nil, err
 		}
-		err := seedCache(a.jobCtx(), in.URL, filepath.Join(a.dir, "cache", "rpc"), in.Items, 8, func(d, t int64, s string) {
+		err := seedCache(withHFKey(a.jobCtx("seed"), in.HFKey), in.URL, filepath.Join(a.dir, "cache", "rpc"), in.Items, 8, func(d, t int64, s string) {
 			a.note("Its share of the model: downloading", d, t)
 		})
 		if err != nil {
@@ -498,13 +596,22 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 		return nil, nil
 
 	case "start_rpc":
+		a.clearGuard()
 		return a.startRPC()
+
+	case "measure_head":
+		var in StartHeadReq
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, err
+		}
+		return a.measureHead(in)
 
 	case "start_head":
 		var in StartHeadReq
 		if err := json.Unmarshal(raw, &in); err != nil {
 			return nil, err
 		}
+		a.clearGuard()
 		return a.startHead(in)
 
 	case "status":
@@ -517,6 +624,20 @@ func (a *Agent) Handle(method string, raw json.RawMessage) (any, error) {
 
 	case "storage":
 		return a.Storage(), nil
+
+	case "found_vision":
+		// The image add-on lying next to a model found in another app's folder, if any.
+		var in struct {
+			File string `json:"file"`
+		}
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, err
+		}
+		p, size := a.foundVision(filepath.Base(in.File))
+		if p == "" {
+			return nil, nil
+		}
+		return ModelPart{File: filepath.Base(p), Size: size}, nil
 
 	case "read_header":
 		// A model file that is already on this computer (copied here or downloaded with
@@ -629,17 +750,76 @@ func (a *Agent) startRPC() (any, error) {
 	a.mu.Lock()
 	a.rpc, a.rpcPort = p, port
 	a.mu.Unlock()
-	// Give it a moment to open its port.
-	for i := 0; i < 50; i++ {
+	// Wait until it answers on its port. If it never does (it crashed, or something else took
+	// the port in the moment between choosing it and the engine opening it), say so with the
+	// engine's own last words instead of reporting a helper that is not there.
+	up := false
+	for i := 0; i < 50 && !up; i++ {
 		if c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), 300*time.Millisecond); err == nil {
 			time.Sleep(300 * time.Millisecond) // hanging up at once makes the macOS worker quit
 			c.Close()
+			up = true
+			break
+		}
+		if !p.Running() && i > 5 {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	if !up {
+		p.Stop()
+		a.mu.Lock()
+		if a.rpc == p {
+			a.rpc = nil
+		}
+		a.mu.Unlock()
+		return nil, errors.New("the helper engine did not start: " + lastLogLine(tailFile(p.logPath, 4000)))
+	}
 	a.note("Helper engine running", 0, 0)
 	return map[string]int{"port": port, "threads": threads}, nil
+}
+
+// headArgs: the head engine's arguments that the server and the engine's dry run
+// (measureHead) share, so what is measured is exactly what will be started.
+func (a *Agent) headArgs(in StartHeadReq, model, rt, gpuDev string, rpcList []string, threads int) []string {
+	if in.Ctx <= 0 {
+		in.Ctx = 4096
+	}
+	args := []string{"-m", model, "-c", strconv.Itoa(in.Ctx), "-np", "1", "-t", strconv.Itoa(threads), "-fit", "off", "-lv", "4"}
+	if in.UBatch > 0 {
+		args = append(args, "-ub", strconv.Itoa(in.UBatch))
+	}
+	if in.Split != "" && in.NGL > 0 {
+		args = append(args, "-ts", in.Split)
+	}
+	args = append(args, placementArgs(in.NGL, in.ExpertCPU, in.KVKeyQ8)...)
+	args = append(args, safeSampling(in.Sampling)...)
+	// The helpers must be named before the device list: the engine only knows the names
+	// RPC0, RPC1, ... once it has read --rpc.
+	if len(rpcList) > 0 {
+		args = append(args, "--rpc", strings.Join(rpcList, ","))
+	}
+	if base := filepath.Base(rt); strings.Contains(base, "cuda") || strings.Contains(base, "vulkan") {
+		// Name every device to use, in the plan's order: the helpers' devices, then the one
+		// local card. Otherwise the engine would also pick up graphics built into the
+		// processor or a second card the plan does not know about.
+		var devs []string
+		for i := 0; i < in.RPCDevices; i++ {
+			devs = append(devs, "RPC"+strconv.Itoa(i))
+		}
+		// The card only when the plan puts layers on it. With none there, the engine would
+		// still copy every weight to the card for long prompts and reserve room for that:
+		// 14.4 GB on a 4 GB card (Inkling 2 at 32k, measured), which Windows quietly spills
+		// into system memory, slowing prompt reading to a crawl.
+		if gpuDev != "" && in.NGL > 0 {
+			devs = append(devs, gpuDev)
+		}
+		if len(devs) == 0 {
+			devs = []string{"none"}
+		}
+		args = append(args, "-dev", strings.Join(devs, ","))
+	}
+	return args
 }
 
 func (a *Agent) startHead(in StartHeadReq) (any, error) {
@@ -662,112 +842,52 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 	if _, err := os.Stat(model); err != nil {
 		return nil, errors.New("the model file is not on this computer")
 	}
-	// The image add-on: from the model's repository, or one lying next to a model file found on
-	// this computer (LM Studio and others keep them together).
+	// The image add-on, only when the start names one (so the plan counted it): from the
+	// model's repository, or the one next to a model found in another app's folder.
 	mmproj := ""
 	if in.Vision != nil && in.Vision.URL != "" {
 		dst := filepath.Join(a.dir, "models", filepath.Base(in.Vision.File))
-		if err := downloadFile(context.Background(), in.Vision.URL, dst, in.Vision.Size, in.Vision.SHA256, 8, nil); err == nil {
-			mmproj = dst
+		if err := downloadFile(withHFKey(context.Background(), in.HFKey), in.Vision.URL, dst, in.Vision.Size, in.Vision.SHA256, 8, nil); err != nil {
+			return nil, fmt.Errorf("the model's image add-on: %w", err)
 		}
-	} else if found, _ := filepath.Glob(filepath.Join(filepath.Dir(model), "mmproj*.gguf")); len(found) > 0 {
-		mmproj = found[0]
+		mmproj = dst
+	} else if in.Vision != nil {
+		mmproj, _ = a.foundVision(in.File)
 	}
-	// One local port per helper. The engine connects to these; each connection is carried
-	// to that helper through the main computer's encrypted link.
-	var rpcList []string
-	var listeners []net.Listener
-	for _, w := range in.Workers {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			return nil, err
-		}
-		listeners = append(listeners, l)
-		rpcList = append(rpcList, "127.0.0.1:"+strconv.Itoa(l.Addr().(*net.TCPAddr).Port))
-		go func(l net.Listener, w string) {
-			for {
-				c, err := l.Accept()
-				if err != nil {
-					return
-				}
-				go func() {
-					t, err := a.dialPeer(w, "rpc")
-					if err != nil {
-						c.Close()
-						return
-					}
-					pipe(c, t)
-				}()
-			}
-		}(l, w)
+	rpcList, listeners, err := a.rpcTunnels(in.Workers)
+	if err != nil {
+		return nil, err
 	}
 	api, err := freePort()
 	if err != nil {
+		for _, l := range listeners {
+			l.Close()
+		}
 		return nil, err
 	}
 	info := a.Info()
 	threads := threadsFor(info, in.AllThreads)
-	if in.Ctx <= 0 {
-		in.Ctx = 4096
-	}
-	args := []string{"-m", model, "-c", strconv.Itoa(in.Ctx), "-np", "1", "-t", strconv.Itoa(threads),
-		"--host", "127.0.0.1", "--port", strconv.Itoa(api), "-fit", "off", "-ngl", strconv.Itoa(in.NGL), "-lv", "4",
+	args := a.headArgs(in, model, rt, gpuDev, rpcList, threads)
+	// What only the server takes (the engine's dry run, measureHead, refuses these).
+	args = append(args, "--host", "127.0.0.1", "--port", strconv.Itoa(api),
 		// Name the model in API answers by its file name, not the full path on this disk.
-		"--alias", strings.TrimSuffix(filepath.Base(model), ".gguf")}
+		"--alias", strings.TrimSuffix(filepath.Base(model), ".gguf"))
 	if mmproj != "" {
 		args = append(args, "--mmproj", mmproj)
-		a.mu.Lock()
-		a.vision = true
-		a.mu.Unlock()
-	} else {
-		a.mu.Lock()
-		a.vision = false
-		a.mu.Unlock()
-	}
-	if in.Split != "" && in.NGL > 0 {
-		args = append(args, "-ts", in.Split)
-	}
-	if len(in.ExpertCPU) > 0 {
-		// Keep these layers' expert weights in memory; the rest of each layer goes to the card.
-		// Any ffn_...exps tensor, as isExpertTensor counts them: models fuse them differently
-		// (Inkling 2 has ffn_gate_up_exps; a pattern for up/down/gate alone left two thirds of
-		// its experts on a 4 GB card, 15 GB in all).
-		nums := make([]string, len(in.ExpertCPU))
-		for i, l := range in.ExpertCPU {
-			nums[i] = strconv.Itoa(l)
+		if in.VisionCPU {
+			args = append(args, "--no-mmproj-offload") // the card's room went to the conversation
 		}
-		args = append(args, "-ot", `blk\.(`+strings.Join(nums, "|")+`)\.ffn_[a-z_]*exps=CPU`)
-		// And work on them where they are. By default the engine copies experts kept in memory
-		// to the card for long prompts, and reserves room for that on the card: 15.9 GB for
-		// Inkling 2 at 32k on a 4 GB card (measured), so the model could not start at all.
-		args = append(args, "--no-op-offload")
 	}
-	// The helpers must be named before the device list: the engine only knows the names
-	// RPC0, RPC1, ... once it has read --rpc.
+	a.mu.Lock()
+	a.vision = mmproj != ""
+	a.mu.Unlock()
 	if len(rpcList) > 0 {
-		args = append(args, "--rpc", strings.Join(rpcList, ","))
 		// The engine normally saves its working state after every prompt so a conversation
 		// can be rewound. With helpers that state has to come back over the network: measured
 		// at 20 seconds per prompt on a direct Wi-Fi link and minutes on a poor one. Off, a
 		// follow-up that cannot continue from where the last answer ended is read again
 		// from the start, which is far cheaper here.
 		args = append(args, "-ctxcp", "0", "-cram", "0")
-	}
-	if base := filepath.Base(rt); strings.Contains(base, "cuda") || strings.Contains(base, "vulkan") {
-		// Name every device to use, in the plan's order: the helpers' devices, then the one
-		// local card. Otherwise the engine would also pick up graphics built into the
-		// processor or a second card the plan does not know about.
-		var devs []string
-		for i := 0; i < in.RPCDevices; i++ {
-			devs = append(devs, "RPC"+strconv.Itoa(i))
-		}
-		if gpuDev != "" {
-			devs = append(devs, gpuDev)
-		}
-		if len(devs) == 0 {
-			devs = []string{"none"}
-		}
-		args = append(args, "-dev", strings.Join(devs, ","))
 	}
 	p, err := a.startProc("head", rt, findBin(rt, "llama-server"), args, false, info.Limits.Pedal < 100)
 	if err != nil {
@@ -777,7 +897,7 @@ func (a *Agent) startHead(in StartHeadReq) (any, error) {
 		return nil, err
 	}
 	a.mu.Lock()
-	a.head, a.apiPort, a.listeners = p, api, listeners
+	a.head, a.apiPort, a.listeners, a.headLog = p, api, listeners, p.logPath
 	a.mu.Unlock()
 	a.note("Loading the model", 0, 0)
 	return map[string]int{"port": api, "threads": threads}, nil
@@ -826,7 +946,7 @@ func (a *Agent) startStream(in StartHeadReq) (any, error) {
 		return nil, err
 	}
 	a.mu.Lock()
-	a.head, a.apiPort, a.links = p, api, nil
+	a.head, a.apiPort, a.links, a.headLog = p, api, nil, p.logPath
 	a.mu.Unlock()
 	a.note("Loading the model (the first start measures this computer's disk, one to three minutes)", 0, 0)
 	return map[string]int{"port": api}, nil
@@ -842,7 +962,7 @@ func (a *Agent) Status() AgentStatus {
 			s.Links[k] = v
 		}
 	}
-	api, head := a.apiPort, a.head
+	api, head, headLog := a.apiPort, a.head, a.headLog
 	a.mu.Unlock()
 	if s.Head {
 		c := http.Client{Timeout: 2 * time.Second}
@@ -851,10 +971,10 @@ func (a *Agent) Status() AgentStatus {
 			res.Body.Close()
 		}
 	}
-	if head != nil {
-		s.HeadLog = tailFile(head.logPath, 6000)
-		if s.Ready {
-			s.FullLog = headFile(head.logPath, 200000)
+	if headLog != "" {
+		s.HeadLog = tailFile(headLog, 6000)
+		if s.Ready && head != nil {
+			s.FullLog = headFile(headLog, 200000)
 		}
 	}
 	return s
@@ -863,9 +983,13 @@ func (a *Agent) Status() AgentStatus {
 // Stop ends every engine process and any download in progress.
 func (a *Agent) Stop() {
 	a.mu.Lock()
-	if a.jobCancel != nil {
-		a.jobCancel()
-		a.jobCancel = nil
+	// The main model's jobs only: a crew member's or the helper's download goes on.
+	for k, c := range a.jobs {
+		if !strings.HasPrefix(a.jobOwner[k], "aux:") {
+			c()
+			delete(a.jobs, k)
+			delete(a.jobOwner, k)
+		}
 	}
 	rpc, head, ls := a.rpc, a.head, a.listeners
 	a.rpc, a.head, a.listeners, a.links = nil, nil, nil, nil
@@ -891,9 +1015,9 @@ func (a *Agent) localPort(target string) (int, error) {
 		if a.head.Running() {
 			return a.apiPort, nil
 		}
-	case "aux":
-		if a.aux.Running() {
-			return a.auxPort, nil
+	default:
+		if p, ok := a.auxPortLocked(target); ok {
+			return p, nil
 		}
 	}
 	return 0, fmt.Errorf("nothing is running for %q here", target)
@@ -914,6 +1038,9 @@ type ModelFile struct {
 	Size     int64  `json:"size"`
 	Complete bool   `json:"complete"`
 	Found    string `json:"found,omitempty"`
+	// AddOn: not a model but a helper file of one (an image add-on, a draft model): listed
+	// for its disk space, never offered to run.
+	AddOn bool `json:"addOn,omitempty"`
 }
 
 func dirSize(dir string) int64 {
@@ -942,7 +1069,7 @@ func (a *Agent) Storage() StorageReport {
 		}
 		switch {
 		case strings.HasSuffix(name, ".gguf"):
-			r.Models = append(r.Models, ModelFile{File: name, Size: info.Size(), Complete: true})
+			r.Models = append(r.Models, ModelFile{File: name, Size: info.Size(), Complete: true, AddOn: notAModel.MatchString(name)})
 		case strings.HasSuffix(name, ".gguf.part"):
 			r.Models = append(r.Models, ModelFile{File: strings.TrimSuffix(name, ".part"), Size: info.Size()})
 		}
@@ -1004,36 +1131,80 @@ func (a *Agent) localHeader(file string) (*ModelInfo, error) {
 		if a.isFound(name) {
 			path = a.modelPath(name)
 		}
-		st, err := os.Stat(path)
+		_, err := os.Stat(path)
 		if err != nil {
 			return nil, fmt.Errorf("%s is missing from the models folder", name)
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, err
 		}
 		hint := 0
 		if i > 0 {
 			hint = infos[0].Layers
 		}
-		var info *ModelInfo
-		for size := int64(8 << 20); ; size *= 4 {
-			if size > st.Size() {
-				size = st.Size()
-			}
-			buf := make([]byte, size)
-			if _, err = f.ReadAt(buf, 0); err != nil {
-				break
-			}
-			if info, err = parseGGUFPart(buf, st.Size(), hint); err == nil || !errors.Is(err, errShort) || size == st.Size() {
-				break
-			}
-		}
-		f.Close()
+		info, err := readHeaderFile(path, hint)
 		if err != nil {
 			return nil, fmt.Errorf("%s does not look like a model file: %w", name, err)
 		}
 		infos = append(infos, info)
 	}
 	return mergeParts(infos), nil
+}
+
+// rpcTunnels opens one local port per helper. The engine connects to these; each connection
+// is carried to that helper through the main computer's encrypted link.
+func (a *Agent) rpcTunnels(workers []string) ([]string, []net.Listener, error) {
+	var rpcList []string
+	var listeners []net.Listener
+	for _, w := range workers {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			for _, l := range listeners {
+				l.Close()
+			}
+			return nil, nil, err
+		}
+		listeners = append(listeners, l)
+		rpcList = append(rpcList, "127.0.0.1:"+strconv.Itoa(l.Addr().(*net.TCPAddr).Port))
+		go func(l net.Listener, w string) {
+			for {
+				c, err := l.Accept()
+				if err != nil {
+					return
+				}
+				go func() {
+					t, err := a.dialPeer(w, "rpc")
+					if err != nil {
+						c.Close()
+						return
+					}
+					pipe(c, t)
+				}()
+			}
+		}(l, w)
+	}
+	return rpcList, listeners, nil
+}
+
+// foundVision is the image add-on next to a model found in another app's folder (LM Studio
+// and others keep one model per folder, with its add-on beside it). Potluck's own models
+// folder holds every downloaded model's add-on side by side, so nothing there is guessed: a
+// model Potluck downloaded names its own add-on.
+func (a *Agent) foundVision(name string) (string, int64) {
+	if !a.isFound(name) {
+		return "", 0
+	}
+	dir := filepath.Dir(a.modelPath(name))
+	if dir == filepath.Join(a.dir, "models") {
+		return "", 0
+	}
+	found, _ := filepath.Glob(filepath.Join(dir, "mmproj*.gguf"))
+	sort.Strings(found)
+	for _, pref := range []string{"f16", "bf16", ""} { // as for downloads: full precision first
+		for _, p := range found {
+			if strings.HasSuffix(strings.ToLower(p), pref+".gguf") {
+				if st, err := os.Stat(p); err == nil {
+					return p, st.Size()
+				}
+			}
+		}
+	}
+	return "", 0
 }

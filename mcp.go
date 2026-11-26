@@ -51,6 +51,12 @@ type mcpClient struct {
 	lastUse  time.Time
 	dead     error
 	initDone bool
+	// startMu makes starting and the opening handshake happen once: two tasks asking at the
+	// same moment would otherwise each start the server, and the first copy would be left
+	// running with nothing to stop it.
+	startMu sync.Mutex
+	// busy counts requests waiting for an answer: a long tool call is not "unused".
+	busy atomic.Int32
 }
 
 type mcpManager struct {
@@ -95,7 +101,7 @@ func (m *mcpManager) idleLoop() {
 		m.mu.Lock()
 		for k, cl := range m.clients {
 			cl.mu.Lock()
-			idle := time.Since(cl.lastUse) > 10*time.Minute
+			idle := time.Since(cl.lastUse) > 10*time.Minute && cl.busy.Load() == 0
 			cl.mu.Unlock()
 			if idle {
 				cl.close(errors.New("stopped after ten minutes unused"))
@@ -203,6 +209,13 @@ func (cl *mcpClient) deliver(line []byte) {
 
 // call sends one request and waits for its answer.
 func (cl *mcpClient) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	cl.busy.Add(1)
+	defer func() {
+		cl.mu.Lock()
+		cl.lastUse = time.Now() // counted from the answer, not the question
+		cl.mu.Unlock()
+		cl.busy.Add(-1)
+	}()
 	id := cl.nextID.Add(1)
 	req, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 	var raw json.RawMessage
@@ -330,7 +343,19 @@ func (cl *mcpClient) ensure(ctx context.Context) error {
 	if ready {
 		return nil
 	}
-	if cl.conn.Kind == "mcp-stdio" && cl.cmd == nil {
+	cl.startMu.Lock()
+	defer cl.startMu.Unlock()
+	cl.mu.Lock()
+	ready, dead = cl.initDone, cl.dead
+	started := cl.cmd != nil
+	cl.mu.Unlock()
+	if dead != nil {
+		return dead
+	}
+	if ready {
+		return nil // another caller started it meanwhile
+	}
+	if cl.conn.Kind == "mcp-stdio" && !started {
 		if err := cl.start(); err != nil {
 			cl.close(err)
 			return err

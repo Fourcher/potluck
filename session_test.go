@@ -26,6 +26,7 @@ type scriptModel struct {
 func (f *scriptModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Messages []map[string]any `json:"messages"`
+		Stream   bool             `json:"stream"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	f.mu.Lock()
@@ -35,10 +36,32 @@ func (f *scriptModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply, f.replies = f.replies[0], f.replies[1:]
 	}
 	f.mu.Unlock()
+	if !body.Stream { // a request for one whole answer (summarising)
+		t, _ := strings.CutPrefix(reply, "text:")
+		writeJSON(w, map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": t}}}})
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	chunk := func(delta any) {
 		b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": delta}}})
 		fmt.Fprintf(w, "data: %s\n\n", b)
+	}
+	if t, ok := strings.CutPrefix(reply, "error:"); ok { // fails partway
+		chunk(map[string]any{"content": "half an ans"})
+		b, _ := json.Marshal(map[string]any{"error": map[string]any{"message": t}})
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		return
+	}
+	if t, ok := strings.CutPrefix(reply, "cut:"); ok { // the connection closes mid-answer
+		chunk(map[string]any{"content": t})
+		return
+	}
+	if t, ok := strings.CutPrefix(reply, "length:"); ok { // stopped at the length limit
+		chunk(map[string]any{"content": t})
+		b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{}, "finish_reason": "length"}}})
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		return
 	}
 	if t, ok := strings.CutPrefix(reply, "text:"); ok {
 		chunk(map[string]any{"content": t})
@@ -177,6 +200,7 @@ func TestSessionStopWhileWaiting(t *testing.T) {
 func TestPermissionScopes(t *testing.T) {
 	_, st := withFakeModel(t)
 	s := st.create(nil, Policy{Commands: "auto"})
+	s.mcpByName = map[string]MCPTool{"mcp__files__write": {Server: "files", Name: "write"}} // offered at the last step
 	for _, name := range []string{"browser_click", "screen_click", "mcp__files__write"} {
 		done := make(chan string, 1)
 		go func() {
@@ -192,5 +216,338 @@ func TestPermissionScopes(t *testing.T) {
 	}
 	if no, _ := st.allowed(t.Context(), s, SToolCall{Name: "run_command", Args: "{}"}, map[string]any{"command": "ls"}); no != "" {
 		t.Fatal("commands=auto should run commands without asking")
+	}
+}
+
+// An engine failure partway through an answer stops the task with the reason, instead of
+// ending it "done" with half an answer (found by the 2026-11-24 code review).
+func TestSessionStreamFailures(t *testing.T) {
+	// The task waits for the model and tries again; with no model coming back it then stops
+	// with the reason (short waits here).
+	ob, ow := modelRetryBase, modelWaitMax
+	modelRetryBase, modelWaitMax = time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { modelRetryBase, modelWaitMax = ob, ow })
+	for _, tc := range []struct{ reply, want string }{
+		{"error:out of memory", "out of memory"},
+		{"cut:half", "broke off"},
+	} {
+		_, st := withFakeModel(t, tc.reply)
+		s := st.create(nil, Policy{})
+		_ = st.send(s, "go")
+		waitStatus(t, s, "error", "idle")
+		s.mu.Lock()
+		status, msg := s.Status, s.Error
+		s.mu.Unlock()
+		if status != "error" || !strings.Contains(msg, tc.want) {
+			t.Fatalf("%s: status %s %q", tc.reply, status, msg)
+		}
+	}
+}
+
+// A connector whose name has spaces is approved by its own name, and a tool name the model
+// made up is refused.
+func TestConnectorToolNames(t *testing.T) {
+	_, st := withFakeModel(t)
+	mt := MCPTool{Server: "Read and Write Apple Notes", Name: "add_note"}
+	name := mcpToolName(mt)
+	s := st.create(nil, Policy{Commands: "auto"})
+	s.Grants.Connectors = map[string]bool{"Read and Write Apple Notes": true}
+	s.mcpByName = map[string]MCPTool{name: mt}
+	if no, _ := st.allowed(t.Context(), s, SToolCall{Name: name, Args: "{}"}, map[string]any{}); no != "" {
+		t.Fatalf("an approved connector was not let through: %q", no)
+	}
+	if no, _ := st.allowed(t.Context(), s, SToolCall{Name: "mcp__other__thing", Args: "{}"}, map[string]any{}); no == "" {
+		t.Fatal("a tool that was not offered ran")
+	}
+}
+
+// An answer cut off at the length limit is carried on, not taken as the end of the task.
+func TestSessionCarriesOnAfterLengthLimit(t *testing.T) {
+	f, st := withFakeModel(t, "length:first half", "text:second half")
+	s := st.create(nil, Policy{})
+	_ = st.send(s, "write it")
+	waitStatus(t, s, "idle")
+	f.mu.Lock()
+	n := len(f.seen)
+	f.mu.Unlock()
+	if n != 2 {
+		t.Fatalf("the model was asked %d times; a cut answer should be carried on", n)
+	}
+	_, st = withFakeModel(t, "length:a", "length:b")
+	s = st.create(nil, Policy{})
+	_ = st.send(s, "write it")
+	waitStatus(t, s, "error")
+}
+
+// A call left without a result (stopped partway) gets one when the model reads the task.
+func TestOrphanCallsGetResults(t *testing.T) {
+	_, st := withFakeModel(t)
+	s := st.create(nil, Policy{})
+	s.Messages = []SMsg{{Role: "user", Content: "go"}, {Role: "assistant", Calls: []SToolCall{{ID: "a", Name: "x"}, {ID: "b", Name: "y"}}},
+		{Role: "tool", CallID: "a", Content: "ok"}, {Role: "user", Content: "carry on"}}
+	var ids []string
+	for _, m := range st.apiMessages(s) {
+		if m["role"] == "tool" {
+			ids = append(ids, m["tool_call_id"].(string))
+		}
+	}
+	if strings.Join(ids, ",") != "a,b" {
+		t.Fatalf("tool results %v, want a,b", ids)
+	}
+}
+
+// A question nobody answers does not hold the task for ever: after the person's away time
+// a permission is refused (and reported), a question to them is decided by the model.
+func TestQuestionsAnsweredWhenAway(t *testing.T) {
+	old := awayUnit
+	awayUnit = 20 * time.Millisecond
+	t.Cleanup(func() { awayUnit = old })
+	f, st := withFakeModel(t, `call:run_command:{"command":"echo hi"}`, `call:ask_user:{"question":"Which colour?"}`, "text:done")
+	s := st.create(nil, Policy{Commands: "ask", AwayMinutes: 2})
+	_ = st.send(s, "go")
+	waitStatus(t, s, "idle")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var results []string
+	for _, m := range s.Messages {
+		if m.Role == "tool" {
+			results = append(results, m.State+": "+m.Content)
+		}
+	}
+	if len(results) != 2 || !strings.HasPrefix(results[0], "denied") || !strings.Contains(results[0], "not approved") || !strings.Contains(results[1], "safest reasonable option") {
+		t.Fatalf("results %q", results)
+	}
+	_ = f
+	if (Policy{AwayMinutes: -1}).awayAfter() != 0 || (Policy{}).awayAfter() != 30*awayUnit {
+		t.Fatal("away defaults")
+	}
+}
+
+// A result too long for the model's memory is cut, saved whole, and readable in parts.
+func TestLongResultsSavedAndReadable(t *testing.T) {
+	_, st := withFakeModel(t)
+	s := st.create(nil, Policy{})
+	var b strings.Builder
+	for i := 1; i <= 5000; i++ {
+		fmt.Fprintf(&b, "line %d of the build log\n", i)
+	}
+	out := st.fitResult(s, SToolCall{ID: "c9", Name: "run_command"}, b.String())
+	if len(out) > 8000 || !strings.Contains(out, "line 1 of") || !strings.Contains(out, "line 5000 of") || !strings.Contains(out, taskOutputPrefix) {
+		t.Fatalf("cut result (%d chars) misses its head, tail or the saved path", len(out))
+	}
+	part, ok, err := st.readTaskOutput(s, "read", map[string]any{"path": taskOutputPrefix + safeName("run_command-c9") + ".txt", "start_line": float64(2500), "max_lines": float64(2)})
+	if !ok || err != nil || !strings.Contains(part, "line 2500 of") {
+		t.Fatalf("reading the saved result: %v %q", err, part)
+	}
+	if no, _ := st.allowed(t.Context(), s, SToolCall{Name: "read_file"}, map[string]any{"path": taskOutputPrefix + "x.txt"}); no != "" {
+		t.Fatal("reading its own saved result asked for permission")
+	}
+	if short := st.fitResult(s, SToolCall{ID: "c1", Name: "x"}, "small"); short != "small" {
+		t.Fatal("a short result changed")
+	}
+}
+
+// The task's instructions read the same at every step, so the engine reuses what it read.
+func TestTaskInstructionsStayTheSame(t *testing.T) {
+	_, st := withFakeModel(t)
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a"), 0o644)
+	s := st.create(&ProjectRef{Root: dir, Name: "p"}, Policy{})
+	first := st.taskSystem(s)
+	s.Messages = append(s.Messages, SMsg{Role: "user", Content: "go"}, SMsg{Role: "assistant", Content: "ok"})
+	_ = os.WriteFile(filepath.Join(dir, "b.go"), []byte("package a"), 0o644) // the task made a file
+	if again := st.taskSystem(s); again != first {
+		t.Fatal("the instructions changed between steps")
+	}
+	s.Policy.All = true
+	if st.taskSystem(s) == first {
+		t.Fatal("approve-everything did not reach the instructions")
+	}
+}
+
+// A task that worked a while tells the phones when it ends; a stopped one does not.
+func TestTaskEndAlert(t *testing.T) {
+	old := taskEndAlertAfter
+	taskEndAlertAfter = 0
+	t.Cleanup(func() { taskEndAlertAfter = old })
+	_, st := withFakeModel(t, "text:all done")
+	ended := make(chan string, 2)
+	st.notifyEnd = func(s *Session) { ended <- s.Status }
+	s := st.create(nil, Policy{})
+	_ = st.send(s, "go")
+	select {
+	case got := <-ended:
+		if got != "idle" {
+			t.Fatalf("alert for status %s", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no alert when the task finished")
+	}
+}
+
+// A task's remembered note is read by the next task on the same project, and not elsewhere.
+func TestRememberReachesNextTask(t *testing.T) {
+	_, st := withFakeModel(t)
+	dir := t.TempDir()
+	if _, err := remember(st.host.a.dir, dir, "project", "Run the tests with make check."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remember(st.host.a.dir, dir, "global", "The user likes short reports."); err != nil {
+		t.Fatal(err)
+	}
+	s := st.create(&ProjectRef{Root: dir, Name: "p"}, Policy{})
+	sys := st.taskSystem(s)
+	if !strings.Contains(sys, "make check") || !strings.Contains(sys, "short reports") {
+		t.Fatal("the next task did not read the notes")
+	}
+	other := st.create(&ProjectRef{Root: t.TempDir(), Name: "q"}, Policy{})
+	if strings.Contains(st.taskSystem(other), "make check") {
+		t.Fatal("a project's note reached another project")
+	}
+}
+
+func TestTaskReport(t *testing.T) {
+	msgs := []SMsg{{Role: "user", Content: "fix it"},
+		{Role: "assistant", Calls: []SToolCall{{ID: "a", Name: "edit_file", Args: `{"path":"main.go"}`}, {ID: "b", Name: "run_command", Args: `{"command":"go test ./..."}`}}},
+		{Role: "tool", CallID: "a", State: "ok", Content: "Changed."},
+		{Role: "tool", CallID: "b", State: "ok", Content: "Exit code 1, 2.0 s, in /p\nFAIL"},
+		{Role: "assistant", Calls: []SToolCall{{ID: "c", Name: "run_command", Args: `{"command":"git push"}`}, {ID: "d", Name: "ask_user", Args: `{"question":"Which branch?"}`}}},
+		{Role: "tool", CallID: "c", State: "denied", Content: awayAnswer("run", 30*time.Minute)},
+		{Role: "tool", CallID: "d", State: "ok", Content: awayAnswer("ask", 30*time.Minute)},
+		{Role: "assistant", Content: "Done."}}
+	r := taskReport(msgs, 90*time.Minute, "idle", "", nil)
+	for _, want := range []string{"Finished after 1.5 hours, 3 steps, 1 command run.", "Files changed (1):\n- main.go", "Commands that failed (1):\n- go test ./...", "Decided without you (nobody answered) (1):\n- Which branch?", "Waiting for your approval (not done) (1):\n- run_command git push"} {
+		if !strings.Contains(r, want) {
+			t.Fatalf("report misses %q:\n%s", want, r)
+		}
+	}
+}
+
+// A message sent while the task works is kept and given to it at its next step.
+func TestMessageWhileWorking(t *testing.T) {
+	f, st := withFakeModel(t, `call:run_command:{"command":"sleep 1"}`, "text:first done", "text:second done")
+	s := st.create(nil, Policy{Commands: "auto"})
+	_ = st.send(s, "start")
+	waitStatus(t, s, "working")
+	time.Sleep(300 * time.Millisecond) // the command is running
+	if err := st.send(s, "also do this"); err != nil {
+		t.Fatalf("a message while working was refused: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		f.mu.Lock()
+		n := len(f.seen)
+		f.mu.Unlock()
+		if n >= 3 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	waitStatus(t, s, "idle")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	last := f.seen[len(f.seen)-1]
+	found := false
+	for _, m := range last {
+		if m["role"] == "user" && m["content"] == "also do this" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the model never saw the message (%d requests)", len(f.seen))
+	}
+}
+
+// A failure while the model runs is retried: the same step goes again and the task finishes.
+func TestSessionRetriesModelFailure(t *testing.T) {
+	ob := modelRetryBase
+	modelRetryBase = time.Millisecond
+	t.Cleanup(func() { modelRetryBase = ob })
+	f, st := withFakeModel(t, "cut:half", "text:all done")
+	st.host.cluster.Phase = "running"
+	s := st.create(nil, Policy{})
+	_ = st.send(s, "go")
+	waitStatus(t, s, "idle", "error")
+	s.mu.Lock()
+	status := s.Status
+	last := s.Messages[len(s.Messages)-1].Content
+	s.mu.Unlock()
+	f.mu.Lock()
+	n := len(f.seen)
+	f.mu.Unlock()
+	if status != "idle" || last != "all done" || n != 2 {
+		t.Fatalf("status %s, last %q, %d requests", status, last, n)
+	}
+}
+
+// A task cut off by a restart carries on by itself, at most twice.
+func TestResumeAfterRestart(t *testing.T) {
+	f, st := withFakeModel(t, "text:carried on", "text:again")
+	s := st.create(nil, Policy{})
+	s.Messages = []SMsg{{Role: "user", Content: "long job"}}
+	s.Status = "working"
+	st.save(s)
+	st2 := newSessionStore(st.host, st.host.a.dir) // as after a restart
+	old := resumeAfter
+	resumeAfter = 0
+	t.Cleanup(func() { resumeAfter = old })
+	st2.resumeInterrupted()
+	s2 := st2.sessions[s.ID]
+	waitStatus(t, s2, "idle")
+	s2.mu.Lock()
+	resumed := s2.Resumed
+	s2.mu.Unlock()
+	f.mu.Lock()
+	n := len(f.seen)
+	f.mu.Unlock()
+	if resumed != 1 || n != 1 {
+		t.Fatalf("resumed %d, %d requests", resumed, n)
+	}
+	st2.resumeInterrupted() // not interrupted again: nothing happens
+	time.Sleep(100 * time.Millisecond)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.seen) != 1 {
+		t.Fatal("a finished task was resumed again")
+	}
+}
+
+// Two tasks do not take turns step by step: the first finishes its run, then the second goes.
+func TestTasksQueueForTheModel(t *testing.T) {
+	f, st := withFakeModel(t, `call:run_command:{"command":"sleep 0.3"}`, "text:A done", "text:B done")
+	a := st.create(nil, Policy{Commands: "auto"})
+	b := st.create(nil, Policy{Commands: "auto"})
+	_ = st.send(a, "task A")
+	waitStatus(t, a, "working")
+	time.Sleep(50 * time.Millisecond)
+	_ = st.send(b, "task B")
+	waitStatus(t, a, "idle")
+	waitStatus(t, b, "idle")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var order []string
+	for _, msgs := range f.seen {
+		order = append(order, fmt.Sprint(msgs[1]["content"]))
+	}
+	if strings.Join(order, ",") != "task A,task A,task B" {
+		t.Fatalf("model requests in the order %v, want A's run whole before B", order)
+	}
+}
+
+// A later run that summarises the task's earlier part ends normally, with its report (an
+// index kept from before the summary pointed past the end and crashed Potluck).
+func TestReportAfterSummary(t *testing.T) {
+	_, st := withFakeModel(t, "text:the summary", "text:done")
+	s := st.create(nil, Policy{})
+	for i := 0; i < 20; i++ {
+		s.Messages = append(s.Messages, SMsg{Role: "user", Content: "old", At: time.Now()}, SMsg{Role: "assistant", Content: "old answer", At: time.Now()})
+	}
+	s.lastPrompt, s.lastPromptN = 1_000_000, len(s.Messages) // the memory is full: summarise
+	_ = st.send(s, "carry on")
+	waitStatus(t, s, "idle", "error")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Status != "idle" || len(s.Messages) > 10 || !strings.HasPrefix(s.Report, "Finished") {
+		t.Fatalf("status %s, %d messages, report %q", s.Status, len(s.Messages), s.Report)
 	}
 }

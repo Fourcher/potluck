@@ -12,9 +12,16 @@ const Store = (() => {
   const tx = async (store, mode, fn) => {
     const d = await open();
     return new Promise((res, rej) => {
-      const t = d.transaction(store, mode), s = t.objectStore(store), q = fn(s);
+      // A write can fail when it is made (a value that cannot be stored), as the browser
+      // commits it (storage full fires "abort", not "error"), or on the request: each one
+      // settles the promise, so the page never waits for ever on a save.
+      let t, q;
+      try {
+        t = d.transaction(store, mode); q = fn(t.objectStore(store));
+      } catch (e) { return rej(e); }
       t.oncomplete = () => res(q && q.result);
-      t.onerror = () => rej(t.error);
+      t.onerror = () => rej(t.error || new Error("could not save"));
+      t.onabort = () => rej(t.error || new Error("the browser did not save it (is its storage full?)"));
     });
   };
   return {

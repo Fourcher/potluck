@@ -132,7 +132,9 @@ final class PotluckClient: @unchecked Sendable {
     }
 
     static func url(_ addr: String, _ port: Int, _ path: String) -> URL {
-        URL(string: "https://\(addr):\(port)\(path)")!
+        // An address from a hand-edited pairing link may not make a valid URL: fail the
+        // request (an unreachable host) rather than the whole app.
+        URL(string: "https://\(addr):\(port)\(path)") ?? URL(string: "https://invalid.invalid:\(port)")!
     }
 
     /// Pairs with a computer: swaps the code's one-time secret for a key of this phone's own.
@@ -176,8 +178,28 @@ final class PotluckClient: @unchecked Sendable {
         throw friendly(lastError, name: code.name)
     }
 
+    // MARK: the demo (no computer): for trying the app, and for App Review
+
+    static let demoID = "potluck-demo"
+    var isDemo: Bool { computer.id == Self.demoID }
+
+    static func demoAnswer(_ q: String) -> String {
+        let t = q.lowercased()
+        if t.contains("how") && (t.contains("connect") || t.contains("pair") || t.contains("set up") || t.contains("start")) {
+            return "To use Potluck for real:\n\n1. Install Potluck on your computer (free for Mac, Windows and Linux at potluck-ai.lovable.app).\n2. On the computer, open Potluck, go to Computers, Your iPhone, and choose Pair a phone.\n3. In this app, tap Leave the demo, then Scan the pairing code.\n\nFrom then on your chats go to the AI model on your own computer: private, free, and with no account."
+        }
+        if t.contains("private") || t.contains("privacy") || t.contains("data") {
+            return "Potluck keeps everything at home. This app talks only to your own computer, encrypted, over your home network or Tailscale. No one else's servers are involved, there is no account, and your chats stay on this phone."
+        }
+        if t.contains("model") {
+            return "Potluck runs open AI models on your computers: one computer alone, or several pooled together for bigger models. From this app you can see what's running and switch between the models on your computers. This is the demo, so no real model is answering right now."
+        }
+        return "This is Potluck's demo, so no AI model is answering yet. With Potluck installed on your computer (free for Mac, Windows and Linux), this chat goes to the AI model running there: private and free, with no account. Ask me \"how do I connect my computer?\" to see the steps."
+    }
+
     /// Finds an address that answers, the last one that worked first.
     func connect() async throws -> Hello {
+        if isDemo { return Hello(name: computer.name, version: "demo", phone: nil) }
         var order = computer.addrs
         if let a = addr, let i = order.firstIndex(of: a) { order.remove(at: i); order.insert(a, at: 0) }
         var lastError: Error = PotluckError.unreachable("Could not reach \(computer.name).")
@@ -198,15 +220,24 @@ final class PotluckClient: @unchecked Sendable {
         throw Self.friendly(lastError, name: computer.name)
     }
 
-    func state() async throws -> ServerState { try await get("/potluck/state") }
+    func state() async throws -> ServerState {
+        if isDemo {
+            return ServerState(version: "demo", phase: "running", error: nil,
+                               model: .init(title: "Demo (no real model)", file: "demo", size: 0), steps: nil,
+                               nodes: [.init(name: "Demo computer", role: "head", online: true)], ctx: 8192)
+        }
+        return try await get("/potluck/state")
+    }
 
     func models() async throws -> [ModelEntry] {
+        if isDemo { return [ModelEntry(title: "Demo (no real model)", file: "demo", size: 0, node: "demo", nodeName: "Demo computer", running: true)] }
         struct Res: Decodable { var models: [ModelEntry]? }
         let r: Res = try await get("/potluck/models")
         return r.models ?? []
     }
 
     func switchModel(_ m: ModelEntry, ctx: Int) async throws {
+        if isDemo { return }
         var req = try request("/phone/switch")
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -219,6 +250,19 @@ final class PotluckClient: @unchecked Sendable {
     /// Streams one answer. `messages` are OpenAI-style {role, content}.
     func chat(messages: [[String: String]], think: Bool) -> AsyncThrowingStream<ChatEvent, Error> {
         AsyncThrowingStream { cont in
+            if self.isDemo {
+                let answer = Self.demoAnswer(messages.last?["content"] ?? "")
+                let task = Task {
+                    for word in answer.split(separator: " ", omittingEmptySubsequences: false) {
+                        if Task.isCancelled { break }
+                        cont.yield(.content(String(word) + " "))
+                        try? await Task.sleep(for: .milliseconds(35))
+                    }
+                    cont.finish()
+                }
+                cont.onTermination = { _ in task.cancel() }
+                return
+            }
             let task = Task {
                 do {
                     var req = try request("/v1/chat/completions")
@@ -229,12 +273,9 @@ final class PotluckClient: @unchecked Sendable {
                         "stream": true,
                         "stream_options": ["include_usage": true],
                         "cache_prompt": true,
-                        // Qwen-style templates read enable_thinking; Inkling 2 reads a reasoning
-                        // effort, where "none" keeps its thinking as short as it allows.
-                        "chat_template_kwargs": ["enable_thinking": think, "reasoning_effort": think ? "high" : "none"],
-                        // The only reliable stop for models that think regardless (Inkling 2).
-                        "reasoning_budget_tokens": think ? 4096 : 1,
-                        "reasoning_budget_message": "Time to stop thinking and give the answer.",
+                        // Potluck's one thinking switch: the computer turns it into what the model
+                        // reads (its effort level or enable_thinking), with a backstop budget.
+                        "thinking": think ? "high" : "off",
                     ]
                     req.httpBody = try JSONSerialization.data(withJSONObject: body)
                     let (bytes, resp) = try await session.bytes(for: req)
@@ -278,16 +319,40 @@ final class PotluckClient: @unchecked Sendable {
     // MARK: tasks waiting on the person (Potluck's sessions)
 
     func questions() async throws -> [TaskQuestion] {
+        if isDemo { return [] }
         struct R: Decodable { let questions: [TaskQuestion]? }
         let r: R = try await get("/phone/questions")
         return r.questions ?? []
     }
 
     func answer(session: String, question: String, answer: String) async throws {
+        if isDemo { return }
         try await post("/phone/answer", ["session": session, "question": question, "answer": answer])
     }
 
+    // MARK: tasks: read them and tell one to carry on (the computer decides what it may do)
+
+    func tasks() async throws -> [PhoneTask] {
+        if isDemo { return [] }
+        struct R: Decodable { let tasks: [PhoneTask]? }
+        let r: R = try await get("/phone/tasks")
+        return r.tasks ?? []
+    }
+
+    func task(_ id: String) async throws -> PhoneTask {
+        try await get("/phone/tasks/\(id)")
+    }
+
+    func taskMessage(_ id: String, _ text: String) async throws {
+        try await post("/phone/tasks/\(id)/message", ["text": text])
+    }
+
+    func taskStop(_ id: String) async throws {
+        try await post("/phone/tasks/\(id)/stop", [:])
+    }
+
     func registerPush(token: String, development: Bool) async throws {
+        if isDemo { return }
         try await post("/phone/push", ["token": token, "env": development ? "development" : "production"])
     }
 
@@ -389,6 +454,21 @@ enum Keychain {
 
 
 /// Something a task running in Potluck is waiting on: yes, no, or an answer in your own words.
+struct PhoneTask: Decodable, Identifiable, Equatable {
+    struct Msg: Decodable, Equatable, Identifiable {
+        let role: String
+        let text: String
+        var id: String { role + String(text.hashValue) }
+    }
+    let id: String
+    let title: String
+    let status: String
+    let error: String?
+    let report: String?
+    let question: TaskQuestion?
+    let messages: [Msg]?
+}
+
 struct TaskQuestion: Codable, Identifiable, Equatable {
     let id: String
     let session: String

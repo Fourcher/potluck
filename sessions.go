@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Policy is what a session may do without asking.
@@ -31,6 +32,35 @@ type Policy struct {
 	Connectors map[string]bool `json:"connectors"` // switched-on MCP servers (started only if on)
 	All        bool            `json:"all"`        // approve everything: nothing asks (the person accepted the warning)
 	Thinking   bool            `json:"thinking"`
+	// AwayMinutes: how long a question waits for the person before the task carries on by
+	// itself (0: the default, 30 minutes; below 0: it waits for ever).
+	AwayMinutes int `json:"awayMinutes,omitempty"`
+}
+
+// awayUnit is a minute (tests make it shorter).
+var awayUnit = time.Minute
+
+// awayAfter is how long a question waits before it is answered for an absent person.
+func (p Policy) awayAfter() time.Duration {
+	switch {
+	case p.AwayMinutes < 0:
+		return 0
+	case p.AwayMinutes == 0:
+		return 30 * awayUnit
+	}
+	return time.Duration(p.AwayMinutes) * awayUnit
+}
+
+// awayAnswer is what a question gets when nobody answered in time. A task left running at
+// night must not stop at the first question until morning; nor may it do what was not
+// approved. So: a question to the person gets "decide safely yourself", and an approval is
+// not given, the model told to carry on without it and say so at the end.
+func awayAnswer(kind string, waited time.Duration) string {
+	mins := int(waited / awayUnit)
+	if kind == "ask" {
+		return fmt.Sprintf("(No answer: the person has been away for %d minutes. Choose the safest reasonable option yourself, say which you chose and why, and carry on. Mention it in your final report.)", mins)
+	}
+	return fmt.Sprintf("(No answer within %d minutes: the person is away, so this was not approved and not done. Carry on without it if you can, and list it in your final report as waiting for their approval.)", mins)
 }
 
 // Grants are standing yeses given during a session ("yes, and don't ask again").
@@ -49,6 +79,7 @@ type SMsg struct {
 	State     string      `json:"state,omitempty"`  // tool messages: ok | error | denied
 	Images    []string    `json:"images,omitempty"` // user messages: pictures for a model that can see (file paths)
 	At        time.Time   `json:"at"`
+	cut       bool        // the engine ended this answer at its length limit, not because it was done
 }
 
 type SToolCall struct {
@@ -67,6 +98,7 @@ type Question struct {
 	Kind     string    `json:"kind"`   // run | read | write | connector | ask | plan
 	Created  time.Time `json:"created"`
 	Answer   string    `json:"answer,omitempty"`
+	Auto     bool      `json:"auto,omitempty"` // answered by Potluck: nobody answered in time
 	answered chan string
 }
 
@@ -84,11 +116,39 @@ type Session struct {
 	Messages []SMsg      `json:"messages"`
 	Question *Question   `json:"question,omitempty"` // the open question, if waiting
 	Steps    int         `json:"steps"`
+	// System: the task's instructions as the model first read them (taskSystem), kept so
+	// every later step, and the task after a restart, starts with exactly the same text.
+	System string `json:"system,omitempty"`
+	// Report sums up the last run (taskReport).
+	Report string `json:"report,omitempty"`
+	// Inbox: messages the person sent while the task worked, given to it at its next step.
+	Inbox []string `json:"inbox,omitempty"`
+	// Resumed: how often it carried on by itself after Potluck restarted (resumeInterrupted).
+	Resumed  int    `json:"resumed,omitempty"`
+	Schedule string `json:"schedule,omitempty"` // the schedule that started it (schedules.go)
+	// In a git repository: where the task started (taskchanges.go), for its changes and undo.
+	GitBase      string   `json:"gitBase,omitempty"`
+	GitUntracked []string `json:"gitUntracked,omitempty"`
+	// TaskEnd: what the task left in each file it changed (noteTaskEnd), so undo leaves alone
+	// a file changed since.
+	TaskEnd     map[string]string `json:"taskEnd,omitempty"`
+	interrupted bool              // Potluck restarted while it ran
 
-	lastPrompt int // tokens the model read last time, to know when to make room
-	mu         sync.Mutex
-	cancel     context.CancelFunc
-	subs       map[chan SEvent]bool
+	lastPrompt  int // tokens the model read last time, to know when to make room
+	lastPromptN int // how many messages the task had then
+	mu          sync.Mutex
+	cancel      context.CancelFunc
+	// mcpByName: the connector tools offered at the last step, by the name the model sees
+	// (cleaned up and cut to 64 characters, so it cannot be read back into the connector's
+	// own name, which may hold spaces or colons).
+	mcpByName map[string]MCPTool
+	systemKey string // what System was made for (taskSystem)
+	subs      map[chan SEvent]bool
+	// saveMu keeps one save at a time from snapshot to rename (two could land in the wrong
+	// order); deleted, under it, stops a run that is still ending from writing a deleted task
+	// back to disk.
+	saveMu  sync.Mutex
+	deleted bool
 }
 
 type ProjectRef struct {
@@ -108,11 +168,13 @@ type SEvent struct {
 }
 
 type sessionStore struct {
-	mu       sync.Mutex
-	dir      string
-	host     *Host
-	sessions map[string]*Session
-	notify   func(q *Question, s *Session) // phones and other alerts (set by the host)
+	mu        sync.Mutex
+	dir       string
+	host      *Host
+	sessions  map[string]*Session
+	notify    func(q *Question, s *Session) // phones and other alerts (set by the host)
+	notifyEnd func(s *Session)              // a task finished or stopped with an error
+	lease     *modelLease                   // which task uses the model now (takeModel)
 }
 
 func newSessionStore(h *Host, data string) *sessionStore {
@@ -125,6 +187,7 @@ func newSessionStore(h *Host, data string) *sessionStore {
 			if s.Status == "working" || s.Status == "waiting" {
 				s.Status, s.Error = "stopped", "Potluck restarted while this was running. Send a message to carry on."
 				s.Question = nil
+				s.interrupted = true
 			}
 			s.subs = map[chan SEvent]bool{}
 			st.sessions[s.ID] = &s
@@ -133,7 +196,41 @@ func newSessionStore(h *Host, data string) *sessionStore {
 	return st
 }
 
+// resumeInterrupted carries on with the tasks Potluck's restart cut off, once it is up again:
+// a task left running for the night should not end because the computer updated or rebooted.
+// Each task resumes by itself at most twice, so one that keeps bringing Potluck down does not
+// keep doing it. A call that was cut off gets "Stopped before it ran" (apiMessages) and the
+// model can make it again, asking again if it needs approval.
+var resumeAfter = time.Minute
+
+func (st *sessionStore) resumeInterrupted() {
+	time.Sleep(resumeAfter)
+	st.mu.Lock()
+	var list []*Session
+	for _, s := range st.sessions {
+		list = append(list, s)
+	}
+	st.mu.Unlock()
+	for _, s := range list {
+		s.mu.Lock()
+		ok := s.interrupted && s.Status == "stopped" && s.Resumed < 2 && !s.deleted
+		if ok {
+			s.interrupted = false
+			s.Resumed++
+		}
+		s.mu.Unlock()
+		if ok {
+			_ = st.send(s, "(Potluck restarted while you were working. Carry on with the task from where you were; redo any step that was cut off.)")
+		}
+	}
+}
+
 func (st *sessionStore) save(s *Session) {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	if s.deleted {
+		return
+	}
 	s.mu.Lock()
 	b, err := json.MarshalIndent(s, "", " ")
 	s.mu.Unlock()
@@ -196,12 +293,37 @@ func (st *sessionStore) get(id string) *Session {
 // send adds the person's message and starts the loop if it is not running.
 func (st *sessionStore) send(s *Session, text string) error {
 	s.mu.Lock()
-	if s.Status == "working" || s.Status == "waiting" {
+	if s.Status == "waiting" {
 		s.mu.Unlock()
-		return errors.New("this task is still working: stop it first, or answer its question")
+		return errors.New("this task is waiting for your answer to its question: answer it first")
+	}
+	if s.Status == "working" {
+		// Kept for the model's next step, instead of making the person stop a long answer
+		// half-way just to add a note.
+		s.Inbox = append(s.Inbox, text)
+		s.mu.Unlock()
+		s.emit(SEvent{Type: "status", Status: "working", Error: "Your message is kept for the task's next step"})
+		st.save(s)
+		return nil
+	}
+	if len(s.Messages) == 0 && s.Project != nil {
+		// A task starting in a git repository knows its branch, what is uncommitted and the
+		// latest commits (in its first message, not its instructions, which stay the same).
+		root := s.Project.Root
+		// Working from here on: a second message while git answers goes to the inbox
+		// instead of starting a second run beside this one.
+		s.Status, s.Error = "working", ""
+		s.mu.Unlock()
+		g := gitContext(root)
+		base, untracked := gitStart(root, s.ID)
+		s.mu.Lock()
+		s.GitBase, s.GitUntracked = base, untracked
+		if g != "" && len(s.Messages) == 0 {
+			s.Messages = append(s.Messages, SMsg{Role: "user", Content: g, At: time.Now()})
+		}
 	}
 	s.Messages = append(s.Messages, SMsg{Role: "user", Content: text, At: time.Now()})
-	if s.Title == "" || (s.Project != nil && s.Title == s.Project.Name && len(s.Messages) == 1) {
+	if s.Title == "" || (s.Project != nil && s.Title == s.Project.Name && len(s.Messages) <= 2) {
 		s.Title = titleOf(text, s.Project)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -215,8 +337,8 @@ func (st *sessionStore) send(s *Session, text string) error {
 
 func titleOf(text string, p *ProjectRef) string {
 	t := strings.Join(strings.Fields(text), " ")
-	if len(t) > 48 {
-		t = t[:46] + "…"
+	if r := []rune(t); len(r) > 48 {
+		t = string(r[:46]) + "…" // whole characters, never half of one
 	}
 	if p != nil {
 		return p.Name + ": " + t
@@ -287,17 +409,38 @@ func (st *sessionStore) ask(ctx context.Context, s *Session, kind, title, detail
 	if st.notify != nil {
 		go st.notify(q, s)
 	}
+	s.mu.Lock()
+	wait := s.Policy.awayAfter()
+	s.mu.Unlock()
+	var away <-chan time.Time
+	if wait > 0 {
+		t := time.NewTimer(wait)
+		defer t.Stop()
+		away = t.C
+	}
+	st.giveModel(s) // nothing to compute while the person decides
 	var ans string
+	auto := false
 	select {
 	case ans = <-q.answered:
 	case <-ctx.Done():
 		ans = "no"
+	case <-away:
+		select {
+		case ans = <-q.answered: // answered at the same moment: the person's answer counts
+		default:
+			ans, auto = awayAnswer(kind, wait), true
+		}
 	}
+	// A question is never changed once shown (watchers read it without the lock): the
+	// answered one is a copy.
+	done := *q
+	done.Answer, done.Auto = ans, auto
 	s.mu.Lock()
-	q.Answer, s.Question = ans, nil
+	s.Question = nil
 	s.mu.Unlock()
 	s.setStatus("working", "")
-	s.emit(SEvent{Type: "question", Question: q})
+	s.emit(SEvent{Type: "question", Question: &done})
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}
@@ -316,6 +459,7 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 		return "", nil
 	}
 	kind, title, detail := "", "", ""
+	connServer := "" // the connector's own name, for a connector tool
 	str := func(k string) string { v, _ := args[k].(string); return v }
 	switch {
 	case call.Name == "run_command" || call.Name == "run_applescript":
@@ -326,10 +470,7 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 		if call.Name == "run_applescript" {
 			title, detail = "Run this AppleScript to control an app?", str("script")
 		} else {
-			title, detail = "Run this command?", str("command")
-			if f := str("folder"); f != "" {
-				detail += "\n\n(in " + f + ")"
-			}
+			title, detail = "Run this command?", str("command")+"\n\n(in "+st.commandDir(s, str("folder"))+")"
 		}
 	case call.Name == "edit_file" || call.Name == "write_file":
 		if pol.Files == "edit" || g.Write {
@@ -342,14 +483,30 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 			title, detail = "Write "+str("path")+"?", trimTo(str("content"), 3000)
 		}
 	case call.Name == "read_file" || call.Name == "list_files" || call.Name == "search_files":
+		if p, _ := args["path"].(string); strings.HasPrefix(p, taskOutputPrefix) && call.Name != "list_files" {
+			return "", nil // the task's own saved results
+		}
 		if pol.Files == "read" || pol.Files == "edit" || g.Read {
 			return "", nil
 		}
 		kind, title, detail = "read", "Look at the project's files?", call.Name+" "+call.Args
+	case call.Name == "remember":
+		// A note is read by every later task (global ones by all tasks, even those that run
+		// commands without asking): a task that read an untrusted page or file must not plant
+		// one unseen. Project notes go freely where it may change files; global ones are asked.
+		scope, _ := args["scope"].(string)
+		if (scope == "project" || scope == "") && s.Project != nil && (pol.Files == "edit" || g.Write) {
+			return "", nil
+		}
+		kind, title, detail = "write", "Remember this for every later task?", str("note")
+		if s.Project != nil && scope != "global" {
+			title = "Remember this for later tasks on this project?"
+		}
 	case strings.HasPrefix(call.Name, "browser_"):
 		// Each kind of access has its own yes: running commands freely does not include the
-		// browser, the screen or connectors (found by the self-review on the pool).
-		if g.Browser || call.Name == "browser_read" || call.Name == "browser_screenshot" {
+		// browser, the screen or connectors (found by the self-review on the pool). Reading
+		// counts too: the browser is signed in to the person's sites.
+		if g.Browser {
 			return "", nil
 		}
 		kind = "browser"
@@ -381,7 +538,14 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 			title = "Scroll on your screen?"
 		}
 	case strings.HasPrefix(call.Name, "mcp__"):
-		server := strings.SplitN(strings.TrimPrefix(call.Name, "mcp__"), "__", 2)[0]
+		s.mu.Lock()
+		mt, known := s.mcpByName[call.Name]
+		s.mu.Unlock()
+		connServer = mt.Server
+		server := mt.Server
+		if !known {
+			return "That connector tool is not available now.", nil
+		}
 		if g.Connectors[server] {
 			return "", nil
 		}
@@ -413,7 +577,7 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 			if s.Grants.Connectors == nil {
 				s.Grants.Connectors = map[string]bool{}
 			}
-			s.Grants.Connectors[strings.SplitN(strings.TrimPrefix(call.Name, "mcp__"), "__", 2)[0]] = true
+			s.Grants.Connectors[connServer] = true
 		}
 		s.mu.Unlock()
 		return "", nil
@@ -423,11 +587,15 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 	return "The user did not allow that, and said: " + ans, nil
 }
 
+// trimTo keeps about n bytes of s, ending on a whole character.
 func trimTo(s string, n int) string {
-	if len(s) > n {
-		return s[:n] + "\n…"
+	if len(s) <= n {
+		return s
 	}
-	return s
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "\n…"
 }
 
 // projectGrants are approvals kept for a project across sessions.
@@ -456,6 +624,7 @@ func (h *Host) sessionStore() *sessionStore {
 	h.sessOnce.Do(func() {
 		h.sess = newSessionStore(h, h.a.dir)
 		h.sess.notify = h.pushQuestion // paired phones hear about every question (apns.go)
+		h.sess.notifyEnd = h.pushTaskEnd
 	})
 	return h.sess
 }

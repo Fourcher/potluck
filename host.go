@@ -13,10 +13,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,7 +31,11 @@ var (
 	portShare = 7722 // other devices and apps, with the share key; only while sharing is on
 )
 
-const engineTag = "b12608"
+// engineTag is the llama.cpp release every computer installs. b12728 (2026-11-25) over b12608:
+// Inkling 2's tokenizer fixed (ignore_merges: code such as "kwargs" was split into the wrong
+// pieces), its tool-call parser rewritten, NVFP4 files run with their scales, prompt reading
+// faster, DSpark drafts supported. Measured on LLMOS: same writing speed (5.9 words/s).
+const engineTag = "b12728"
 
 // For trying a build next to a Potluck that is already running: POTLUCK_PORT_OFFSET=100
 // moves every port up by 100. Computers only find each other with the same offset.
@@ -41,18 +47,25 @@ func init() {
 
 // Node is one computer as the main computer sees it.
 type Node struct {
-	Info     NodeInfo  `json:"info"`
-	Online   bool      `json:"online"`
-	IsMain   bool      `json:"isMain"`
-	Status   string    `json:"status"`
-	Done     int64     `json:"done"`
-	Total    int64     `json:"total"`
-	Role     string    `json:"role"` // head | worker | "" while a model runs
-	Held     int64     `json:"held"` // bytes of the running model on this computer
-	Offer    int64     `json:"offer"`
-	Active   bool      `json:"active"` // allowed to work right now (switch + schedule)
-	NoGPU    bool      `json:"noGPU"`  // its engine found no graphics card it can use after all
-	LastSeen time.Time `json:"lastSeen"`
+	Info      NodeInfo `json:"info"`
+	Online    bool     `json:"online"`
+	IsMain    bool     `json:"isMain"`
+	Status    string   `json:"status"`
+	Done      int64    `json:"done"`
+	Total     int64    `json:"total"`
+	Role      string   `json:"role"` // head | worker | "" while a model runs
+	Held      int64    `json:"held"` // bytes of the running model on this computer
+	Offer     int64    `json:"offer"`
+	Active    bool     `json:"active"`   // allowed to work right now (switch + schedule)
+	NoGPU     bool     `json:"noGPU"`    // its engine found no graphics card it can use after all
+	Prepared  bool     `json:"prepared"` // its engine is installed and has said which card it can use (prepareNode)
+	preparing bool
+	// PrepareErr: why getting its engine ready failed last time; tried again after a wait
+	// that grows with each failure (each try may download the engine again).
+	PrepareErr string `json:"prepareErr,omitempty"`
+	prepFails  int
+	prepNext   time.Time
+	LastSeen   time.Time `json:"lastSeen"`
 	// LinkMs is the average round trip to this computer over the last couple of minutes,
 	// jitter included. 0 until measured.
 	LinkMs float64 `json:"linkMs"`
@@ -97,15 +110,20 @@ type Host struct {
 	id  *Identity
 	cfg *ConfigStore
 
+	// Locks, in the only order they may be taken: h.mu, then h.helperMu (the planner holds
+	// h.mu and reads the helper's reservation). Never take h.mu while holding helperMu, never
+	// take the agent's a.mu while holding either, and never make a network call (h.call, a
+	// tunnel) while holding any of them. TestLockOrder exercises the paths that share them.
 	mu             sync.Mutex
 	nodes          map[string]*Node
-	memCeil        map[string]memCeiling // per computer, after its guard stepped in (hostguard.go)
 	sessOnce       sync.Once
-	sess           *sessionStore // agent sessions (sessions.go)
-	pushErr        string        // the last problem sending a phone alert
-	pushTestAnswer string        // what the phone answered to the last test alert
-	vision         bool          // the running model can see images
-	guardWhy       string        // why the guard stopped the model, shown instead of "stopped"
+	sess           *sessionStore        // agent sessions (sessions.go)
+	pushErr        string               // the last problem sending a phone alert
+	pushTestAnswer string               // what the phone answered to the last test alert
+	vision         bool                 // the running model can see images
+	waking         bool                 // a resting model is being loaded again (wake)
+	guardWhy       string               // why the guard stopped the model, shown instead of "stopped"
+	guardSeen      map[string]time.Time // each computer's last guard event acted on
 	pending        map[string]*Pending
 	tunnels        map[string]chan net.Conn
 	cluster        ClusterState
@@ -117,8 +135,12 @@ type Host struct {
 	lastSolo string
 	lastInfo *ModelInfo
 	paused   *ModelRef // a model waiting for enough computers to be available again
-	pauseWhy string
-	stale    bool // limits changed on a computer that is part of the running model
+	// pausedInfo, pausedCtx: that model's own blueprint and size, for deciding when it fits
+	// again (lastInfo and lastCtx belong to whatever ran since).
+	pausedInfo *ModelInfo
+	pausedCtx  int
+	pauseWhy   string
+	stale      bool // limits changed on a computer that is part of the running model
 
 	lastUse    time.Time // the last request to the model
 	asleep     *ModelRef // let go after being unused for a while; the next request loads it
@@ -130,14 +152,18 @@ type Host struct {
 	pairUntil  time.Time
 	phoneSeen  map[string]time.Time
 	phoneMu    sync.Mutex
-	phoneSrvs  []*http.Server
+	phoneSrvs  map[string]*http.Server // by address
 	helperMu   sync.Mutex
-	helper     helperState // the Potluck helper (helper.go)
-	helperGen  int         // which setup run is current; bumped by stop and restart
-	shareMu    sync.Mutex
-	shareSrvs  []*http.Server
-	shareOn    string // the addresses the share server listens on now
-	phoneOn    string // the addresses the phone server listens on now
+	helper     helperState            // the Potluck helper (helper.go)
+	helperGen  int                    // which setup run is current; bumped by stop and restart
+	crew       map[string]*CrewMember // extra models on other computers (crew.go), under mu
+	// startGen numbers each start (and each stop); a start's progress and cleanup only touch
+	// the cluster while its number is current. startDone closes when that start's work ends.
+	inflight  atomic.Int64 // model requests being answered or waiting their turn (chat.go)
+	startGen  int
+	startDone chan struct{}
+	shareMu   sync.Mutex
+	shareSrvs map[string]*http.Server // by address
 }
 
 func newHost(a *Agent, id *Identity, cfg *ConfigStore) *Host {
@@ -148,9 +174,10 @@ func newHost(a *Agent, id *Identity, cfg *ConfigStore) *Host {
 			c.JoinSecret = randomHex(8)
 		}
 		// The engine version follows the program: a new Potluck brings the engine it was
-		// tested with (b12608 for Inkling 2 models), and every computer installs the same one.
+		// tested with (b12728 for Inkling 2 models), and every computer installs the same one.
 		c.EngineTag = engineTag
 	})
+	setHFKey(cfg.Get().HFKey)
 	self := &Node{Info: a.Info(), Online: true, IsMain: true}
 	h.nodes[id.FP] = self
 	a.dialTunnel = h.openTunnel
@@ -196,6 +223,10 @@ func (h *Host) Run() error {
 	go h.phoneLoop()
 	go h.shareLoop()
 	go h.helperLoop()
+	go h.crewWatch()
+	go h.crewKeep()
+	go h.sessionStore().resumeInterrupted() // tasks cut off by a restart carry on
+	go h.sessionStore().scheduleLoop()      // scheduled tasks (schedules.go)
 	return nil
 }
 
@@ -272,7 +303,10 @@ func (h *Host) serveControl(c *tls.Conn, fp string, hello Hello) {
 		p := &Pending{ID: fp, Name: name, OS: hello.OS, Addr: c.RemoteAddr().String(), Code: pairCode(h.id.FP, fp), decide: make(chan bool, 1)}
 		h.mu.Lock()
 		if old := h.pending[fp]; old != nil {
-			old.decide <- false
+			select { // never wait while holding the lock: an answer may already be queued
+			case old.decide <- false:
+			default:
+			}
 		}
 		h.pending[fp] = p
 		h.mu.Unlock()
@@ -435,9 +469,68 @@ func (h *Host) refreshNode(id string) {
 		return
 	}
 	h.mu.Lock()
+	prep := false
 	if n := h.nodes[id]; n != nil {
 		info.ID = id
 		n.Info, n.LastSeen = info, time.Now()
+		if !n.Prepared && !n.preparing && n.Online && info.Limits.ActiveNow(time.Now()) && time.Now().After(n.prepNext) {
+			n.preparing, prep = true, true
+		}
+	}
+	h.mu.Unlock()
+	if prep {
+		go h.prepareNode(id)
+	}
+}
+
+// prepareNode installs the AI engine on a computer that lends, as soon as it does, and learns
+// whether the engine can use its graphics card. Plans then count the card only if it works,
+// instead of finding out halfway through starting a model and planning again; and the first
+// start is quicker.
+func (h *Host) prepareNode(id string) {
+	defer func() {
+		h.mu.Lock()
+		if n := h.nodes[id]; n != nil {
+			n.preparing = false
+		}
+		h.mu.Unlock()
+	}()
+	h.mu.Lock()
+	n := h.nodes[id]
+	if n == nil {
+		h.mu.Unlock()
+		return
+	}
+	ni := n.Info
+	single := h.cfg != nil && h.cfg.Get().Single
+	h.mu.Unlock()
+	failed := func(err error) {
+		h.mu.Lock()
+		if n := h.nodes[id]; n != nil {
+			n.PrepareErr = err.Error()
+			n.prepFails++
+			n.prepNext = time.Now().Add(min(time.Minute<<min(n.prepFails-1, 6), time.Hour))
+		}
+		h.mu.Unlock()
+	}
+	spec, err := h.runtimeSpec(ni, true)
+	if err != nil {
+		failed(err)
+		return
+	}
+	spec.Solo, spec.For = single, "aux:prepare" // alone: an engine already on the computer will do
+	var res struct {
+		GPUDevice string `json:"gpuDevice"`
+	}
+	if err := h.call(id, "ensure_runtime", spec, &res, 2*time.Hour); err != nil {
+		failed(err)
+		return
+	}
+	h.mu.Lock()
+	if n := h.nodes[id]; n != nil {
+		n.Prepared = true
+		n.NoGPU = twoDev(ni) && res.GPUDevice == ""
+		n.PrepareErr, n.prepFails, n.prepNext = "", 0, time.Time{}
 	}
 	h.mu.Unlock()
 }
@@ -659,7 +752,7 @@ func (h *Host) watchLoop() {
 		now := time.Now()
 		h.mu.Lock()
 		phase, model, ctxSize, info := h.cluster.Phase, h.cluster.Model, h.lastCtx, h.lastInfo
-		paused := h.paused
+		paused, pInfo, pCtx := h.paused, h.pausedInfo, h.pausedCtx
 		var gone []string
 		if phase == "running" {
 			for _, n := range h.nodes {
@@ -670,22 +763,21 @@ func (h *Host) watchLoop() {
 		}
 		h.mu.Unlock()
 		switch {
+		// Checked with the same plan start makes (a model file on one computer runs there).
 		case len(gone) > 0 && model != nil:
 			why := strings.Join(gone, " and ") + " stopped lending"
 			h.Stop()
-			if info != nil && h.plan(info, h.soloChoice()).Fits {
+			if info != nil && h.planFor(info, h.soloChoice(), model.Node).Fits {
 				_ = h.Start(*model, ctxSize, h.soloChoice())
 			} else {
 				h.mu.Lock()
 				h.paused, h.pauseWhy = model, why+". The model no longer fits on the computers that are left; it will start again by itself when they are back."
+				h.pausedInfo, h.pausedCtx = info, ctxSize
 				h.mu.Unlock()
 			}
-		case paused != nil && phase == "idle" && info != nil:
-			if h.plan(info, h.soloChoice()).Fits {
-				h.mu.Lock()
-				h.paused, h.pauseWhy = nil, ""
-				h.mu.Unlock()
-				_ = h.Start(*paused, ctxSize, h.soloChoice())
+		case paused != nil && phase == "idle" && pInfo != nil:
+			if h.planFor(pInfo, h.soloChoice(), paused.Node).Fits {
+				_ = h.Start(*paused, pCtx, h.soloChoice())
 			}
 		}
 	}
@@ -853,6 +945,12 @@ func offer(info NodeInfo, held int64) (cpu, gpu int64, unified bool) {
 	cpu = usable * pedal / 100
 	if g := info.usableGPU(); g != nil {
 		if g.Unified {
+			// Everything planned here goes on the graphics chip, which macOS lets hold only
+			// part of the RAM (metal.go; VRAMTotal is that limit). Past it the chip runs out
+			// of memory, as it did on the Mac mini on 2026-11-23.
+			if lim := int64(g.VRAMTotal) - (500 << 20); g.VRAMTotal > 0 && cpu > lim {
+				cpu = max(lim, 0)
+			}
 			return 0, cpu, true
 		}
 		v := int64(g.VRAMFree) - (500 << 20)
@@ -894,7 +992,11 @@ func (h *Host) planNodes() []PlanNode {
 		}
 		cpu, gpu, uni := offer(info, held)
 		cpu, gpu = h.capByCeiling(id, cpu, gpu)
-		if r := h.helperReserveLocked(id); r > 0 { // the helper's memory is not on offer
+		// The helper's and crew members' memory is not on offer to the main model.
+		if r := h.helperReserveLocked(id) + h.crewReserveLocked(id); r > 0 {
+			if r > cpu {
+				gpu = max(0, gpu-(r-cpu))
+			}
 			cpu = max(0, cpu-r)
 		}
 		n.Offer = cpu + gpu
@@ -935,7 +1037,72 @@ func (h *Host) plan(info *ModelInfo, solo string) *Plan { return h.planFor(info,
 
 // planFor is plan with the head fixed: a model file that is already on a computer has to
 // run from that computer.
+// autoCtx picks the conversation memory when the person has not chosen one: 32k tokens
+// (room for an agent task's tools, files and history) when that fits without the disk, less
+// only when it does not, and more when the plan stays exactly as it is (same placement on the
+// same computers, so no speed is lost), up to what the model was trained for.
+func (h *Host) autoCtx(info *ModelInfo, file, solo, head string) int {
+	const floor = 32768
+	try := func(c int) *Plan {
+		m := *info
+		m.PlanCtx = c
+		m.WorkSeen = h.cfg.Get().WorkSeen[workKey(file, c)]
+		return h.planFor(&m, solo, head)
+	}
+	good := func(p *Plan) bool { return p.Fits && p.Overflow == 0 }
+	limit := info.CtxTrain
+	if limit <= 0 {
+		limit = floor
+	}
+	best, bestPlan := 0, (*Plan)(nil)
+	for _, c := range []int{floor, 16384, 8192} {
+		if c > limit {
+			continue
+		}
+		if p := try(c); good(p) {
+			best, bestPlan = c, p
+			break
+		}
+	}
+	if best == 0 {
+		return min(8192, limit) // nothing fits well; the plan at the usual size says why
+	}
+	if best < floor {
+		return best
+	}
+	for c := floor * 2; c <= limit && c <= 1<<18; c *= 2 {
+		p := try(c)
+		if !good(p) || !samePlacement(p, bestPlan) {
+			break
+		}
+		best = c
+	}
+	return best
+}
+
+// samePlacement: the two plans put the same layers on the same devices in the same way.
+func samePlacement(a, b *Plan) bool {
+	return a.Head == b.Head && a.NGL == b.NGL && a.KVKeyQ8 == b.KVKeyQ8 && a.CardTrunk == b.CardTrunk &&
+		slices.Equal(a.WorkerOrder, b.WorkerOrder) && slices.Equal(a.DevLayers, b.DevLayers) && slices.Equal(a.ExpertCPU, b.ExpertCPU)
+}
+
 func (h *Host) planFor(info *ModelInfo, solo, head string) *Plan {
+	p := h.planForKV(info, solo, head)
+	// Too big as it is: try again with the conversation memory's keys stored in 8 bits
+	// (about a quarter less memory, close to no loss in quality, and it works on every
+	// device, unlike 8-bit values, which need flash attention).
+	if !p.Fits && !info.KVKeyQ8 && !p.Stream && info.ContextTotal(max(info.PlanCtx, 1)) > 0 {
+		sq := *info
+		sq.KVKeyQ8 = true
+		if q := h.planForKV(&sq, solo, head); q.Fits {
+			q.KVKeyQ8 = true
+			return q
+		}
+	}
+	return p
+}
+
+func (h *Host) planForKV(info *ModelInfo, solo, head string) *Plan {
 	nodes := h.planNodes()
 	if solo == "" {
 		if head == "" {
@@ -989,12 +1156,13 @@ func (h *Host) bestSolo(info *ModelInfo, only string) *Plan {
 
 func (h *Host) step(text string) func(err error) {
 	h.mu.Lock()
+	gen := h.startGen
 	h.cluster.Steps = append(h.cluster.Steps, Step{Text: text, State: "doing"})
 	i := len(h.cluster.Steps) - 1
 	h.mu.Unlock()
 	return func(err error) {
 		h.mu.Lock()
-		if i < len(h.cluster.Steps) {
+		if h.startGen == gen && i < len(h.cluster.Steps) {
 			if err != nil {
 				h.cluster.Steps[i].State = "failed"
 			} else {
@@ -1013,18 +1181,44 @@ func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 		h.mu.Unlock()
 		return errors.New("busy: wait for the current start or stop to finish")
 	}
+	// Claim the start before letting go of the lock, so a second start (a click, the
+	// watcher, a phone) is turned away instead of running alongside this one.
 	running := h.cluster.Phase == "running"
-	h.mu.Unlock()
-	if running {
-		h.Stop()
-		// The computers report their free memory every few seconds; planning straight away
-		// would count the old model as still there (seen: a 23.5 GB model planned to read
-		// 34 GB from disk on a computer with 27 GB free).
-		time.Sleep(12 * time.Second)
+	if h.cancel != nil {
+		h.cancel()
 	}
+	// This start's number and its cancel are set now, before the old model is stopped: a
+	// Stop meanwhile cancels this start and moves the number on, and this start sees that
+	// below instead of loading after the person said stop.
 	ctx, cancel := context.WithCancel(context.Background())
-	h.mu.Lock()
 	h.cancel = cancel
+	h.startGen++ // whatever an earlier start still does no longer touches the cluster
+	gen := h.startGen
+	prev := h.startDone
+	finished := make(chan struct{})
+	h.startDone = finished
+	h.paused, h.pausedInfo, h.pauseWhy = nil, nil, "" // what runs now was chosen: no old model comes back
+	h.cluster = ClusterState{Phase: "starting", Model: &model, Since: time.Now()}
+	h.mu.Unlock()
+	waitStart(prev)
+	if running {
+		// Stop the old model and wait until its engines have exited, then read every
+		// computer's free memory afresh: planning on the last report would count the old
+		// model as still there (seen: a 23.5 GB model planned to read 34 GB from disk on a
+		// computer with 27 GB free).
+		h.stopAll()
+		h.mu.Lock()
+		h.vision = false
+		h.mu.Unlock()
+	}
+	h.mu.Lock()
+	if h.startGen != gen {
+		// Stopped (or replaced) while the old model was being stopped.
+		h.mu.Unlock()
+		cancel()
+		close(finished)
+		return errors.New("stopped")
+	}
 	h.cluster = ClusterState{Phase: "starting", Model: &model, Since: time.Now()}
 	h.guardWhy = ""
 	h.lastCtx, h.lastSolo, h.stale = ctxSize, solo, false
@@ -1032,27 +1226,50 @@ func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 	h.mu.Unlock()
 	h.cfg.Update(func(c *Config) { c.LastModel = &model })
 	go func() {
+		defer close(finished)
 		err := h.start(ctx, model, ctxSize, solo)
 		h.mu.Lock()
-		if err != nil {
-			h.cluster.Phase, h.cluster.Error = "error", err.Error()
-			if h.guardWhy != "" {
-				h.cluster.Error = h.guardWhy // the guard stopped it: say that, not "stopped"
-			}
-			for i := range h.cluster.Steps {
-				if h.cluster.Steps[i].State == "doing" {
-					h.cluster.Steps[i].State = "failed"
-				}
-			}
-		} else {
+		if h.startGen != gen {
+			h.mu.Unlock() // stopped or replaced meanwhile: whoever did that owns the cluster now
+			return
+		}
+		if err == nil {
 			h.cluster.Phase = "running"
+			h.mu.Unlock()
+			return
+		}
+		// Clean up while still busy, so no new start runs into this one's stopAll.
+		h.cluster.Phase, h.cluster.Error = "stopping", err.Error()
+		if h.guardWhy != "" {
+			h.cluster.Error = h.guardWhy // the guard stopped it: say that, not "stopped"
+		}
+		for i := range h.cluster.Steps {
+			if h.cluster.Steps[i].State == "doing" {
+				h.cluster.Steps[i].State = "failed"
+			}
 		}
 		h.mu.Unlock()
-		if err != nil {
-			h.stopAll()
+		h.stopAll()
+		h.mu.Lock()
+		if h.startGen == gen {
+			h.cluster.Phase = "error"
 		}
+		h.mu.Unlock()
 	}()
 	return nil
+}
+
+// waitStart waits for an earlier start's work to end (it was cancelled), so it cannot write
+// over a new start or stop its engines. A start stuck in a slow call is given two minutes;
+// after that its writes are ignored anyway (startGen).
+func waitStart(done chan struct{}) {
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Minute):
+	}
 }
 
 func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo string) error {
@@ -1061,6 +1278,14 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 	if err := resolveModel(ctx, &model); err != nil {
 		done(err)
 		return err
+	}
+	// A model found in another app's folder may have its image add-on beside it: name it in
+	// the start so the plan counts its memory (the engine only loads what the start names).
+	if local && model.Vision == nil {
+		var v *ModelPart
+		if h.call(model.Node, "found_vision", map[string]string{"file": model.File}, &v, 20*time.Second) == nil && v != nil && v.Size > 0 {
+			model.Vision = v
+		}
 	}
 	h.mu.Lock()
 	h.cluster.Model = &model // now with its title, size and checksum filled in
@@ -1079,12 +1304,17 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 	if err != nil {
 		return fmt.Errorf("could not read the model: %w", err)
 	}
+	auto := ctxSize <= 0
+	if auto {
+		ctxSize = h.autoCtx(info, model.File, solo, model.Node)
+	}
 	h.mu.Lock()
+	h.lastCtx = ctxSize
 	info.PlanCtx = ctxSize // plans count the context cache for this size
 	if model.Vision != nil {
 		info.OtherBytes += model.Vision.Size // the image add-on is held by the computer running the model
 	}
-	info.WorkSeen = h.cfg.Get().WorkSeen[model.File+"@"+strconv.Itoa(ctxSize)]
+	info.WorkSeen = h.cfg.Get().WorkSeen[workKey(model.File, ctxSize)]
 	h.lastInfo = info
 	h.mu.Unlock()
 
@@ -1213,7 +1443,11 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 			if local {
 				return nil // the file is already there
 			}
-			return h.call(p.id, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts, Vision: model.Vision}, nil, 24*time.Hour)
+			err := h.call(p.id, "fetch_model", FetchModelReq{URL: model.URL, File: model.File, Size: model.Size, SHA256: model.SHA256, Parts: model.Parts, Vision: model.Vision, HFKey: currentHFKey(), Unchecked: model.Unchecked}, nil, 24*time.Hour)
+			if err != nil && strings.Contains(err.Error(), "download is damaged") && model.Repo != "" {
+				forgetTree(model.Repo) // it may have been uploaded again: look its checksum up afresh
+			}
+			return err
 		}
 		var res struct {
 			Port int `json:"port"`
@@ -1244,7 +1478,7 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 				items = append(items, it)
 			}
 		}
-		if err := h.call(p.id, "seed", SeedReq{URL: model.URL, Items: items}, nil, 24*time.Hour); err != nil {
+		if err := h.call(p.id, "seed", SeedReq{URL: model.URL, Items: items, HFKey: currentHFKey()}, nil, 24*time.Hour); err != nil {
 			// Not fatal: the head can still push this share over the local network.
 			h.setProgress(p.id, ProgressNote{Msg: "Will receive its share from the head instead (" + err.Error() + ")"})
 		}
@@ -1258,11 +1492,6 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		return errors.New("stopped")
 	}
 
-	if len(plan.WorkerOrder) == 0 {
-		done = h.step("Loading the model")
-	} else {
-		done = h.step("Loading the model across the computers")
-	}
 	// Devices the helpers offer, in order; the head's own card (if any) is the last entry
 	// of the plan's device list and is not one of them.
 	rpcDevs, helperLayers := 0, 0
@@ -1280,12 +1509,73 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 		// on the processor (2 words per second instead of 18.5, measured on the Mac mini).
 		ngl = 999
 	}
-	req := StartHeadReq{File: model.File, Vision: model.Vision, Workers: plan.WorkerOrder, NGL: ngl, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream, DenseBytes: info.denseBytes(),
-		ExpertCPU: plan.ExpertCPU,
-		// Every hardware thread only where it measured faster: pooled, with the card holding
-		// the trunk of all the head's layers (3.8 against 3.3 words/s). With whole layers on
-		// the processor or the disk in play it measured slower (1.1 to 1.8 against 2.3 to 2.8).
-		AllThreads: plan.CardTrunk && !plan.Solo && len(plan.Shares) > 0 && plan.Shares[0].CPULayers == 0}
+	// The largest graphics memory among the computers in the plan (see the working-memory
+	// note after loading).
+	var cardMax int64
+	h.mu.Lock()
+	for _, id := range append([]string{plan.Head}, plan.WorkerOrder...) {
+		if n := h.nodes[id]; n != nil {
+			for _, g := range n.Info.GPUs {
+				if !g.Unified && int64(g.VRAMTotal) > cardMax {
+					cardMax = int64(g.VRAMTotal)
+				}
+			}
+		}
+	}
+	h.mu.Unlock()
+	req := StartHeadReq{File: model.File, Vision: model.Vision, HFKey: currentHFKey(), Workers: plan.WorkerOrder, NGL: ngl, Split: plan.TensorSplit, Ctx: ctxSize, RPCDevices: rpcDevs, Stream: plan.Stream, DenseBytes: info.denseBytes(), KVKeyQ8: plan.KVKeyQ8,
+		ExpertCPU: plan.ExpertCPU, Sampling: samplingArgs(info),
+		// Every hardware thread except where it measured slower: the disk in play, or pooled with
+		// whole layers on the head's processor (see threadsFor).
+		AllThreads: plan.Overflow == 0 && !(!plan.Solo && len(plan.Shares) > 0 && plan.Shares[0].CPULayers > 0)}
+	// Check the start against the engine's own report of what it will allocate on each device
+	// (this computer's cards, and each helper's share through its engine), and shrink the
+	// prompt batch or the conversation memory until it truly fits.
+	if !plan.Stream && (ngl > 0 || len(plan.WorkerOrder) > 0) {
+		if len(plan.WorkerOrder) == 0 {
+			done = h.step("Checking that it fits on the graphics card")
+		} else {
+			done = h.step("Checking that it fits on each computer")
+		}
+		budget := map[string]int64{}
+		for _, pn := range h.planNodes() {
+			budget[pn.ID] = (pn.CPUBytes + pn.GPUBytes) >> 20
+			if pn.ID == plan.Head && !pn.Unified && plan.Overflow == 0 {
+				budget[hostBudget] = pn.CPUBytes >> 20
+			}
+		}
+		var visionMiB int64
+		if model.Vision != nil {
+			visionMiB = (model.Vision.Size + model.Vision.Size/4) >> 20 // its weights and the room to work on an image
+		}
+		var allExperts []int
+		for l := 0; l < info.Layers; l++ {
+			if info.expertBytes(l) > 0 {
+				allExperts = append(allExperts, l)
+			}
+		}
+		f := fitStart(h.measureOn, plan.Head, req, auto, visionMiB, allExperts, budget)
+		req.Ctx, req.UBatch, req.VisionCPU, req.ExpertCPU = f.Ctx, f.UBatch, f.VisionCPU, f.ExpertCPU
+		if f.Ctx != ctxSize {
+			ctxSize = f.Ctx
+			h.mu.Lock()
+			h.lastCtx = ctxSize
+			info.PlanCtx = ctxSize
+			h.mu.Unlock()
+		}
+		h.setProgress(plan.Head, ProgressNote{Msg: f.Note})
+		if f.Measured && f.Short > 0 {
+			err := fmt.Errorf("it does not fit: the AI engine needs %s more than there is at the smallest size tried. Choose a smaller conversation size (or Auto), a smaller version of the model, or add a computer", humanBytes(f.Short<<20))
+			done(err)
+			return err
+		}
+		done(nil)
+	}
+	if len(plan.WorkerOrder) == 0 {
+		done = h.step("Loading the model")
+	} else {
+		done = h.step("Loading the model across the computers")
+	}
 	if err := h.call(plan.Head, "start_head", req, nil, time.Minute); err != nil {
 		done(err)
 		return err
@@ -1303,12 +1593,16 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 				h.mu.Lock()
 				h.vision = st.Vision
 				h.mu.Unlock()
-				if w := workReported(st.FullLog); w > 0 {
+				// Learn the engine's working memory, but only from a load that used graphics
+				// chips (the only kind the figure is charged to) and only a figure that fits on
+				// the largest of them: a bigger one means the system spilled it into ordinary
+				// memory, a sign of a wrong plan rather than something to plan around.
+				if w := workReported(st.FullLog); w > 0 && ngl > 0 && (cardMax == 0 || w <= cardMax) {
 					h.cfg.Update(func(c *Config) {
 						if c.WorkSeen == nil {
 							c.WorkSeen = map[string]int64{}
 						}
-						c.WorkSeen[model.File+"@"+strconv.Itoa(ctxSize)] = w
+						c.WorkSeen[workKey(model.File, ctxSize)] = w
 					})
 				}
 				if helperLayers > 0 && st.HeadLog != "" && !engineUsedHelpers(st.FullLog) {
@@ -1319,7 +1613,23 @@ func (h *Host) start(ctx context.Context, model ModelRef, ctxSize int, solo stri
 				break
 			}
 			if !st.Head {
-				err := errors.New("the AI engine stopped while loading: " + lastLogLine(st.HeadLog))
+				why := lastLogLine(st.HeadLog)
+				if st.Guard == nil {
+					// The guard reads an ended engine's log within a second: give it that.
+					time.Sleep(2 * time.Second)
+					_ = h.call(plan.Head, "status", nil, &st, 20*time.Second)
+				}
+				if st.Guard != nil && h.newGuardEvent(plan.Head, st.Guard) {
+					// It ran out of memory while loading (the event is this start's: the head
+					// cleared its guard when asked to start). Say so, and give it less next time.
+					h.learnCeiling(plan.Head, st.Guard, plan)
+					h.mu.Lock()
+					err := errors.New(h.guardWhy)
+					h.mu.Unlock()
+					done(err)
+					return err
+				}
+				err := errors.New("the AI engine stopped while loading: " + why)
 				done(err)
 				return err
 			}
@@ -1377,10 +1687,17 @@ func engineUsedHelpers(log string) bool {
 var logNoise = regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+ \w `)
 
 func lastLogLine(log string) string {
+	// The engine often prints its error and then a few lines while it shuts down: look for
+	// the error first, and only without one take the last line.
 	lines := strings.Split(strings.TrimSpace(log), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		l := strings.TrimSpace(lines[i])
-		if l != "" && (strings.Contains(strings.ToLower(l), "error") || strings.Contains(l, " E ") || i == len(lines)-1) {
+		if strings.Contains(strings.ToLower(l), "error") || strings.Contains(l, " E ") {
+			return logNoise.ReplaceAllString(l, "")
+		}
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
 			return logNoise.ReplaceAllString(l, "")
 		}
 	}
@@ -1409,14 +1726,27 @@ func (h *Host) Stop() {
 		h.cancel()
 		h.cancel = nil
 	}
+	h.paused, h.pausedInfo, h.pauseWhy = nil, nil, "" // a stop also ends a pause
 	if h.cluster.Phase == "idle" {
 		h.mu.Unlock()
 		return
 	}
+	h.startGen++
+	gen := h.startGen
+	prev := h.startDone
 	h.cluster.Phase = "stopping"
 	h.mu.Unlock()
+	// Tell the computers first: "stop" also cancels a download or an engine install the start
+	// is waiting on, which a cancelled start cannot interrupt by itself (its calls run to
+	// their own end). Then wait for the start to finish, and stop whatever it started meanwhile.
+	h.stopAll()
+	waitStart(prev)
 	h.stopAll()
 	h.mu.Lock()
+	if h.startGen != gen {
+		h.mu.Unlock() // a new start began meanwhile: it owns the cluster now
+		return
+	}
 	h.cluster = ClusterState{Phase: "idle"}
 	h.vision = false
 	h.mu.Unlock()
@@ -1437,7 +1767,17 @@ func (h *Host) stopAll() {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
-			_ = h.call(id, "stop", nil, nil, 30*time.Second)
+			// "stop" answers once the engines have exited; the inventory after it is fresh.
+			if err := h.call(id, "stop", nil, nil, 60*time.Second); err != nil {
+				// Its engine may still hold memory there: say so on its card.
+				h.mu.Lock()
+				if n := h.nodes[id]; n != nil {
+					n.Status = "Could not stop its AI engine: " + err.Error()
+				}
+				h.mu.Unlock()
+				return
+			}
+			h.refreshNode(id)
 		}(id)
 	}
 	wg.Wait()
@@ -1543,6 +1883,13 @@ func (h *Host) Test() error {
 		h.mu.Unlock()
 	}()
 	return nil
+}
+
+// workKey names a remembered working-memory figure: per model file and context size, for a
+// load that uses graphics chips. (Figures from before 1.12 had no "@card" and were dropped:
+// some came from loads with no layers on the card, which reserve far more.)
+func workKey(file string, ctx int) string {
+	return file + "@" + strconv.Itoa(ctx) + "@card"
 }
 
 var workLine = regexp.MustCompile(`(\S+) compute buffer size =\s+([\d.]+) MiB`)

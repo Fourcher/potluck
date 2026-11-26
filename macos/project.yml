@@ -29,5 +29,7 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Potluck
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: Potluck connects to your other computers on this network to share AI models between them.
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: Potluck listens only after you press the microphone button in the chat, to type what you say.
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: Potluck turns what you say into text in the chat when you use the microphone button.
         ENABLE_HARDENED_RUNTIME: NO
         ENABLE_APP_SANDBOX: NO

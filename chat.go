@@ -9,6 +9,7 @@ package main
 // which models are on disk, and switching models. Switching is only for this computer.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -78,17 +79,7 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 		case r.URL.Path == "/potluck/state" && r.Method == http.MethodGet:
 			writeJSON(w, h.chatState(chatOwner(r)))
 		case r.URL.Path == "/potluck/models" && r.Method == http.MethodGet:
-			ms := h.chatModels()
-			if isShared(r) {
-				own := ms[:0:0]
-				for _, m := range ms {
-					if !strings.HasPrefix(m.File, "ext:") {
-						own = append(own, m)
-					}
-				}
-				ms = own
-			}
-			writeJSON(w, map[string]any{"models": ms, "canSwitch": chatOwner(r)})
+			writeJSON(w, map[string]any{"models": h.visibleModels(isShared(r)), "canSwitch": chatOwner(r)})
 		case r.URL.Path == "/potluck/switch" && r.Method == http.MethodPost:
 			if !chatOwner(r) || r.Header.Get("X-Potluck") != "1" {
 				w.WriteHeader(http.StatusForbidden)
@@ -151,7 +142,13 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 			// How another AI can use Potluck: the same text the control panel copies.
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
-			_, _ = io.WriteString(w, h.aiGuide())
+			_, _ = io.WriteString(w, h.aiGuide(chatOwner(r), isShared(r)))
+		case r.URL.Path == "/potluck/schedules" || strings.HasPrefix(r.URL.Path, "/potluck/schedules/"):
+			if !chatOwner(r) {
+				http.NotFound(w, r)
+				return
+			}
+			h.sessionStore().handleSchedules(w, r)
 		case strings.HasPrefix(r.URL.Path, "/potluck/sessions") || r.URL.Path == "/potluck/questions":
 			if !chatOwner(r) {
 				http.NotFound(w, r)
@@ -167,19 +164,46 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 		case strings.HasPrefix(r.URL.Path, "/potluck/"):
 			http.NotFound(w, r)
 		default:
-			// The Potluck helper's own small model, on this computer only.
-			if !isShared(r) && h.helperRoute(w, r) {
+			// The model API answers this computer's own programs (a loopback Host) and the share
+			// and phone listeners, which mark their requests. Anything else reached 127.0.0.1 by a
+			// renamed address (a web page whose DNS now points here): it gets nothing, not the
+			// models and not the person's paid connections.
+			if !isShared(r) && !chatOwner(r) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "Potluck: use http://127.0.0.1:" + strconv.Itoa(portChat) + " or http://localhost:" + strconv.Itoa(portChat)}})
+				return
+			}
+			// Read a request's body once, with a limit, so every step below sees all of it
+			// and one that is too big is refused as such (not cut short and sent on).
+			if r.Body != nil && r.Method == http.MethodPost {
+				raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxChatBody))
+				if err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusRequestEntityTooLarge)
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "Potluck: the request is bigger than 64 MB"}})
+					return
+				}
+				r.Body, r.ContentLength = io.NopCloser(bytes.NewReader(raw)), int64(len(raw))
+			}
+			// One thinking switch for every client (thinking.go).
+			thinkingRequest(w, r)
+			// Crew members (Potluck's own models, for shared devices too) and the Potluck
+			// helper's small model (this computer only).
+			if h.helperRoute(w, r, isShared(r)) {
 				return
 			}
 			// A model from one of the person's other AI setups goes to that server.
 			if h.connRoute(w, r) {
 				return
 			}
-			if r.Method == http.MethodGet && r.URL.Path == "/v1/models" && len(h.cfg.Get().Connections) > 0 && !isShared(r) {
-				h.mergedModels(w, r, api)
+			if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+				h.mergedModels(w, r, api, isShared(r))
 				return
 			}
 			if r.Method == http.MethodPost && isModelRequest(r) {
+				h.inflight.Add(1)
+				defer h.inflight.Add(-1)
 				h.touch()
 				// The model was let go after a while unused: load it again, then answer.
 				if err := h.wake(15 * time.Minute); err != nil {
@@ -198,7 +222,8 @@ func (h *Host) chatState(owner bool) map[string]any {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c := h.cluster
-	out := map[string]any{"version": version, "phase": c.Phase, "error": c.Error, "steps": c.Steps, "owner": owner, "ctx": h.lastCtx, "pauseWhy": h.pauseWhy, "vision": h.vision}
+	out := map[string]any{"version": version, "phase": c.Phase, "error": c.Error, "steps": c.Steps, "owner": owner, "ctx": h.lastCtx, "pauseWhy": h.pauseWhy, "vision": h.vision,
+		"busy": h.inflight.Load()} // requests the model is working on now (it answers one at a time)
 	if c.Phase == "idle" && h.asleep != nil {
 		// Let go after a while unused; the next message loads it again.
 		out["phase"], c.Model = "resting", h.asleep
@@ -228,6 +253,22 @@ func (h *Host) chatState(owner bool) map[string]any {
 }
 
 // chatModels lists the complete model files on every connected computer.
+// visibleModels is the model list a request may see: a shared device sees Potluck's own
+// models only, never the person's external AI connections (often paid, and theirs alone).
+func (h *Host) visibleModels(shared bool) []chatModel {
+	ms := h.chatModels()
+	if !shared {
+		return ms
+	}
+	own := ms[:0:0]
+	for _, m := range ms {
+		if !strings.HasPrefix(m.File, "ext:") {
+			own = append(own, m)
+		}
+	}
+	return own
+}
+
 func (h *Host) chatModels() []chatModel {
 	h.mu.Lock()
 	var running string
@@ -245,7 +286,7 @@ func (h *Host) chatModels() []chatModel {
 	for id, rep := range h.Storage() {
 		for _, f := range rep.Models {
 			// A model that comes as several files is one entry, under its first file.
-			if !f.Complete || seen[f.File] || (splitRe.MatchString(f.File) && !strings.Contains(f.File, "-00001-of-")) {
+			if !f.Complete || f.AddOn || seen[f.File] || (splitRe.MatchString(f.File) && !strings.Contains(f.File, "-00001-of-")) {
 				continue
 			}
 			seen[f.File] = true
@@ -267,7 +308,7 @@ func (h *Host) chatModels() []chatModel {
 		}
 		return strings.ToLower(out[i].Title) < strings.ToLower(out[j].Title)
 	})
-	return append(out, h.connChatModels()...)
+	return append(append(out, h.crewChatModels()...), h.connChatModels()...)
 }
 
 // chatSwitch starts a model that is already on one of the computers.
@@ -276,9 +317,9 @@ func (h *Host) chatSwitch(file, node string, ctx int) error {
 		return errors.New("which model?")
 	}
 	switch ctx {
-	case 4096, 8192, 16384, 32768:
+	case 4096, 8192, 16384, 32768, 65536, 131072:
 	default:
-		ctx = 4096
+		ctx = 0 // chosen to fit (autoCtx)
 	}
 	// A model Potluck downloaded itself is started the way it was first started, so that
 	// helpers fetch their own share instead of receiving it over the local network.
@@ -291,3 +332,6 @@ func (h *Host) chatSwitch(file, node string, ctx int) error {
 	}
 	return h.Start(ref, ctx, "")
 }
+
+// maxChatBody: the largest chat request accepted (a long conversation with pictures).
+const maxChatBody = 64 << 20

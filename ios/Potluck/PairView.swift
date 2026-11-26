@@ -70,6 +70,15 @@ struct PairView: View {
 
                     if let error { Notice(text: error, warn: true) }
 
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("No computer with Potluck yet?").font(.subheadline.weight(.semibold))
+                        Text("Potluck is free for Mac, Windows and Linux at potluck-ai.lovable.app. Or look around first:")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        Button("Try the demo") { model.startDemo() }
+                            .buttonStyle(.bordered)
+                            .accessibilityHint("Opens a demo chat that explains how Potluck works, without a computer")
+                    }
+
                     Text("The phone talks only to your computer, encrypted, over your home network or Tailscale. Nothing goes through anyone else's servers, and your chats stay on this phone.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)

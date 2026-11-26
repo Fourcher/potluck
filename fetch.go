@@ -14,9 +14,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -38,11 +40,15 @@ var apiClient = &http.Client{Timeout: 40 * time.Second}
 func httpGetJSON(u string, out any) error {
 	req, _ := http.NewRequest("GET", u, nil)
 	req.Header.Set("User-Agent", userAgent)
+	hfAuth(req)
 	res, err := apiClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
+	if why := hfDenied(req, res.StatusCode); why != "" {
+		return errors.New(why)
+	}
 	if res.StatusCode != 200 {
 		return fmt.Errorf("%s answered %s", hostOf(u), res.Status)
 	}
@@ -63,9 +69,14 @@ func rangeGet(ctx context.Context, u string, start, end int64) (*http.Response, 
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	hfAuth(req)
 	res, err := dlClient.Do(req)
 	if err != nil {
 		return nil, err
+	}
+	if why := hfDenied(req, res.StatusCode); why != "" {
+		res.Body.Close()
+		return nil, errors.New(why)
 	}
 	if res.StatusCode != http.StatusPartialContent {
 		res.Body.Close()
@@ -145,16 +156,24 @@ func fetchHeaderPart(ctx context.Context, u string, layersHint int) (*ModelInfo,
 	return nil, errors.New("model header is larger than 1 GB")
 }
 
+// downloaded says whether a file is here whole and was checked when it was downloaded.
+func downloaded(dest string, size int64) bool {
+	st, err := os.Stat(dest)
+	if err != nil || st.Size() != size {
+		return false
+	}
+	_, err = os.Stat(dest + ".ok")
+	return err == nil
+}
+
 // Progress reports how far a long job is.
 type Progress func(done, total int64, note string)
 
 // downloadFile fetches a big file over many parallel connections straight into its final
 // place, resumes after an interruption, and checks the SHA-256 at the end when one is known.
 func downloadFile(ctx context.Context, u, dest string, size int64, sha string, streams int, prog Progress) error {
-	if st, err := os.Stat(dest); err == nil && st.Size() == size {
-		if _, err := os.Stat(dest + ".ok"); err == nil {
-			return nil // already downloaded and verified
-		}
+	if downloaded(dest, size) {
+		return nil // already downloaded and verified
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
@@ -172,11 +191,11 @@ func downloadFile(ctx context.Context, u, dest string, size int64, sha string, s
 	}
 	f, err := os.OpenFile(dest+".part", os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		return err
+		return fileErr(err, dest, size)
 	}
 	defer f.Close()
 	if err := f.Truncate(size); err != nil {
-		return fmt.Errorf("not enough disk space for %s: %w", humanBytes(size), err)
+		return fileErr(err, dest, size)
 	}
 	var got atomic.Int64
 	queue := make(chan int, nChunks)
@@ -197,7 +216,28 @@ func downloadFile(ctx context.Context, u, dest string, size int64, sha string, s
 				b[i] = '1'
 			}
 		}
-		_ = os.WriteFile(stateFile, b, 0o644)
+		// Replaced whole, never half-written.
+		if os.WriteFile(stateFile+".new", b, 0o644) == nil {
+			_ = os.Rename(stateFile+".new", stateFile)
+		}
+	}
+	// A chunk counts as done only once its data is on the disk: after a power cut or a
+	// crash, a chunk marked done but never written would resume as zeros. Chunks are
+	// written to the disk eight at a time (256 MB), then marked.
+	var unsynced []int
+	markDone := func(i int) {
+		unsynced = append(unsynced, i)
+		if len(unsynced) < 8 {
+			return
+		}
+		if f.Sync() != nil {
+			return // the end of the download reports a disk that fails
+		}
+		for _, j := range unsynced {
+			done[j] = true
+		}
+		unsynced = unsynced[:0]
+		saveState()
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -240,8 +280,7 @@ func downloadFile(ctx context.Context, u, dest string, size int64, sha string, s
 					mu.Unlock()
 					return
 				}
-				done[i] = true
-				saveState()
+				markDone(i)
 				mu.Unlock()
 			}
 		}()
@@ -264,13 +303,13 @@ func downloadFile(ctx context.Context, u, dest string, size int64, sha string, s
 	wg.Wait()
 	close(stop)
 	if firstErr != nil {
-		return firstErr
+		return fileErr(firstErr, dest, size)
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 	if err := f.Sync(); err != nil {
-		return err
+		return fileErr(err, dest, size)
 	}
 	f.Close()
 	if sha != "" {
@@ -287,7 +326,7 @@ func downloadFile(ctx context.Context, u, dest string, size int64, sha string, s
 		}
 	}
 	if err := os.Rename(dest+".part", dest); err != nil {
-		return err
+		return fileErr(err, dest, size)
 	}
 	_ = os.Remove(stateFile)
 	note := "verified"
@@ -553,4 +592,28 @@ func seedOne(ctx context.Context, u, cacheDir string, it SeedItem, j int, buf []
 		return "", n, err
 	}
 	return name, n, nil
+}
+
+// fileErr says what went wrong with a download's file on disk and what to do about it; other
+// errors (the network) pass through unchanged.
+func fileErr(err error, dest string, size int64) error {
+	if err == nil {
+		return nil
+	}
+	dir := filepath.Dir(dest)
+	var errno syscall.Errno
+	isErrno := errors.As(err, &errno)
+	switch {
+	case errors.Is(err, syscall.ENOSPC) || (isErrno && runtime.GOOS == "windows" && (errno == 112 || errno == 39)):
+		return fmt.Errorf("the disk holding %s is full: the model needs %s. Free some space (or delete models you no longer use under Models) and start it again", dir, humanBytes(size))
+	case errors.Is(err, syscall.EFBIG) || (size > 4<<30 && strings.Contains(strings.ToLower(err.Error()), "too large")):
+		return fmt.Errorf("the drive holding %s cannot store files over 4 GB (it is formatted FAT32). Keep Potluck's folder on a drive formatted APFS, NTFS or exFAT", dir)
+	case isErrno && runtime.GOOS == "windows" && (errno == 32 || errno == 33):
+		return fmt.Errorf("another program is holding %s open, often antivirus checking it. Wait a minute and start again, or exclude Potluck's folder from scanning", filepath.Base(dest))
+	case isErrno && runtime.GOOS == "windows" && errno == 206:
+		return fmt.Errorf("the path %s is too long for Windows. Move Potluck's folder closer to the top of the drive", dest)
+	case errors.Is(err, os.ErrPermission):
+		return fmt.Errorf("Potluck may not write in %s: check that folder's permissions", dir)
+	}
+	return err
 }

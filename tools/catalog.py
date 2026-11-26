@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds catalog/models.json: the models Potluck shows before anyone searches.
+"""Builds catalog/models-v2.json (and models.json for Potluck before 1.12): the models Potluck shows before anyone searches.
 
 Run daily (see .github/workflows/catalog.yml). It keeps the hand-picked list in
 catalog/picks.json and adds, from Hugging Face's public API:
@@ -50,6 +50,7 @@ def entry(m):
 
 def main():
     picks = json.load(open(os.path.join(ROOT, "catalog", "picks.json")))["picks"]
+    lists = json.load(open(os.path.join(ROOT, "catalog", "lists.json")))["lists"]
     taken = {p["repo"] for p in picks}
 
     def take(models, n):
@@ -79,8 +80,23 @@ def main():
         "trending": trending,
         "new": new,
         "popular": popular,
+        "lists": lists,
     }
-    path = os.path.join(ROOT, "catalog", "models.json")
+    # Two copies. models-v2.json is read by Potluck 1.12 and later, which leave out a pick
+    # whose "needsEngine" build is newer than the engine they install. models.json is read by
+    # older versions, which cannot check that, so picks with "needsEngine" are left out there
+    # (Inkling NVFP4 files, for one, give nonsense on the engines before b12728).
+    old_cat = dict(cat, picks=[p for p in picks if "needsEngine" not in p])
+    changed = write(os.path.join(ROOT, "catalog", "models-v2.json"), cat)
+    changed = write(os.path.join(ROOT, "catalog", "models.json"), old_cat) or changed
+    if not changed:
+        print("catalog unchanged")
+        return 0
+    print(f"catalog: {len(picks)} picks, {len(trending)} trending, {len(new)} new, {len(popular)} popular")
+    return 0
+
+
+def write(path, cat):
     old = None
     if os.path.exists(path):
         try:
@@ -88,15 +104,12 @@ def main():
         except ValueError:
             pass
     # Only write when a list changed, so the daily job doesn't commit just a new timestamp.
-    if old and all(old.get(k) == cat[k] for k in ("picks", "trending", "new", "popular")):
-        print("catalog unchanged")
-        return 0
+    if old and all(old.get(k) == cat[k] for k in ("picks", "trending", "new", "popular", "lists")):
+        return False
     with open(path, "w") as f:
         json.dump(cat, f, indent=1)
         f.write("\n")
-    print(f"catalog: {len(picks)} picks, {len(trending)} trending, {len(new)} new, {len(popular)} popular")
-    return 0
-
+    return True
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -43,15 +43,13 @@ func TestEnginesStopOnQuitAndAreReapedLater(t *testing.T) {
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
 	}
-	go c.Wait()
+	ended := make(chan struct{})
+	go func() { _ = c.Wait(); close(ended) }()
 	_ = os.WriteFile(enginesPath(dir), []byte(strconv.Itoa(c.Process.Pid)+" "+procPath(c.Process.Pid)+"\n"), 0o644)
 	reapStale(dir)
-	time.Sleep(300 * time.Millisecond)
-	if c.ProcessState == nil && alive(c.Process.Pid) {
-		// Wait has not returned yet: give it a moment
-		time.Sleep(time.Second)
-	}
-	if c.ProcessState == nil {
+	select {
+	case <-ended:
+	case <-time.After(3 * time.Second):
 		t.Fatal("the leftover engine was not ended")
 	}
 	if _, err := os.Stat(enginesPath(dir)); err == nil {

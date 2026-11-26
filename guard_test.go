@@ -65,14 +65,16 @@ func TestPlanCountsContext(t *testing.T) {
 
 func TestOOMLine(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "head.log")
-	off := map[string]int64{}
-	_ = os.WriteFile(p, []byte("load_tensors: offloaded 49/49 layers\nsrv  all slots are idle\n"), 0o644)
+	path := filepath.Join(dir, "head.log")
+	p := &proc{logPath: path}
+	off := map[*proc]int64{}
+	_ = os.WriteFile(path, []byte("load_tensors: offloaded 49/49 layers\nsrv  all slots are idle\n"), 0o644)
 	if l := newOOMLine(p, off); l != "" {
 		t.Fatalf("false alarm on a normal log: %q", l)
 	}
-	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
-	_, _ = f.WriteString("E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)\n")
+	oom := "E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)\n"
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	_, _ = f.WriteString(oom)
 	f.Close()
 	if l := newOOMLine(p, off); l == "" {
 		t.Fatal("missed the Metal out-of-memory line from the Mac mini crash")
@@ -80,17 +82,27 @@ func TestOOMLine(t *testing.T) {
 	if l := newOOMLine(p, off); l != "" {
 		t.Fatal("reported the same line twice")
 	}
+	// A new engine at the same path, whose log has already grown past the old one's end
+	// before the guard looks: read from its start (found by the self-review).
+	_ = os.WriteFile(path, []byte(strings.Repeat("load_tensors: a long line of loading noise\n", 4)+oom), 0o644)
+	if l := newOOMLine(&proc{logPath: path}, off); l == "" {
+		t.Fatal("missed the new engine's out-of-memory line")
+	}
 }
 
 func TestCeiling(t *testing.T) {
-	h := &Host{memCeil: map[string]memCeiling{"a": {Bytes: 10 << 30, Until: time.Now().Add(time.Hour)}}}
+	h := &Host{cfg: loadConfig(t.TempDir())}
+	set := func(c memCeiling) {
+		h.cfg.Update(func(cf *Config) { cf.Ceilings = map[string]memCeiling{"a": c} })
+	}
+	set(memCeiling{Bytes: 10 << 30, Until: time.Now().Add(time.Hour)})
 	if c, g := h.capByCeiling("a", 12<<30, 2<<30); c+g != 10<<30 || g != 2<<30 {
 		t.Fatalf("cap: cpu %d gpu %d", c, g)
 	}
 	if c, g := h.capByCeiling("b", 12<<30, 0); c != 12<<30 || g != 0 {
 		t.Fatal("a computer that never ran out must not be limited")
 	}
-	h.memCeil["a"] = memCeiling{Bytes: 1, Until: time.Now().Add(-time.Second)}
+	set(memCeiling{Bytes: 1, Until: time.Now().Add(-time.Second)})
 	if c, _ := h.capByCeiling("a", 12<<30, 0); c != 12<<30 {
 		t.Fatal("an expired ceiling still applies")
 	}
@@ -225,5 +237,25 @@ func TestSoloLoop(t *testing.T) {
 		if p.NGL != g+1+m.loopSlots() {
 			t.Fatalf("ngl %d for %d card layers, want it in slots", p.NGL, g)
 		}
+	}
+}
+
+// An engine that ran out of memory and ended between two checks is still reported, once;
+// the guard's own note in the log is not taken for a new one.
+func TestGuardReadsEndedEngine(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "head.log")
+	_ = os.WriteFile(log, []byte("loading\nggml_metal: error: insufficient memory\n"), 0o644)
+	p := &proc{name: "head", logPath: log} // not running: it already ended
+	g := newGuardScan()
+	if line := g.oom(p); !strings.Contains(line, "insufficient memory") {
+		t.Fatalf("an engine that ended of it was not reported: %q", line)
+	}
+	if line := g.oom(p); line != "" {
+		t.Fatalf("reported twice: %q", line)
+	}
+	q := &proc{name: "aux", logPath: filepath.Join(t.TempDir(), "aux.log")}
+	_ = os.WriteFile(q.logPath, []byte("[potluck] the guard stopped this engine: it ran out of memory (x)\n"), 0o644)
+	if line := g.oom(q); line != "" {
+		t.Fatalf("the guard's own note was taken for a new one: %q", line)
 	}
 }

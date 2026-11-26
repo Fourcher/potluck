@@ -5,9 +5,9 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"log"
 	"net"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -67,26 +67,43 @@ func (h *Host) applyNetShare() {
 		want = phoneAddrs()
 		h.shareKey()
 	}
-	sort.Strings(want)
-	key := strings.Join(want, ",")
 	h.shareMu.Lock()
 	defer h.shareMu.Unlock()
-	if key == h.shareOn {
-		return
-	}
-	for _, s := range h.shareSrvs {
-		_ = s.Close()
-	}
-	h.shareSrvs, h.shareOn = nil, key
-	for _, ip := range want {
+	h.shareSrvs = syncListeners(h.shareSrvs, want, "sharing", func(ip string) (*http.Server, error) {
 		ln, err := net.Listen("tcp", net.JoinHostPort(ip, strconv.Itoa(portShare)))
 		if err != nil {
-			continue
+			return nil, err
 		}
 		srv := &http.Server{Handler: h.shareHandler(), ReadHeaderTimeout: 20 * time.Second}
-		h.shareSrvs = append(h.shareSrvs, srv)
 		go func() { _ = srv.Serve(ln) }()
+		return srv, nil
+	})
+}
+
+// syncListeners keeps one server per wanted address: it closes those no longer wanted and
+// opens those missing. An address that cannot be opened now (taken, not ready yet) is simply
+// missing, so the next check (every 30 seconds) tries it again, without touching the
+// servers that work.
+func syncListeners(cur map[string]*http.Server, want []string, what string, open func(ip string) (*http.Server, error)) map[string]*http.Server {
+	next := map[string]*http.Server{}
+	for _, ip := range want {
+		if s := cur[ip]; s != nil {
+			next[ip] = s
+			continue
+		}
+		s, err := open(ip)
+		if err != nil {
+			log.Printf("%s: could not listen on %s: %v", what, ip, err)
+			continue
+		}
+		next[ip] = s
 	}
+	for ip, s := range cur {
+		if next[ip] != s {
+			_ = s.Close()
+		}
+	}
+	return next
 }
 
 func (h *Host) shareAllowed(r *http.Request) bool {
@@ -114,8 +131,14 @@ func (h *Host) shareHandler() http.Handler {
 				q := r.URL.Query()
 				q.Del("key")
 				r.URL.RawQuery = q.Encode()
-				http.Redirect(w, r, r.URL.String(), http.StatusSeeOther)
-				return
+				// A page opened from the link: reload it without the key in the address. A
+				// request from an app (a POST) would lose its body to a redirect: let it
+				// through with the key it brought.
+				if r.Method == http.MethodGet || r.Method == http.MethodHead {
+					http.Redirect(w, r, r.URL.String(), http.StatusSeeOther)
+					return
+				}
+				r.Header.Set("Authorization", "Bearer "+k)
 			}
 		}
 		if !h.shareAllowed(r) {

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -113,9 +115,20 @@ func (st *sessionStore) handle(w http.ResponseWriter, r *http.Request, mutate bo
 		Question string `json:"question"`
 		Answer   string `json:"answer"`
 		Policy   Policy `json:"policy"`
+		Path     string `json:"path"` // revert: one file ("" = all)
+	}
+	// Only reading the task and following it may be a GET: every action changes something,
+	// so it must come as a POST, which carries the chat page's header check above.
+	if action != "" && action != "events" && action != "changes" && r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "send this as a POST"})
+		return
 	}
 	if r.Method == http.MethodPost {
-		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&in)
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&in); err != nil && (action == "message" || action == "answer" || action == "policy") {
+			fail(w, errors.New("could not read the request: "+err.Error()))
+			return
+		}
 	}
 	var err error
 	switch {
@@ -128,6 +141,32 @@ func (st *sessionStore) handle(w http.ResponseWriter, r *http.Request, mutate bo
 		return
 	case action == "events":
 		st.events(w, r, s)
+		return
+	case action == "changes" && r.Method == http.MethodGet:
+		ch, err := st.changes(s)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		if ch == nil {
+			ch = []TaskChange{}
+		}
+		s.mu.Lock()
+		gitted := s.GitBase != ""
+		s.mu.Unlock()
+		note := "Changes this task made with its file tools. Changes made by commands it ran (builds, scripts) are not kept here."
+		if gitted {
+			note = "Everything that differs from where the task started (git), however it was changed. Undo puts files back as they were then; commits it made stay."
+		}
+		writeJSON(w, map[string]any{"changes": ch, "note": note})
+		return
+	case action == "revert":
+		n, err := st.revert(s, in.Path)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "files": n})
 		return
 	case action == "message":
 		err = st.send(s, in.Text)
@@ -154,7 +193,15 @@ func (st *sessionStore) handle(w http.ResponseWriter, r *http.Request, mutate bo
 		st.mu.Lock()
 		delete(st.sessions, s.ID)
 		st.mu.Unlock()
+		s.saveMu.Lock()
+		s.deleted = true // the run still ending saves nothing more
 		err = removeFile(st.dir, s.ID+".json")
+		_ = os.RemoveAll(filepath.Join(st.dir, s.ID+"-output")) // its saved long results
+		_ = os.RemoveAll(st.backupDir(s))                       // and the files it kept for undo
+		if s.GitBase != "" && s.Project != nil {
+			gitForget(s.Project.Root, s.ID) // and its git starting point
+		}
+		s.saveMu.Unlock()
 	default:
 		err = errors.New("unknown action")
 	}

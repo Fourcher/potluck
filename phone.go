@@ -16,6 +16,7 @@ package main
 // pairing code is showing, and only on home-network and Tailscale addresses.
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
@@ -26,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,6 +48,8 @@ type PhoneKey struct {
 // phoneAPI: the only paths a phone may use besides /phone/*. Everything else on the chat
 // address (the chat page, /potluck/run, /potluck/switch) stays out of reach.
 var phoneAPI = map[string]bool{"/v1/chat/completions": true, "/v1/models": true, "/potluck/state": true, "/potluck/models": true}
+
+var pushTokenRe = regexp.MustCompile(`^[0-9a-fA-F]{64,200}$`)
 
 func hashKey(k string) string {
 	s := sha256.Sum256([]byte(k))
@@ -89,30 +93,18 @@ func (h *Host) applyPhones() {
 	if len(h.cfg.Get().Phones) > 0 || pairing {
 		want = phoneAddrs()
 	}
-	sort.Strings(want)
-	key := strings.Join(want, ",")
 	h.phoneMu.Lock()
 	defer h.phoneMu.Unlock()
-	if key == h.phoneOn {
-		return
-	}
-	for _, s := range h.phoneSrvs {
-		_ = s.Close()
-	}
-	h.phoneSrvs, h.phoneOn = nil, key
-	if len(want) == 0 {
-		return
-	}
 	conf := &tls.Config{Certificates: []tls.Certificate{h.id.Cert}, MinVersion: tls.VersionTLS12}
-	for _, ip := range want {
+	h.phoneSrvs = syncListeners(h.phoneSrvs, want, "phones", func(ip string) (*http.Server, error) {
 		ln, err := net.Listen("tcp", net.JoinHostPort(ip, strconv.Itoa(portPhone)))
 		if err != nil {
-			continue
+			return nil, err
 		}
 		srv := &http.Server{Handler: h.phoneHandler(), ReadHeaderTimeout: 20 * time.Second}
-		h.phoneSrvs = append(h.phoneSrvs, srv)
 		go func() { _ = srv.Serve(tls.NewListener(ln, conf)) }()
-	}
+		return srv, nil
+	})
 }
 
 // phoneWho returns the paired phone a request comes from, by its key.
@@ -224,14 +216,53 @@ func (h *Host) phoneHandler() http.Handler {
 				fail(w, err)
 				return
 			}
+			// Apple's device tokens are hex; anything else would end up in the push address.
+			if !pushTokenRe.MatchString(in.Token) || (in.Env != "development" && in.Env != "production") {
+				fail(w, errors.New("that is not a push token from Apple"))
+				return
+			}
 			h.cfg.Update(func(c *Config) {
-				p := c.Phones[id]
-				p.PushToken, p.PushEnv = in.Token, in.Env
-				c.Phones[id] = p
+				c.editPhone(id, func(p *PhoneKey) { p.PushToken, p.PushEnv = in.Token, in.Env })
 			})
 			writeJSON(w, map[string]bool{"ok": true})
+		case r.URL.Path == "/phone/tasks" && r.Method == http.MethodGet:
+			writeJSON(w, map[string]any{"tasks": h.sessionStore().phoneTasks()})
+		case strings.HasPrefix(r.URL.Path, "/phone/tasks/"):
+			// One task: read it, add a message to it (it carries on under the permissions it
+			// was given on the computer), or stop it. A phone starts no new work this way.
+			st := h.sessionStore()
+			tid, action, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/phone/tasks/"), "/")
+			s := st.get(tid)
+			if s == nil || s.Kind == "helper" {
+				http.NotFound(w, r)
+				return
+			}
+			switch {
+			case action == "" && r.Method == http.MethodGet:
+				writeJSON(w, st.phoneTask(s))
+			case action == "message" && r.Method == http.MethodPost:
+				var in struct {
+					Text string `json:"text"`
+				}
+				if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&in); err != nil || strings.TrimSpace(in.Text) == "" {
+					fail(w, errors.New("write a message"))
+					return
+				}
+				if err := st.send(s, in.Text); err != nil {
+					fail(w, err)
+					return
+				}
+				writeJSON(w, map[string]bool{"ok": true})
+			case action == "stop" && r.Method == http.MethodPost:
+				st.stop(s)
+				writeJSON(w, map[string]bool{"ok": true})
+			default:
+				http.NotFound(w, r)
+			}
 		case phoneAPI[r.URL.Path] && chat != nil:
-			chat.ServeHTTP(w, r)
+			// Under the same rules as any other device: Potluck's own models only, never the
+			// person's (often paid) external AI connections, which stay with this computer.
+			chat.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sharedReq{}, true)))
 		default:
 			http.NotFound(w, r)
 		}
@@ -302,8 +333,16 @@ func (h *Host) PairingCode() (map[string]any, error) {
 	}
 	code.Scale = 6
 	img := "data:image/png;base64," + base64.StdEncoding.EncodeToString(code.PNG())
-	return map[string]any{"link": link, "qr": img, "addrs": addrs, "minutes": 10}, nil
+	out := map[string]any{"link": link, "qr": img, "addrs": addrs, "minutes": 10, "appURL": iPhoneAppURL}
+	if app, err := qr.Encode(iPhoneAppURL, qr.M); err == nil {
+		app.Scale = 6
+		out["appQR"] = "data:image/png;base64," + base64.StdEncoding.EncodeToString(app.PNG())
+	}
+	return out, nil
 }
+
+// iPhoneAppURL is the Potluck app's App Store page.
+const iPhoneAppURL = "https://apps.apple.com/app/id6838920258"
 
 // Phones lists the paired phones for the control panel.
 func (h *Host) Phones() []map[string]any {
@@ -341,4 +380,86 @@ func (h *Host) StopPairing() {
 	h.pairSecret = ""
 	h.mu.Unlock()
 	h.applyPhones()
+}
+
+// editPhone changes a paired phone only if it is still paired. A request or an alert that
+// started before the person chose Forget must not write the phone back as an empty entry
+// (shown in the panel, holding the phone listener open, keeping a lost phone's push token).
+func (c *Config) editPhone(id string, f func(*PhoneKey)) {
+	p, ok := c.Phones[id]
+	if !ok {
+		return
+	}
+	f(&p)
+	c.Phones[id] = p
+}
+
+// PhoneTask is a task as the phone shows it: what it is doing, its report, its last words.
+type PhoneTask struct {
+	ID       string     `json:"id"`
+	Title    string     `json:"title"`
+	Status   string     `json:"status"`
+	Error    string     `json:"error,omitempty"`
+	Updated  time.Time  `json:"updated"`
+	Report   string     `json:"report,omitempty"`
+	Question *Question  `json:"question,omitempty"`
+	Messages []PhoneMsg `json:"messages,omitempty"`
+}
+
+type PhoneMsg struct {
+	Role string `json:"role"` // user | assistant | step (a tool the task used)
+	Text string `json:"text"`
+}
+
+// phoneTasks lists the tasks, newest first (not the Potluck helper's own conversations).
+func (st *sessionStore) phoneTasks() []PhoneTask {
+	st.mu.Lock()
+	list := make([]*Session, 0, len(st.sessions))
+	for _, s := range st.sessions {
+		list = append(list, s)
+	}
+	st.mu.Unlock()
+	var out []PhoneTask
+	for _, s := range list {
+		s.mu.Lock()
+		if s.Kind != "helper" {
+			out = append(out, PhoneTask{ID: s.ID, Title: s.Title, Status: s.Status, Error: s.Error, Updated: s.Updated, Report: firstLine(s.Report), Question: s.Question})
+		}
+		s.mu.Unlock()
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Updated.After(out[j].Updated) })
+	if len(out) > 50 {
+		out = out[:50]
+	}
+	return out
+}
+
+// phoneTask is one task with its latest messages (tool results shortened to the tool's name).
+func (st *sessionStore) phoneTask(s *Session) PhoneTask {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := PhoneTask{ID: s.ID, Title: s.Title, Status: s.Status, Error: s.Error, Updated: s.Updated, Report: s.Report, Question: s.Question}
+	msgs := s.Messages
+	if len(msgs) > 60 {
+		msgs = msgs[len(msgs)-60:]
+	}
+	for _, m := range msgs {
+		switch m.Role {
+		case "user":
+			t.Messages = append(t.Messages, PhoneMsg{"user", trimTo(m.Content, 4000)})
+		case "assistant":
+			if strings.TrimSpace(m.Content) != "" {
+				t.Messages = append(t.Messages, PhoneMsg{"assistant", trimTo(m.Content, 8000)})
+			}
+			for _, c := range m.Calls {
+				t.Messages = append(t.Messages, PhoneMsg{"step", c.Name + " " + trimTo(c.Args, 160)})
+			}
+		}
+	}
+	return t
+}
+
+func firstLine(s string) string {
+	l, _, _ := strings.Cut(s, "\n")
+	return l
 }

@@ -27,11 +27,19 @@ type Identity struct {
 
 func loadOrCreateIdentity(dir string) (*Identity, error) {
 	certFile, keyFile := filepath.Join(dir, "node.crt"), filepath.Join(dir, "node.key")
-	if cert, err := tls.LoadX509KeyPair(certFile, keyFile); err == nil {
-		leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	_, certErr := os.Stat(certFile)
+	_, keyErr := os.Stat(keyFile)
+	if certErr == nil || keyErr == nil {
+		// An identity exists: use it, or say what is wrong. Making a new one would quietly
+		// undo every pairing (helpers and phones know this computer by it).
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err == nil {
-			return &Identity{Cert: cert, FP: fingerprint(leaf.Raw)}, nil
+			var leaf *x509.Certificate
+			if leaf, err = x509.ParseCertificate(cert.Certificate[0]); err == nil {
+				return &Identity{Cert: cert, FP: fingerprint(leaf.Raw)}, nil
+			}
 		}
+		return nil, fmt.Errorf("this computer's identity (%s and %s) cannot be read: %w. Restore them from a backup, or delete both to start over (every helper and phone must then be paired again)", certFile, keyFile, err)
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -54,11 +62,19 @@ func loadOrCreateIdentity(dir string) (*Identity, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
-		return nil, err
+	// Whole files or none: written aside, then moved into place.
+	for _, f := range []struct {
+		path string
+		data []byte
+		mode os.FileMode
+	}{{keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600},
+		{certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644}} {
+		if err := os.WriteFile(f.path+".tmp", f.data, f.mode); err != nil {
+			return nil, err
+		}
+		if err := os.Rename(f.path+".tmp", f.path); err != nil {
+			return nil, err
+		}
 	}
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {

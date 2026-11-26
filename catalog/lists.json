@@ -1,0 +1,48 @@
+{
+  "note": "Ranked lists made by other people, shown on the Models page with their age. Each list says who ranked it and how; Potluck has not measured these rankings. A list past its expiry date is shown folded away as out of date. tools/catalog.py copies this file into models-v2.json and models.json.",
+  "lists": [
+    {
+      "id": "uncensored-tier-2026-11",
+      "title": "Uncensored models tier list",
+      "by": "A community tier list shared on X",
+      "asOf": "November 2026",
+      "added": "2026-11-25",
+      "expires": "2027-01-25",
+      "about": "Open models with their refusals removed (abliterated, heretic or trained uncensored), ranked on how much ability they kept, how often they are downloaded and what people actually run. S is best. Potluck checks each model's sizes against your computers when you open it.",
+      "tiers": [
+        {"tier": "S", "items": [
+          {"name": "Qwen3.8-27B Abliterated", "maker": "Alibaba", "note": "The most downloaded uncensored model on Hugging Face; the usual first choice.", "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF"},
+          {"name": "DeepSeek V4.1 Flash Uncensored", "maker": "DeepSeek", "note": "Very large (748B) mixture-of-experts with vision; needs many computers.", "repo": "AtomicChat/DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-GGUF"},
+          {"name": "GLM-5.3 Abliterated", "maker": "Z.ai", "note": "Top of the uncensored intelligence rankings; refusals cut from 90% to 3%.", "repo": "huihui-ai/Huihui-GLM-5.3-abliterated-GGUF"},
+          {"name": "Qwen3.6-35B-A3B Uncensored", "maker": "Alibaba", "note": "Only 3B parameters work per word, so it is fast; strong at tools and agent work.", "repo": "HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive"}
+        ]},
+        {"tier": "A", "items": [
+          {"name": "Gemma 4 12B Heretic", "maker": "Google", "note": "Best for small graphics cards; reported 99 refusals down to 0 with little quality lost (KL 0.028).", "search": "gemma-4-12B heretic"},
+          {"name": "Kimi K2.6 Abliterated Heretic", "maker": "Moonshot", "note": "1T-parameter mixture-of-experts with vision; needs a rack of computers.", "search": "Kimi-K2.6 abliterated"},
+          {"name": "Hermes 4.3 36B", "maker": "Nous", "note": "Trained without refusals rather than edited afterwards; long context.", "repo": "NousResearch/Hermes-4.3-36B-GGUF"},
+          {"name": "Mistral Small 3.2 Abliterated", "maker": "Mistral", "note": "A favourite for fiction and role-play, on an older base.", "search": "Mistral-Small-3.2 abliterated"},
+          {"name": "Gemma 4 26B-A4B Abliterated", "maker": "Google", "note": "Fast for its quality on modest graphics cards.", "search": "gemma-4-26B-A4B abliterated"}
+        ]},
+        {"tier": "B", "items": [
+          {"name": "Qwen3.5-9B Heretic", "maker": "Alibaba", "note": "Best quality under 8 GB (KL 0.08).", "search": "Qwen3.5-9B heretic"},
+          {"name": "Qwen3.5-4B Uncensored (HauhauCS)", "maker": "Alibaba", "note": "For computers without a graphics card; about 3 GB (KL 0.02).", "repo": "HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive"},
+          {"name": "Gemma 4 E4B Heretic", "maker": "Google", "note": "Runs in 5 GB: phones and old laptops.", "search": "gemma-4-E4B heretic"},
+          {"name": "MiniMax M3", "maker": "MiniMax", "note": "Unfiltered through MiniMax's paid service; no version to run at home yet."},
+          {"name": "Llama 3.3 70B Abliterated", "maker": "Meta", "note": "Still sharp, but needs about 40 GB and its base is old.", "repo": "bartowski/Llama-3.3-70B-Instruct-abliterated-GGUF"}
+        ]},
+        {"tier": "C", "items": [
+          {"name": "Dolphin 3", "maker": "Cognitive", "note": "Coherent fine-tune, but its bases are two generations old.", "search": "Dolphin3"},
+          {"name": "Venice Uncensored 1.2", "maker": "Venice", "note": "Built on Dolphin; fine, not leading.", "search": "venice uncensored"},
+          {"name": "Llama 3.1 8B Abliterated", "maker": "Meta", "note": "The old starting point everyone began with.", "repo": "mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated-GGUF"},
+          {"name": "Gemma 4 E2B", "maker": "Google", "note": "Runs anywhere, but it is not clever.", "repo": "unsloth/gemma-4-E2B-it-GGUF"}
+        ]},
+        {"tier": "D", "items": [
+          {"name": "Huihui Qwen3.5-4B Abliterated", "maker": "Alibaba", "note": "Badly damaged by the edit (KL 3.65): avoid.", "repo": "mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF"},
+          {"name": "Dolphin 1.x / 2.x on Llama 3.1", "maker": "Cognitive", "note": "First-generation edits, replaced by 2026 retrains."},
+          {"name": "Llama 2 fine-tunes / Vicuna", "maker": "Meta", "note": "Still in 2026 listicles; three generations behind."},
+          {"name": "Any \"uncensored\" model with no KL number", "maker": "", "note": "If the model page does not say how much quality the edit cost, skip it."}
+        ]}
+      ]
+    }
+  ]
+}

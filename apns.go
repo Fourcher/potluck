@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -48,7 +49,14 @@ var apnsJWT struct {
 func apnsToken(pc PushConfig) (string, error) {
 	apnsMu.Lock()
 	defer apnsMu.Unlock()
-	if apnsJWT.token != "" && apnsJWT.key == pc.KeyID && time.Since(apnsJWT.at) < 40*time.Minute {
+	// The signed token stands for this exact key file, key id and team: a corrected team or
+	// a new file takes effect at once instead of after the old token runs out.
+	stamp := ""
+	if st, err := os.Stat(pc.KeyPath); err == nil {
+		stamp = st.ModTime().String()
+	}
+	cacheKey := pc.KeyID + "|" + pc.TeamID + "|" + pc.KeyPath + "|" + stamp
+	if apnsJWT.token != "" && apnsJWT.key == cacheKey && time.Since(apnsJWT.at) < 40*time.Minute {
 		return apnsJWT.token, nil
 	}
 	raw, err := os.ReadFile(pc.KeyPath)
@@ -79,7 +87,7 @@ func apnsToken(pc PushConfig) (string, error) {
 	sig := make([]byte, 64)
 	r.FillBytes(sig[:32])
 	s.FillBytes(sig[32:])
-	apnsJWT.token, apnsJWT.at, apnsJWT.key = signing+"."+enc.EncodeToString(sig), time.Now(), pc.KeyID
+	apnsJWT.token, apnsJWT.at, apnsJWT.key = signing+"."+enc.EncodeToString(sig), time.Now(), cacheKey
 	return apnsJWT.token, nil
 }
 
@@ -116,24 +124,27 @@ func (h *Host) PushTest() error {
 		return errors.New("no paired phone has allowed alerts yet: open Potluck on the phone and allow notifications")
 	}
 	h.mu.Lock()
-	h.pushErr, h.pushTestAnswer = "", ""
+	h.pushTestAnswer = ""
 	h.mu.Unlock()
 	q := &Question{ID: fmt.Sprintf("test-%d", time.Now().UnixNano()), Session: testSession,
 		Title: "Test alert: did this reach your phone?", Detail: "Answer with Yes, No or Reply. Your answer shows up in Potluck on your computer.", Kind: "ask"}
-	h.pushAlert(q, "Potluck test")
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.pushErr != "" {
-		return errors.New(h.pushErr)
+	// This test's own result, not whatever another alert running at the same time reported.
+	sent, err := h.pushAlert(q, "Potluck test")
+	if err != nil {
+		return err
+	}
+	if sent == 0 {
+		return errors.New("Apple says no paired phone takes alerts any more: open Potluck on the phone and allow notifications again")
 	}
 	return nil
 }
 
-// pushAlert sends one question to every phone that allowed alerts.
-func (h *Host) pushAlert(q *Question, task string) {
+// pushAlert sends one question to every phone that allowed alerts. It returns how many
+// Apple accepted and the first problem (each problem is also shown through pushProblem).
+func (h *Host) pushAlert(q *Question, task string) (sent int, first error) {
 	c := h.cfg.Get()
 	if c.Push == nil || c.Push.KeyPath == "" {
-		return
+		return 0, nil
 	}
 	body := q.Title
 	if q.Detail != "" && q.Kind != "plan" {
@@ -149,17 +160,65 @@ func (h *Host) pushAlert(q *Question, task string) {
 		},
 		"session": q.Session, "question": q.ID,
 	})
+	return h.pushSend(payload, q.ID, h.pushProblem)
+}
+
+// pushTaskEnd tells the paired phones that a task finished or stopped with an error, with the
+// start of its answer or the reason: work left running at night is checked from the phone.
+func (h *Host) pushTaskEnd(s *Session) {
+	c := h.cfg.Get()
+	if c.Push == nil || c.Push.KeyPath == "" {
+		return
+	}
+	s.mu.Lock()
+	title, status, why, id, report := s.Title, s.Status, s.Error, s.ID, s.Report
+	answer := ""
+	for i := len(s.Messages) - 1; i >= 0; i-- {
+		if m := s.Messages[i]; m.Role == "assistant" && strings.TrimSpace(m.Content) != "" {
+			answer = m.Content
+			break
+		}
+	}
+	s.mu.Unlock()
+	head, body := "Potluck finished a task", answer
+	if status == "error" {
+		head, body = "A Potluck task stopped", why
+	}
+	if first, _, _ := strings.Cut(report, "\n"); first != "" && status != "error" {
+		body = first + "\n" + body // "Finished after 3.2 hours, 140 steps, 38 commands."
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"aps": map[string]any{
+			"alert":     map[string]string{"title": head, "subtitle": title, "body": trimTo(strings.TrimSpace(body), 240)},
+			"category":  "POTLUCK_DONE",
+			"sound":     "default",
+			"thread-id": id,
+		},
+		"session": id,
+	})
+	_, _ = h.pushSend(payload, "done-"+id, h.pushProblem)
+}
+
+// pushSend sends one alert to every paired phone that takes alerts.
+func (h *Host) pushSend(payload []byte, collapse string, problem func(error)) (sent int, first error) {
+	c := h.cfg.Get()
+	report := func(err error) {
+		problem(err)
+		if first == nil {
+			first = err
+		}
+	}
 	tok, err := apnsToken(*c.Push)
 	if err != nil {
-		h.pushProblem(err)
-		return
+		report(err)
+		return 0, first
 	}
 	for id, p := range c.Phones {
 		if p.PushToken == "" {
 			continue
 		}
 		env := p.PushEnv
-		res, b, err := h.apnsSend(env, p.PushToken, tok, c.Push.Topic, q.ID, payload)
+		res, b, err := h.apnsSend(env, p.PushToken, tok, c.Push.Topic, collapse, payload)
 		if err == nil && res == 400 && strings.Contains(string(b), "BadDeviceToken") {
 			// A token from the other push server (a test build talks to Apple's sandbox, an App
 			// Store build to production). Try the other one and remember which worked.
@@ -167,27 +226,29 @@ func (h *Host) pushAlert(q *Question, task string) {
 			if env == "development" {
 				other = "production"
 			}
-			if r2, b2, err2 := h.apnsSend(other, p.PushToken, tok, c.Push.Topic, q.ID, payload); err2 == nil && r2 == 200 {
-				h.cfg.Update(func(c *Config) { pp := c.Phones[id]; pp.PushEnv = other; c.Phones[id] = pp })
+			if r2, b2, err2 := h.apnsSend(other, p.PushToken, tok, c.Push.Topic, collapse, payload); err2 == nil && r2 == 200 {
+				h.cfg.Update(func(c *Config) { c.editPhone(id, func(p *PhoneKey) { p.PushEnv = other }) })
+				sent++
 				continue
 			} else {
 				res, b, err = r2, b2, err2
 			}
 		}
 		if err != nil {
-			h.pushProblem(err)
+			report(err)
 			continue
 		}
-		if res == 410 || strings.Contains(string(b), "BadDeviceToken") || strings.Contains(string(b), "Unregistered") {
+		if res == 200 {
+			sent++
+		} else if res == 410 || strings.Contains(string(b), "BadDeviceToken") || strings.Contains(string(b), "Unregistered") {
 			h.cfg.Update(func(c *Config) { // the app was removed or the token changed
-				pp := c.Phones[id]
-				pp.PushToken = ""
-				c.Phones[id] = pp
+				c.editPhone(id, func(p *PhoneKey) { p.PushToken = "" })
 			})
-		} else if res != 200 {
-			h.pushProblem(fmt.Errorf("Apple refused the alert (%d): %s", res, strings.TrimSpace(string(b))))
+		} else {
+			report(fmt.Errorf("Apple refused the alert (%d): %s", res, strings.TrimSpace(string(b))))
 		}
 	}
+	return sent, first
 }
 
 // apnsSend posts one alert to Apple's push server for env ("development" = sandbox).
@@ -196,7 +257,10 @@ func (h *Host) apnsSend(env, token, jwt, topic, collapse string, payload []byte)
 	if env == "development" {
 		host = "https://api.sandbox.push.apple.com"
 	}
-	req, _ := http.NewRequest("POST", host+"/3/device/"+token, bytes.NewReader(payload))
+	req, err := http.NewRequest("POST", host+"/3/device/"+url.PathEscape(token), bytes.NewReader(payload))
+	if err != nil {
+		return 0, nil, err
+	}
 	req.Header.Set("authorization", "bearer "+jwt)
 	req.Header.Set("apns-topic", topic)
 	req.Header.Set("apns-push-type", "alert")

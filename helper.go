@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -71,11 +72,17 @@ func (h *Host) EnsureHelper() {
 		h.helperMu.Unlock()
 		return
 	}
+	// The helper's last computer may still run its engine (it went quiet for a moment, or its
+	// setup gave up): stop it there before choosing again, so it is never left running unseen.
+	old := h.helper.Node
 	h.helper = helperState{Phase: "preparing", Note: "Choosing a computer for the helper"}
 	h.helperGen++
 	gen := h.helperGen
 	h.helperMu.Unlock()
 	go func() {
+		if old != "" {
+			_ = h.call(old, "stop_aux", nil, nil, 20*time.Second) // before a new start, maybe there
+		}
 		err := h.startHelper(gen)
 		h.helperMu.Lock()
 		if err != nil && h.helperGen == gen {
@@ -124,9 +131,9 @@ func (h *Host) pickHelperNode(need int64) (string, string, error) {
 		if free < need {
 			continue
 		}
-		// "head" here: anything to do with the main model (running it, holding part of it, or
-		// chosen to run it), so the helper never crowds it.
-		busy := (id == h.cluster.Head && h.cluster.Phase != "idle") || n.Role != "" || n.Held > 0 || id == headChoice
+		// "busy": anything to do with the main model (running it, holding part of it, or chosen
+		// to run it) or a crew member, so the helper never crowds them.
+		busy := (id == h.cluster.Head && h.cluster.Phase != "idle") || n.Role != "" || n.Held > 0 || id == headChoice || h.crewReserveLocked(id) > 0
 		cs = append(cs, cand{id, n.Info.Name, free, busy})
 	}
 	if len(cs) == 0 {
@@ -164,21 +171,28 @@ func (h *Host) startHelper(gen int) error {
 	if err != nil {
 		return err
 	}
-	spec.Solo = true
+	spec.Solo, spec.For = true, "aux:helper"
 	if err := h.call(node, "ensure_runtime", spec, nil, 2*time.Hour); err != nil {
 		return err
 	}
 	h.helperNote("Downloading the helper (" + humanBytes(m.Size) + ") to " + name)
-	if err := h.call(node, "fetch_model", FetchModelReq{URL: m.URL, File: m.File, Size: m.Size, SHA256: m.SHA256}, nil, 2*time.Hour); err != nil {
+	if err := h.call(node, "fetch_model", FetchModelReq{URL: m.URL, File: m.File, Size: m.Size, SHA256: m.SHA256, For: "aux:helper", HFKey: currentHFKey(), Unchecked: m.Unchecked}, nil, 2*time.Hour); err != nil {
 		return err
 	}
 	if !h.helperCurrent(gen) {
 		return errHelperCancelled // stopped or moved while it downloaded: start nothing here
 	}
 	h.helperNote("Starting the helper on " + name)
-	if err := h.call(node, "start_aux", StartAuxReq{File: m.File, Ctx: helperCtx}, nil, time.Minute); err != nil {
+	if err := h.call(node, "start_aux", StartAuxReq{Name: "helper", File: m.File, Ctx: helperCtx}, nil, time.Minute); err != nil {
 		return err
 	}
+	// From here on, giving up stops the engine it started (it restarts by itself otherwise).
+	ready := false
+	defer func() {
+		if !ready {
+			_ = h.call(node, "stop_aux", nil, nil, 20*time.Second)
+		}
+	}()
 	for deadline := time.Now().Add(5 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
 		var st AuxStatus
 		if err := h.call(node, "aux_status", nil, &st, 15*time.Second); err != nil {
@@ -197,6 +211,7 @@ func (h *Host) startHelper(gen int) error {
 			}
 			h.helper.Phase, h.helper.Note, h.helper.bytes = "ready", "", need
 			h.helperMu.Unlock()
+			ready = true
 			return nil
 		}
 		if !st.Running {
@@ -210,13 +225,35 @@ func (h *Host) startHelper(gen int) error {
 // computer, so it can answer right away; and again if its computer goes away.
 func (h *Host) helperLoop() {
 	time.Sleep(20 * time.Second)
-	for {
-		if !h.cfg.Get().HelperOff {
+	var restAfterGuard time.Time // the guard stopped it: wait an hour before trying again
+	for i := 0; ; i++ {
+		// A ready helper is checked on its computer: its engine can end there (the guard, a
+		// crash, Potluck restarting) without the computer going away. Until noticed, the
+		// helper would be listed as ready and its memory kept out of the main model's plans.
+		if st := h.HelperStatus(); st.Phase == "ready" {
+			var as AuxStatus
+			if err := h.call(st.Node, "aux_status", nil, &as, 15*time.Second); err == nil && !as.Running {
+				note := "Its engine stopped"
+				if as.Log != "" {
+					note += ": " + as.Log
+				}
+				if as.Guarded {
+					note += ". It ran out of memory; Potluck tries again in an hour"
+					restAfterGuard = time.Now().Add(time.Hour)
+				}
+				h.helperMu.Lock()
+				if h.helper.Node == st.Node && h.helper.Phase == "ready" {
+					h.helper.Phase, h.helper.Note = "off", note
+				}
+				h.helperMu.Unlock()
+			}
+		}
+		if i%4 == 0 && !h.cfg.Get().HelperOff && time.Now().After(restAfterGuard) {
 			if p := h.HelperStatus().Phase; p == "off" {
 				h.EnsureHelper()
 			}
 		}
-		time.Sleep(2 * time.Minute)
+		time.Sleep(30 * time.Second)
 	}
 }
 
@@ -246,8 +283,9 @@ func (h *Host) helperReserveLocked(node string) int64 {
 	return 0
 }
 
-// helperRoute passes a chat request for the "potluck-helper" model to the helper's engine.
-func (h *Host) helperRoute(w http.ResponseWriter, r *http.Request) bool {
+// helperRoute passes a chat request for a crew member to its engine, and one for the
+// "potluck-helper" model to the helper's engine (never for a shared device or phone).
+func (h *Host) helperRoute(w http.ResponseWriter, r *http.Request, shared bool) bool {
 	if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
 		return false
 	}
@@ -260,7 +298,18 @@ func (h *Host) helperRoute(w http.ResponseWriter, r *http.Request) bool {
 		Model string `json:"model"`
 	}
 	_ = json.Unmarshal(raw, &peek)
-	if peek.Model != "potluck-helper" {
+	if name, ok := strings.CutPrefix(peek.Model, "crew:"); ok {
+		c := h.crewMember(name)
+		if c == nil || c.Phase != "running" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "No running crew member called " + name}})
+			return true
+		}
+		h.proxyAux(w, r, c.Node, "aux:"+c.Name, nil)
+		return true
+	}
+	if shared || peek.Model != "potluck-helper" {
 		return false
 	}
 	st := h.HelperStatus()
@@ -275,22 +324,31 @@ func (h *Host) helperRoute(w http.ResponseWriter, r *http.Request) bool {
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": msg}})
 		return true
 	}
-	target, _ := url.Parse("http://helper.invalid")
-	rp := httputil.NewSingleHostReverseProxy(target)
+	h.proxyAux(w, r, st.Node, "aux", func() {
+		h.helperMu.Lock()
+		h.helper.Phase = "off"
+		h.helperMu.Unlock()
+	})
+	return true
+}
+
+// proxyAux passes a request to an extra engine (the helper or a crew member) on a computer.
+func (h *Host) proxyAux(w http.ResponseWriter, r *http.Request, node, target string, onFail func()) {
+	u, _ := url.Parse("http://aux.invalid")
+	rp := httputil.NewSingleHostReverseProxy(u)
 	rp.Transport = &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return h.openTunnel(st.Node, "aux")
+			return h.openTunnel(node, target)
 		},
 	}
 	rp.FlushInterval = 50 * time.Millisecond
 	rp.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		h.helperMu.Lock()
-		h.helper.Phase = "off"
-		h.helperMu.Unlock()
+		if onFail != nil {
+			onFail()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "The Potluck helper could not be reached: " + err.Error()}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "Could not reach that model: " + err.Error()}})
 	}
 	rp.ServeHTTP(w, r)
-	return true
 }

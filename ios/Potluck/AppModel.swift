@@ -89,6 +89,19 @@ final class AppModel {
         startPolling()
     }
 
+    /// Try Potluck without a computer: a clearly labelled demo that explains how it works.
+    func startDemo() {
+        let c = Computer(name: "Demo computer", addrs: [], port: 0, fingerprint: "", id: PotluckClient.demoID)
+        client?.close()
+        computer = c
+        client = PotluckClient(computer: c, key: "")
+        notPaired = false
+        link = .connecting
+        startPolling()
+    }
+
+    var isDemo: Bool { computer?.id == PotluckClient.demoID }
+
     func forget() {
         stop()
         pollTask?.cancel()
@@ -147,12 +160,23 @@ final class AppModel {
         questions.removeAll { $0.id == q.id }
     }
 
-    /// Answers from a notification button, when the app may not even be open.
-    func answer(session: String, question: String, text: String) async {
-        if client == nil { return }
-        if client?.addr == nil { _ = try? await client?.connect() }
-        try? await client?.answer(session: session, question: question, answer: text)
-        questions.removeAll { $0.id == question }
+    /// Answers from a notification button, when the app may not even be open. The phone may
+    /// just be waking up its network, so it tries a few times. It returns whether the answer
+    /// reached the computer; if not, the question stays, so it can be answered again.
+    func answer(session: String, question: String, text: String) async -> Bool {
+        guard let client else { return false }
+        for wait in [0, 2, 5] {
+            if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+            do {
+                if client.addr == nil { _ = try await client.connect() }
+                try await client.answer(session: session, question: question, answer: text)
+                questions.removeAll { $0.id == question }
+                return true
+            } catch {
+                continue
+            }
+        }
+        return false
     }
 
     func registerPush(token: String) {
@@ -316,16 +340,40 @@ final class AppModel {
         return dir.appendingPathComponent("chats.json")
     }
 
+    /// Whether the saved chats have been read. Not yet, when the app was started in the
+    /// background before the phone was first unlocked (an answer from an alert): the file can't
+    /// be read then, and saving would replace every chat with what is open now.
+    private var chatsLoaded = false
+
     private func loadChats() {
-        if let d = try? Data(contentsOf: chatsURL), let c = try? JSONDecoder().decode([Conversation].self, from: d) {
-            chats = c.sorted { $0.updated > $1.updated }
-        }
+        readSavedChats()
         let c = Conversation()
         chats.insert(c, at: 0)
         currentID = c.id
     }
 
+    /// Reads chats.json into chats, keeping chats already open here. A file that cannot be
+    /// read yet is tried again before the next save; one that cannot be understood is moved
+    /// aside, not written over.
+    private func readSavedChats() {
+        let url = chatsURL
+        guard FileManager.default.fileExists(atPath: url.path) else { chatsLoaded = true; return }
+        guard let d = try? Data(contentsOf: url) else { return } // locked: try again later
+        chatsLoaded = true
+        guard let saved = try? JSONDecoder().decode([Conversation].self, from: d) else {
+            try? FileManager.default.moveItem(at: url, to: url.deletingPathExtension().appendingPathExtension("unreadable-\(Int(Date().timeIntervalSince1970)).json"))
+            return
+        }
+        let open = Set(chats.map(\.id))
+        chats = (chats + saved.filter { !open.contains($0.id) }).sorted { $0.updated > $1.updated }
+    }
+
+    /// Reads the saved chats if they could not be read at launch (the app is now open).
+    func ensureChatsLoaded() { if !chatsLoaded { readSavedChats() } }
+
     func scheduleSave() {
+        if !chatsLoaded { readSavedChats() }
+        guard chatsLoaded else { return } // still locked: saved later, never over the old file
         saveTask?.cancel()
         let snapshot = chats.filter { !$0.messages.isEmpty }
         let url = chatsURL
@@ -333,7 +381,7 @@ final class AppModel {
             try? await Task.sleep(for: .milliseconds(400))
             if Task.isCancelled { return }
             if let d = try? JSONEncoder().encode(snapshot) {
-                try? d.write(to: url, options: [.atomic, .completeFileProtection])
+                try? d.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
             }
         }
     }

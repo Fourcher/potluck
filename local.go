@@ -119,34 +119,62 @@ func (h *Host) idleLoop() {
 			last = h.cluster.Since
 		}
 		h.mu.Unlock()
-		if phase != "running" || model == nil || time.Since(last) < time.Duration(mins)*time.Minute {
+		// Never while it is answering: a long answer or a long prompt can run past the idle
+		// time, and no new request touches lastUse meanwhile.
+		if phase != "running" || model == nil || h.inflight.Load() > 0 || time.Since(last) < time.Duration(mins)*time.Minute {
 			continue
 		}
 		m := *model
-		h.Stop()
+		// Resting is set first, so a message that arrives while it stops waits and loads it
+		// again instead of finding no model.
 		h.mu.Lock()
 		h.asleep, h.asleepCtx, h.asleepSolo = &m, ctxSize, solo
 		h.mu.Unlock()
+		h.Stop()
 	}
 }
 
-// wake loads the model let go by idleLoop again and waits until it is ready.
+// wake loads the model let go by idleLoop again and waits until it is ready. Of several
+// requests arriving together, one starts it and the others wait for that start.
 func (h *Host) wake(timeout time.Duration) error {
-	h.mu.Lock()
-	m, ctxSize, solo, phase := h.asleep, h.asleepCtx, h.asleepSolo, h.cluster.Phase
-	h.mu.Unlock()
-	if m == nil {
-		return nil
-	}
-	if phase == "idle" || phase == "error" {
-		h.mu.Lock()
-		h.asleep = nil
-		h.mu.Unlock()
-		if err := h.Start(*m, ctxSize, solo); err != nil {
-			return err
-		}
-	}
 	deadline := time.Now().Add(timeout)
+	for {
+		h.mu.Lock()
+		m, ctxSize, solo, phase := h.asleep, h.asleepCtx, h.asleepSolo, h.cluster.Phase
+		take := m != nil && (phase == "idle" || phase == "error")
+		if take {
+			h.asleep, h.waking = nil, true
+		}
+		waking := h.waking
+		h.mu.Unlock()
+		switch {
+		case take:
+			if err := h.Start(*m, ctxSize, solo); err != nil {
+				h.mu.Lock()
+				h.waking = false
+				if h.asleep == nil {
+					h.asleep = m // still resting: the next message tries again
+				}
+				h.mu.Unlock()
+				return err
+			}
+		case m != nil && phase == "stopping":
+			// It is being let go right now: wait, then load it again.
+			if time.Now().After(deadline) {
+				return errors.New("loading the model again took too long")
+			}
+			time.Sleep(500 * time.Millisecond)
+			continue
+		case !waking:
+			return nil // awake (or nothing was resting)
+		}
+		break
+	}
+	defer func() {
+		h.mu.Lock()
+		h.waking = false
+		h.mu.Unlock()
+	}()
 	for time.Now().Before(deadline) {
 		h.mu.Lock()
 		phase, msg := h.cluster.Phase, h.cluster.Error

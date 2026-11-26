@@ -22,11 +22,13 @@ func (h *Host) guardWatch() {
 	for {
 		time.Sleep(3 * time.Second)
 		h.mu.Lock()
-		phase, since, plan := h.cluster.Phase, h.cluster.Since, h.cluster.Plan
+		phase, plan := h.cluster.Phase, h.cluster.Plan
 		var ids []string
-		if phase == "running" || phase == "starting" {
-			for id, n := range h.nodes {
-				if n.Online {
+		if (phase == "running" || phase == "starting") && plan != nil {
+			// The computers in this start: each clears its guard's event when it is asked to
+			// start, so an event there now is about this start.
+			for _, id := range planIDs(plan) {
+				if n := h.nodes[id]; n != nil && n.Online {
 					ids = append(ids, id)
 				}
 			}
@@ -34,7 +36,7 @@ func (h *Host) guardWatch() {
 		h.mu.Unlock()
 		for _, id := range ids {
 			var ev *GuardEvent
-			if err := h.call(id, "guard", nil, &ev, 5*time.Second); err != nil || ev == nil || ev.At.Before(since) {
+			if err := h.call(id, "guard", nil, &ev, 5*time.Second); err != nil || ev == nil || !h.newGuardEvent(id, ev) {
 				continue
 			}
 			h.guardTripped(id, ev, plan)
@@ -43,7 +45,44 @@ func (h *Host) guardWatch() {
 	}
 }
 
+// planIDs is every computer a plan uses: the head and each one holding a share.
+func planIDs(p *Plan) []string {
+	ids := []string{p.Head}
+	for _, s := range p.Shares {
+		if s.ID != p.Head {
+			ids = append(ids, s.ID)
+		}
+	}
+	return ids
+}
+
+// newGuardEvent says whether this event from a computer has not been acted on yet. Events
+// are told apart by the time the computer wrote on them, only ever compared with that same
+// computer's earlier events.
+func (h *Host) newGuardEvent(id string, ev *GuardEvent) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.guardSeen == nil {
+		h.guardSeen = map[string]time.Time{}
+	}
+	if h.guardSeen[id].Equal(ev.At) {
+		return false
+	}
+	h.guardSeen[id] = ev.At
+	return true
+}
+
 func (h *Host) guardTripped(id string, ev *GuardEvent, plan *Plan) {
+	h.learnCeiling(id, ev, plan)
+	h.Stop()
+	h.mu.Lock()
+	h.cluster.Phase, h.cluster.Error = "error", h.guardWhy
+	h.mu.Unlock()
+}
+
+// learnCeiling remembers how much a computer held when its guard stopped it, and says so
+// in guardWhy.
+func (h *Host) learnCeiling(id string, ev *GuardEvent, plan *Plan) {
 	h.mu.Lock()
 	name := "A computer"
 	if n := h.nodes[id]; n != nil {
@@ -58,35 +97,37 @@ func (h *Host) guardTripped(id string, ev *GuardEvent, plan *Plan) {
 		}
 	}
 	next := ""
-	if held > 0 && plan.LayerBytes > 0 && held > plan.LayerBytes {
-		if h.memCeil == nil {
-			h.memCeil = map[string]memCeiling{}
+	var ceil *memCeiling
+	if held > 0 && plan.LayerBytes > 0 {
+		// One layer less than what it could not hold, for six hours. It ran out holding a
+		// single layer: it gets none (otherwise the next start gives it the same and it runs
+		// out again).
+		ceil = &memCeiling{Bytes: max(0, held-plan.LayerBytes), Until: time.Now().Add(6 * time.Hour)}
+		if ceil.Bytes > 0 {
+			next = fmt.Sprintf(" Next time Potluck gives %s at most %s (it ran out holding %s); start the model again to try.", name, humanBytes(ceil.Bytes), humanBytes(held))
+		} else {
+			next = fmt.Sprintf(" For the next six hours Potluck leaves %s out of this model (it ran out holding a single part of it).", name)
 		}
-		ceil := held - plan.LayerBytes // one layer less than what it could not hold
-		c := memCeiling{Bytes: ceil, Until: time.Now().Add(6 * time.Hour)}
-		h.memCeil[id] = c
-		go h.cfg.Update(func(cf *Config) {
-			if cf.Ceilings == nil {
-				cf.Ceilings = map[string]memCeiling{}
-			}
-			cf.Ceilings[id] = c
-		})
-		next = fmt.Sprintf(" Next time Potluck gives %s at most %s (it ran out holding %s); start the model again to try.", name, humanBytes(ceil), humanBytes(held))
 	}
 	h.guardWhy = fmt.Sprintf("%s: %s. Potluck stopped the model so %s would not freeze.%s", name, ev.Why, name, next)
 	h.mu.Unlock()
-	h.Stop()
-	h.mu.Lock()
-	h.cluster.Phase, h.cluster.Error = "error", h.guardWhy
-	h.mu.Unlock()
+	if ceil != nil {
+		// Kept in the settings only (one copy, and it survives a restart).
+		h.cfg.Update(func(cf *Config) {
+			if cf.Ceilings == nil {
+				cf.Ceilings = map[string]memCeiling{}
+			}
+			cf.Ceilings[id] = *ceil
+		})
+	}
 }
 
 // capByCeiling trims a computer's offer to what it held without running out (see above).
 func (h *Host) capByCeiling(id string, cpu, gpu int64) (int64, int64) {
-	c, ok := h.memCeil[id]
-	if !ok && h.cfg != nil {
-		c, ok = h.cfg.Get().Ceilings[id] // from before a restart
+	if h.cfg == nil {
+		return cpu, gpu
 	}
+	c, ok := h.cfg.Get().Ceilings[id]
 	if !ok || time.Now().After(c.Until) || cpu+gpu <= c.Bytes {
 		return cpu, gpu
 	}

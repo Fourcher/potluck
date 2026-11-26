@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -42,7 +43,36 @@ type browserCtl struct {
 	ws      *wsConn
 	nextID  atomic.Int64
 	pending map[int64]chan json.RawMessage
+	// One task uses the browser at a time: tasks share one page, so another task's reads and
+	// clicks would land on this one's page and its numbered elements. The hold lapses when
+	// the task ends or has not used the browser for holdFor.
+	holder string
+	heldAt time.Time
 }
+
+const holdFor = 10 * time.Minute
+
+// hold gives the browser to the task who, or says which task has it.
+func (b *browserCtl) hold(who string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.holder != "" && b.holder != who && time.Since(b.heldAt) < holdFor {
+		return fmt.Errorf("the browser is in use by another task; try again when it has finished (or in %d minutes)", int(time.Until(b.heldAt.Add(holdFor)).Minutes())+1)
+	}
+	b.holder, b.heldAt = who, time.Now()
+	return nil
+}
+
+// release lets another task use the browser.
+func (b *browserCtl) release(who string) {
+	b.mu.Lock()
+	if b.holder == who {
+		b.holder = ""
+	}
+	b.mu.Unlock()
+}
+
+var refRe = regexp.MustCompile(`^[0-9]{1,6}$`)
 
 var browsers = &browserCtl{pending: map[int64]chan json.RawMessage{}}
 
@@ -270,8 +300,11 @@ func (b *browserCtl) waitLoad(ctx context.Context) {
 }
 
 // browserTool runs one of the agent's browser tools.
-func browserTool(ctx context.Context, data, name string, args map[string]any) (string, error) {
+func browserTool(ctx context.Context, data, who, name string, args map[string]any) (string, error) {
 	b := browsers
+	if err := b.hold(who); err != nil {
+		return "", err
+	}
 	b.mu.Lock()
 	if b.dataDir == "" {
 		b.dataDir = data
@@ -286,7 +319,10 @@ func browserTool(ctx context.Context, data, name string, args map[string]any) (s
 		case float64:
 			return fmt.Sprint(int(v))
 		case string:
-			return strings.Trim(v, "[] ")
+			// Only a number: it is put into the page's script.
+			if r := strings.Trim(v, "[] "); refRe.MatchString(r) {
+				return r
+			}
 		}
 		return ""
 	}
@@ -308,8 +344,10 @@ func browserTool(ctx context.Context, data, name string, args map[string]any) (s
 		if !strings.Contains(u, "://") {
 			u = "https://" + u
 		}
-		if pu, err := url.Parse(u); err != nil || pu.Host == "" && pu.Scheme != "about" && pu.Scheme != "file" {
-			return "", fmt.Errorf("%q is not a web address", u)
+		// Web pages only: a file:// address would hand the task any file on this computer,
+		// past its file permissions and its project folder.
+		if pu, err := url.Parse(u); err != nil || !(pu.Host != "" && (pu.Scheme == "http" || pu.Scheme == "https") || u == "about:blank") {
+			return "", fmt.Errorf("%q is not a web address (http or https)", u)
 		}
 		if _, err := b.call(ctx, "Page.navigate", map[string]string{"url": u}); err != nil {
 			return "", err

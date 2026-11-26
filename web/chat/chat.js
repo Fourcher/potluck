@@ -59,7 +59,7 @@ const S = {
 // ---------- small helpers ----------
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const num = n => Math.round(n || 0).toLocaleString();
-const bytes = n => n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " bytes";
+const bytes = v => { const n = Number(v) || 0; return n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " bytes"; };
 const gb = n => (n / 1e9).toFixed(1) + " GB";
 const today = () => new Date().toISOString().slice(0, 10);
 const estTokens = chars => Math.ceil(chars / 3.5);
@@ -97,9 +97,25 @@ async function poll() {
   if (S.server.owner && (!S.ctxAt || Date.now() - S.ctxAt > 60000)) { S.ctxAt = Date.now(); try { S.ctx = await api("/potluck/context"); } catch { S.ctx = null; } drawProjects(); }
   drawStatus();
   if (was !== S.server.phase && S.cur && !S.cur.messages.length && !S.gen) drawThread(); // the greeting says whether a model is ready
+  // A message written before the model was ready goes out now.
+  if (running() && S.cur && S.cur.queued && !S.gen && !S.compacting) {
+    S.cur.queued = false;
+    const last = S.cur.messages[S.cur.messages.length - 1];
+    if (last && last.role === "user") generate(); else saveChat(S.cur);
+  }
   pollTimer = setTimeout(poll, running() ? 12000 : 3000);
 }
 
+// eta: speed and time left for a download, smoothed between polls.
+const etas = {};
+function eta(key, done, total) {
+  const now = Date.now(), r = etas[key];
+  if (!r || done < r.done || r.total !== total) { etas[key] = { done, total, t: now, bps: 0 }; return ""; }
+  if (now - r.t >= 1500 && done > r.done) { const bps = (done - r.done) * 1000 / (now - r.t); r.bps = r.bps ? r.bps * 0.7 + bps * 0.3 : bps; r.done = done; r.t = now; }
+  if (!r.bps) return "";
+  const left = (total - done) / r.bps;
+  return ` · ${left < 90 ? Math.max(1, Math.round(left)) + " s" : left < 5400 ? Math.round(left / 60) + " min" : (left / 3600).toFixed(1) + " h"} left`;
+}
 function drawStatus() {
   const s = S.server || {}, chipEl = $("#cluster-chip"), b = $("#banner");
   const helpers = (s.nodes || []).filter(n => n.role === "worker").length;
@@ -119,21 +135,72 @@ function drawStatus() {
     b.hidden = false; b.className = s.phase === "error" || s.phase === "offline" ? "bad" : "";
     if (s.phase === "starting") {
       const steps = (s.steps || []).map(x => `<li class="${esc(x.state)}">${esc(x.text)}</li>`).join("");
-      const prog = (s.nodes || []).filter(n => n.total > 0).map(n => `<div class="small">${esc(n.name)}: ${esc(n.status || "")}<div class="bar"><i style="width:${Math.min(100, 100 * n.done / n.total).toFixed(1)}%"></i></div></div>`).join("");
-      b.innerHTML = `<b>Getting ${esc(modelTitle() || "the model")} ready.</b> You can type your message meanwhile.<ul class="steps">${steps}</ul>${prog}`;
+      const prog = (s.nodes || []).filter(n => n.total > 0).map(n => `<div class="small">${esc(n.name)}: ${esc(n.status || "")}${n.total > 1048576 && n.done < n.total ? ` · ${Math.round(100 * n.done / n.total)}%${eta(n.name, n.done, n.total)}` : ""}<div class="bar"><i style="width:${Math.min(100, 100 * n.done / n.total).toFixed(1)}%"></i></div></div>`).join("");
+      b.innerHTML = `<b>Getting ${esc(modelTitle() || "the model")} ready.</b> ${S.cur && S.cur.queued ? "Your message is saved and goes out as soon as it is ready." : "You can write your message now: it goes out as soon as the model is ready."}<ul class="steps">${steps}</ul>${prog}`;
     } else if (s.phase === "error") b.innerHTML = `<b>The model could not start.</b> ${esc(s.error || "")} ${s.owner ? `<button class="btn small ghost" data-a="models">Choose a model</button>` : ""}`;
     else if (s.phase === "offline") b.innerHTML = `<b>Potluck is not answering.</b> Check that it is still open on the main computer.`;
-    else b.innerHTML = `<b>No model is running.</b> ${esc(s.pauseWhy || "")} ${s.owner ? `<button class="btn small" data-a="models">Choose a model</button>` : "Ask the person who runs Potluck to start one."}`;
+    else b.innerHTML = `<b>No model is running.</b> ${S.cur && S.cur.queued ? "Your message is saved and goes out once one starts. " : ""}${esc(s.pauseWhy || "")} ${s.owner ? `<button class="btn small" data-a="models">Choose a model</button>` : "Ask the person who runs Potluck to start one."}`;
   }
   drawTools();
 }
 
 // ---------- chats ----------
+// cleanChat gives a chat from outside (an imported file, or one stored by an older page) the
+// exact shape this page makes: ids that are plain text, numbers that are numbers, lists that
+// are lists. A crafted export could otherwise put page script into the chat list (an id is
+// drawn inside an attribute) or stop the page from loading at all. Returns null for
+// something that is not a chat.
+function cleanChat(c) {
+  if (!c || typeof c !== "object" || Array.isArray(c)) return null;
+  const str = v => typeof v === "string" ? v : "";
+  const n = v => Number.isFinite(Number(v)) ? Number(v) : 0;
+  const msg = m => {
+    if (!m || typeof m !== "object" || !["user", "assistant", "tool", "system"].includes(m.role)) return null;
+    const o = { ...m, content: str(m.content) };
+    if ("reasoning" in m) o.reasoning = str(m.reasoning);
+    if ("bi" in m) o.bi = Math.max(0, Math.floor(n(m.bi)));
+    if ("callId" in m) o.callId = str(m.callId);
+    if ("name" in m) o.name = str(m.name);
+    o.files = Array.isArray(m.files) ? m.files.filter(f => f && typeof f === "object").map(f => ({ ...f, name: str(f.name), size: n(f.size), text: str(f.text), skipped: typeof f.skipped === "string" ? f.skipped : f.skipped ? "skipped" : "" })) : undefined;
+    if (!o.files) delete o.files;
+    o.calls = Array.isArray(m.calls) ? m.calls.filter(x => x && typeof x === "object").map(x => ({ ...x, id: str(x.id), name: str(x.name), args: str(x.args) })) : undefined;
+    if (!o.calls) delete o.calls;
+    // Versions of a turn: { content, files, tail } each (see branchFrom).
+    if ("branches" in m) {
+      o.branches = Array.isArray(m.branches) ? m.branches.filter(b => b && typeof b === "object" && !Array.isArray(b)).map(b => {
+        const v = msg({ role: "user", content: b.content, files: b.files }) || { content: "" };
+        const out = { content: v.content, files: v.files };
+        if (Array.isArray(b.tail)) out.tail = b.tail.map(msg).filter(Boolean);
+        return out;
+      }) : [];
+      if (!o.branches.length) { delete o.branches; delete o.bi; } else o.bi = Math.min(o.bi || 0, o.branches.length - 1);
+    }
+    return o;
+  };
+  const out = { ...newChat(), ...c };
+  out.id = /^[A-Za-z0-9_-]{1,64}$/.test(c.id) ? c.id : uid();
+  out.title = str(c.title);
+  out.summary = str(c.summary);
+  out.starred = !!c.starred;
+  out.created = n(c.created) || Date.now();
+  out.updated = n(c.updated) || out.created;
+  out.used = n(c.used);
+  out.messages = Array.isArray(c.messages) ? c.messages.map(msg).filter(Boolean) : [];
+  const t = c.totals && typeof c.totals === "object" ? c.totals : {};
+  out.totals = { in: n(t.in), out: n(t.out), ms: n(t.ms), replies: n(t.replies) };
+  out.grants = c.grants && typeof c.grants === "object" && !Array.isArray(c.grants) ? c.grants : {};
+  if ("session" in c) out.session = str(c.session);
+  return out;
+}
 function newChat() { return { id: uid(), title: "", titled: false, created: Date.now(), updated: Date.now(), starred: false, messages: [], totals: { in: 0, out: 0, ms: 0, replies: 0 }, used: 0, grants: {}, summary: "" }; }
+// Chats deleted on this page: a reply still being written (or a title being made) ends with a
+// save, which would otherwise put the chat back.
+const deletedChats = new Set();
 async function saveChat(c = S.cur) {
-  if (!c || !c.messages.length && !c.summary) return;
+  if (!c || !c.messages.length && !c.summary || deletedChats.has(c.id)) return;
   c.updated = Date.now();
-  await Store.putChat(c);
+  // A failed save is said, and the chat goes on in this page (it is not lost from the screen).
+  try { await Store.putChat(c); } catch (e) { toast("This chat could not be saved in the browser: " + (e.message || e)); return; }
   const i = S.chats.findIndex(x => x.id === c.id);
   const meta = { id: c.id, title: c.title, updated: c.updated, starred: c.starred, text: c.messages.filter(m => m.role !== "tool").map(m => m.content || "").join(" ").slice(0, 4000).toLowerCase() };
   if (i >= 0) S.chats[i] = meta; else S.chats.unshift(meta);
@@ -189,7 +256,7 @@ function askConnector(call, tool) {
 const isTask = () => !!(S.cur && (S.cur.project || S.cur.task));
 function taskPolicy() {
   return { files: S.settings.perm === "none" ? "ask" : S.settings.perm, commands: S.settings.agent === "auto" ? "auto" : "ask",
-    connectors: { ...(S.settings.connectors || {}) }, all: !!(S.cur && S.cur.approveAll), thinking: !!S.settings.thinking };
+    connectors: { ...(S.settings.connectors || {}) }, all: !!(S.cur && S.cur.approveAll), thinking: !!S.settings.thinking, awayMinutes: S.settings.away ?? 30 };
 }
 async function taskApi(path, body) {
   const r = await fetch("/potluck/" + path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify(body) });
@@ -204,7 +271,7 @@ async function taskLoad() {
   if (!isTask() || !S.cur.session) return;
   try {
     const ss = await taskApi("sessions/" + S.cur.session);
-    S.cur.messages = (ss.messages || []).map(fromSMsg); S.task = { status: ss.status, error: ss.error, q: ss.question, live: null };
+    S.cur.messages = (ss.messages || []).map(fromSMsg); S.task = { status: ss.status, error: ss.error, q: ss.question, live: null, report: ss.report || "" };
     drawThread(); scrollDown(true);
   } catch (e) { S.task = { status: "error", error: "This task is gone from Potluck: " + e.message }; }
   taskFollow();
@@ -212,9 +279,15 @@ async function taskLoad() {
 function closeTask() { if (S.es) { S.es.close(); S.es = null; } S.task = S.task && isTask() ? S.task : null; }
 function taskFollow() {
   if (!S.cur.session || S.es) return;
-  const id = S.cur.session, chat = S.cur;
-  S.es = new EventSource("/potluck/sessions/" + id + "/events");
-  S.es.onmessage = e => {
+  const id = S.cur.session, chat = S.cur, es = new EventSource("/potluck/sessions/" + id + "/events");
+  S.es = es;
+  // After the connection dropped (the computer slept, the network changed) the browser
+  // reconnects by itself, but what was said meanwhile is not sent again: read the task afresh
+  // from Potluck instead of adding the next answer to a half one.
+  let dropped = false;
+  es.onerror = () => { dropped = true; };
+  es.onopen = () => { if (dropped && S.es === es && S.cur === chat) { dropped = false; S.task = null; taskLoad(); } };
+  es.onmessage = e => {
     if (S.cur !== chat) return;
     const ev = JSON.parse(e.data), t = S.task = S.task || {};
     if (ev.type === "delta") {
@@ -231,6 +304,8 @@ function taskFollow() {
       if (t.q) { $("#input").focus(); notifyQuestion(t.q); }
     } else if (ev.type === "status") {
       t.status = ev.status; t.error = ev.error; drawTools(); drawThread();
+      // A run ended: read the task again for its report.
+      if (ev.status !== "working" && ev.status !== "waiting") taskApi("sessions/" + id).then(ss => { if (S.cur === chat && S.task) { S.task.report = ss.report || ""; drawThread(); } }).catch(() => { });
     }
   };
 }
@@ -243,7 +318,9 @@ async function taskSend(text) {
   try {
     if (!c.session) { const ss = await taskApi("sessions", { project: c.project && c.project.root ? c.project : null, policy: taskPolicy(), text }); c.session = ss.id; }
     else await taskApi("sessions/" + c.session + "/message", { text });
-    S.task = { status: "working" }; await saveChat(c); taskFollow(); drawTools(); drawThread();
+    // Sent while it works: the answer being written stays where it is (S.task.live).
+    if (!(S.task && S.task.status === "working")) S.task = { status: "working" };
+    await saveChat(c); taskFollow(); drawTools(); drawThread();
   } catch (e) { toast(e.message); }
 }
 async function taskAnswer(answer) {
@@ -259,7 +336,7 @@ function questionCard(q) {
     (q.detail ? `<pre class="cmd">${esc(q.detail)}</pre>` : "") +
     `<div class="qrow"><button class="btn" data-a="q-yes">Yes <kbd>Enter</kbd></button><button class="btn no" data-a="q-no">No <kbd>⌫</kbd></button>` +
     (q.kind !== "ask" && q.kind !== "plan" ? `<button class="btn ghost small" data-a="q-always">Yes, and don't ask again in this task</button>` : "") +
-    `</div><div class="small muted">Or type your own answer in the message box and press Enter.</div></div></div>`;
+    `</div><div class="small muted">Or type your own answer in the message box and press Enter.${(S.settings.away ?? 30) > 0 ? ` If nobody answers within ${S.settings.away ?? 30} minutes, the task carries on without it.` : ""}</div></div></div>`;
 }
 // A question while the page is in the background: a desktop notification (phones get theirs from Potluck).
 function notifyQuestion(q) {
@@ -321,7 +398,7 @@ function drawProjects() {
   if (!S.server || !S.server.owner) { el.innerHTML = ""; return; }
   const ts = (S.tasks || []).slice().sort((a, b) => (b.status === "waiting") - (a.status === "waiting") || Date.parse(b.updated) - Date.parse(a.updated)).slice(0, 6);
   const dot = st => st === "waiting" ? `<span class="tdot wait" title="Waiting for you"></span>` : st === "working" ? `<span class="tdot work" title="Working"></span>` : `<span class="tdot" title="${esc(st)}"></span>`;
-  const tasksHTML = `<h4>Tasks <button class="icon small" data-a="new-task" title="New task" aria-label="New task">${ic("plus")}</button></h4>` +
+  const tasksHTML = `<h4>Tasks <button class="icon small" data-a="new-task" title="New task" aria-label="New task">${ic("plus")}</button><button class="btn small ghost" data-a="schedules" title="Tasks that run by themselves at set times">Scheduled</button></h4>` +
     (ts.length ? ts.map(t => `<div class="chat-item ${S.cur && S.cur.session === t.id ? "on" : ""}" data-task="${esc(t.id)}" tabindex="0" role="button" title="${esc(t.question ? "Waiting: " + t.question.title : t.status)}">${dot(t.status)}<span class="t">${esc(t.title || "Task")}</span></div>`).join("") : `<div class="empty-list small">Tasks keep going in Potluck when you close this page.</div>`);
   el.innerHTML = tasksHTML + `<h4>Projects</h4>` + ps.slice(0, 6).map(p => `<div class="chat-item proj ${S.cur && S.cur.project && S.cur.project.root === p.path ? "on" : ""}" data-proj="${esc(p.path)}" data-name="${esc(p.name)}" tabindex="0" role="button" title="${esc(p.path)}"><span class="ic">${icon("folder")}</span><span class="t">${esc(p.name)}</span></div>`).join("") +
     `<div class="chat-item proj" data-a="all-projects" tabindex="0" role="button"><span class="t muted">${ps.length > 6 ? `All ${ps.length} projects…` : "Open a project…"}</span></div>`;
@@ -344,7 +421,7 @@ function projectsSheet() {
 
 async function openChat(id) {
   if (S.gen) return toast("Wait for the reply to finish, or stop it first.");
-  const c = id ? await Store.getChat(id) : null;
+  const c = id ? cleanChat(await Store.getChat(id)) : null;
   S.cur = c || newChat(); S.cur.grants = S.cur.grants || {};
   S.pending = []; S.folder = null;
   await restoreFolder();
@@ -356,6 +433,7 @@ async function openChat(id) {
 }
 function titleFrom(text) { const t = text.replace(/\s+/g, " ").trim(); return t.length > 48 ? t.slice(0, 46).replace(/\s+\S*$/, "") + "…" : t || "New chat"; }
 async function deleteChat(id) {
+  deletedChats.add(id);
   await Store.delChat(id); await Store.del("folder:" + id);
   S.chats = S.chats.filter(c => c.id !== id);
   if (S.cur && S.cur.id === id) { S.gen && stop(); S.cur = newChat(); S.folder = null; S.pending = []; drawAll(); } else drawList();
@@ -370,7 +448,7 @@ function drawList() {
   for (const [name, test] of groups) {
     const items = list.filter(c => !used.has(c.id) && test(c)); items.forEach(c => used.add(c.id));
     if (!items.length) continue;
-    h += `<h4>${name}</h4>` + items.map(c => `<div class="chat-item ${S.cur && c.id === S.cur.id ? "on" : ""}" data-id="${c.id}" tabindex="0" role="button">${c.starred ? `<span class="ic star">${icon("star")}</span>` : ""}<span class="t">${esc(c.title || "New chat")}</span><button class="icon" data-a="chat-more" data-id="${c.id}" title="More" aria-label="More">${ic("more")}</button></div>`).join("");
+    h += `<h4>${name}</h4>` + items.map(c => `<div class="chat-item ${S.cur && c.id === S.cur.id ? "on" : ""}" data-id="${esc(c.id)}" tabindex="0" role="button">${c.starred ? `<span class="ic star">${icon("star")}</span>` : ""}<span class="t">${esc(c.title || "New chat")}</span><button class="icon" data-a="chat-more" data-id="${esc(c.id)}" title="More" aria-label="More">${ic("more")}</button></div>`).join("");
   }
   $("#chat-list").innerHTML = h || `<div class="empty-list">${f ? "No chats match." : "Your chats will appear here. They are kept in this browser only."}</div>`;
 }
@@ -433,7 +511,8 @@ function drawThread() {
       const next = c.messages[i + 1], endOfTurn = !next || next.role === "user";
       const live = S.gen && S.gen.msg === m;
       h += `<div class="msg assistant ${endOfTurn && i > lastUser ? "last" : ""}" data-i="${i}"><div class="body">${assistantHTML(m, live)}</div>${(m.calls || []).map(cl => toolCard(cl, results[cl.id])).join("")}` +
-        (m.error ? `<div class="err">${esc(m.error)}</div>` : "") +
+        (m.error ? `<div class="err">${esc(m.error)}${m.overflow ? ` <button class="btn small" data-a="compact-retry">Summarize and continue</button>` : ""}</div>` : "") +
+        (m.cut && !live && endOfTurn ? `<div class="small muted">The answer reached its length limit before it was finished. <button class="btn small ghost" data-a="continue">Continue</button></div>` : "") +
         (live ? `<div class="waiting" data-wait>${m.content || m.reasoning ? "" : `<span class="spin"></span><span>${esc(S.gen.note || "Reading your message…")}</span>`}</div>` :
           endOfTurn ? `<div class="acts"><button class="icon" data-a="copy-msg" title="Copy" aria-label="Copy">${ic("copy")}</button><button class="icon" data-a="retry" title="Try again" aria-label="Try again">${ic("retry")}</button><button class="icon" data-a="speak" title="Read aloud" aria-label="Read aloud">${ic("speak")}</button><span class="stat">${esc(statLine(m.stats))}</span></div>` : "") + `</div>`;
     }
@@ -442,6 +521,8 @@ function drawThread() {
     if (S.task.q) h += questionCard(S.task.q);
     else if (S.task.status === "working" && !S.task.live) h += `<div class="wrap"><div class="waiting"><span class="spin"></span><span>${esc(S.task.error || "Working on it. You can close this page; the task keeps going in Potluck.")}</span></div></div>`;
     else if (S.task.status === "error" || S.task.status === "stopped") h += `<div class="wrap"><div class="err">${esc(S.task.error || (S.task.status === "stopped" ? "Stopped." : "Something went wrong."))}</div></div>`;
+    // What the last run did, from Potluck's own record of it (not the model's word).
+    if (S.task.report && S.task.status !== "working" && !S.task.q) h += `<div class="wrap"><div class="report"><b>Report</b><pre>${esc(S.task.report)}</pre>${S.cur.project ? `<button class="btn small ghost" data-a="task-changes">See what it changed</button>` : ""}</div></div>`;
   }
   el.innerHTML = h;
 }
@@ -807,20 +888,14 @@ function systemPrompt() {
   if (S.folder && toolSpecs() && toolSpecs().some(t => t.function.name === "list_files")) p.push(`The user has shared a folder named "${S.folder.name}". Use the tools to look at${S.folder.kind === "handle" ? " or change" : ""} files in it when that helps. Paths are relative to that folder. Do not guess what a file contains: read it.`);
   return p.join("\n\n");
 }
-// thinkingKwargs tells the model's chat template whether to think first. Qwen-style
-// templates take enable_thinking; others (Inkling 2) take a reasoning effort, where "none"
-// keeps the thinking as short as the model allows.
-// A budget is the only reliable stop for models that think whatever they are told (Inkling 2):
-// none when thinking is off, a few thousand tokens when on, then the engine asks for the answer.
-function thinkBudget(on = !!S.settings.thinking) {
-  return on ? { reasoning_budget_tokens: 4096, reasoning_budget_message: "Time to stop thinking and give the answer." } : { reasoning_budget_tokens: 1 }; // not 0: some model files loop on their markers with 0
+// Potluck's one thinking switch: Potluck turns it into what the loaded model reads (its
+// template's effort level or enable_thinking), with a generous budget only as a backstop.
+function thinking(on = !!S.settings.thinking) {
+  return { thinking: on ? "high" : "off" };
 }
-function thinkingKwargs(on = !!S.settings.thinking) {
-  return { enable_thinking: on, reasoning_effort: on ? "high" : "none" };
-}
-function apiMessages() {
+function apiMessages(msgs = S.cur.messages) {
   const out = [{ role: "system", content: systemPrompt() }];
-  for (const m of S.cur.messages) {
+  for (const m of msgs) {
     if (m.role === "user") {
       const files = (m.files || []).filter(f => !f.skipped && !f.image).map(f => `<file name="${f.name}">\n${f.text}\n</file>`).join("\n\n");
       const text = files ? files + "\n\n" + (m.content || "See the attached file.") : (m.content || "See the picture.");
@@ -861,7 +936,8 @@ function parseToolCalls(raw) {
   return calls;
 }
 async function streamDirect(msg, signal) {
-  const s = S.settings, tools = toolSpecs(), body = { messages: apiMessages(), chat_template_kwargs: thinkingKwargs(false), ...thinkBudget(false) };
+  let cut = false; // stopped at the length limit
+  const s = S.settings, tools = toolSpecs(), body = { messages: apiMessages(), ...thinking(false) };
   if (tools) body.tools = tools;
   const fail = async r => { let t = await r.text(); try { const j = JSON.parse(t); t = (j.error && (j.error.message || j.error)) || t; } catch { } return String(t); };
   const tr = await fetch("/apply-template", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
@@ -894,6 +970,7 @@ async function streamDirect(msg, signal) {
       if (j.error) throw new Error(j.error.message || "The model stopped with an error.");
       if (j.content) { raw += j.content; show(); }
       if (j.stop) {
+        if (j.stop_type === "limit") cut = true;
         const t = j.timings || {};
         msg.stats = { in: j.tokens_evaluated || (t.prompt_n || 0) + (t.cache_n || 0), out: j.tokens_predicted || t.predicted_n || 0, tps: t.predicted_per_second || 0, ptps: t.prompt_per_second || 0, ms: (t.prompt_ms || 0) + (t.predicted_ms || 0), fresh: t.prompt_n || 0 };
       }
@@ -902,11 +979,11 @@ async function streamDirect(msg, signal) {
   }
   msg.calls = tools ? parseToolCalls(raw) : [];
   show();
-  return msg.calls.length ? "tool_calls" : "stop";
+  return msg.calls.length ? "tool_calls" : cut ? "length" : "stop";
 }
 async function streamOnce(msg, signal) {
   const s = S.settings, tools = toolSpecs();
-  const body = { messages: apiMessages(), stream: true, stream_options: { include_usage: true }, cache_prompt: true, chat_template_kwargs: thinkingKwargs(), ...thinkBudget(), ...extModel() };
+  const body = { messages: apiMessages(), stream: true, stream_options: { include_usage: true }, cache_prompt: true, ...thinking(), ...extModel() };
   if (tools) body.tools = tools;
   if (s.temperature !== "" && !isNaN(+s.temperature)) body.temperature = +s.temperature;
   if (s.maxTokens !== "" && +s.maxTokens > 0) body.max_tokens = +s.maxTokens;
@@ -957,7 +1034,13 @@ function addUsage(st) {
 }
 async function generate() {
   const c = S.cur;
-  if (!running()) { toast("No model is ready yet. Your message is kept; press Send again once one is running."); return; }
+  if (!running()) {
+    // Kept and sent by itself as soon as a model is ready (poll), instead of making the person
+    // come back and press Send again.
+    c.queued = true; await saveChat(c); drawStatus();
+    toast(S.server && S.server.phase === "starting" ? "Saved. It goes out as soon as the model is ready." : "Saved. Start a model and it goes out by itself.");
+    return;
+  }
   if (S.folder && S.folder.needsAccess && !(await reconnectFolder())) return toast("Click the folder chip to reconnect your folder first.");
   const abort = new AbortController();
   S.gen = { abort, chatId: c.id, msg: null, note: "" };
@@ -967,14 +1050,25 @@ async function generate() {
     for (let round = 0; round < rounds; round++) {
       const msg = { id: uid(), role: "assistant", content: "", reasoning: "", t: Date.now() };
       c.messages.push(msg); S.gen.msg = msg; S.gen.note = round ? "Reading what it found…" : (c.messages.length > 2 || !toolSpecs() ? "Reading your message…" : "Reading your message and how to use your folder…");
+      // The model answers one conversation at a time: if nothing comes back soon, say whether
+      // another one (someone else in the house, an agent task) is ahead of this one.
+      const waitFor = S.gen;
+      setTimeout(async () => {
+        if (S.gen !== waitFor || !msg || msg.content || msg.reasoning || extModel().model) return;
+        try { const st = await api("/potluck/state"); if (S.gen === waitFor && !msg.content && !msg.reasoning && st.busy > 1) { S.gen.note = "Another conversation is being answered first. Yours is next."; drawLive(); } } catch { }
+      }, 4000);
       drawThread(); scrollDown(true);
       let finish;
       try { finish = await (directRoute(!!toolSpecs()) ? streamDirect : streamOnce)(msg, abort.signal); }
       catch (e) {
         if (abort.signal.aborted) { msg.stats = { ...(msg.stats || {}), stopped: true }; if (!msg.content && !msg.reasoning) c.messages.pop(); break; }
-        msg.error = e.message || String(e); break;
+        msg.error = e.message || String(e);
+        if (/context|exceed|too long|n_ctx/i.test(msg.error)) { msg.error = "This chat no longer fits in the model's memory."; msg.overflow = true; }
+        break;
       }
       addUsage(msg.stats);
+      // Cut off at the length limit, not finished: say so, with a way to carry on.
+      if (finish === "length") msg.cut = true;
       if (!msg.calls.length || finish !== "tool_calls") break;
       S.gen.msg = null; drawThread(); scrollDown(true);
       for (const call of msg.calls) {
@@ -1008,6 +1102,9 @@ async function send(text) {
   drawHeader(); drawChips(); drawThread(); scrollDown(true);
   await saveChat(c);
   if (conns().some(k => connOn(k.name))) await loadMCP();
+  // Another chat opened while the connectors started: this message waits in its own chat
+  // (Try again answers it) rather than being answered in the wrong one.
+  if (S.cur !== c) return toast("Your message is saved in its chat; open it and choose Try again to get the answer.");
   await generate();
 }
 // Versions. Trying again, or editing a message, starts a new version of that turn; the
@@ -1043,16 +1140,38 @@ function editMessage(i) {
   el.innerHTML = `<div class="edit-box"><textarea>${esc(m.content)}</textarea><div class="row"><button class="btn small ghost" data-a="edit-cancel">Cancel</button><button class="btn small" data-a="edit-save" data-i="${i}">Send again</button></div></div>`;
   const ta = $("textarea", el); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
 }
-async function compact() {
+// compact summarizes the chat into a fresh one; with resend, the last message (the one that no
+// longer fitted) is asked again there.
+async function compact(resend) {
   const c = S.cur; if (S.gen || !c.messages.length) return toast("There is nothing to summarize yet.");
+  // The chat itself is left as it is until the summary is made: the message to send again
+  // is only left out of what is summarized.
+  let again = null, msgs = c.messages;
+  if (resend) {
+    const i = c.messages.map(m => m.role).lastIndexOf("user");
+    if (i >= 0) { again = c.messages[i]; msgs = c.messages.slice(0, i); }
+  }
   if (!running()) return toast("No model is running.");
   S.compacting = true; drawStatus();
-  const body = { messages: [...apiMessages(), { role: "user", content: "Summarize our conversation so far for your own later use. Keep every fact, decision, name, number and open question that matters, in compact notes. Do not add anything new." }], stream: false, chat_template_kwargs: thinkingKwargs(false), ...thinkBudget(false), ...extModel() };
+  const ask = { role: "user", content: "Summarize our conversation so far for your own later use. Keep every fact, decision, name, number and open question that matters, in compact notes. Do not add anything new." };
+  // The chat may itself be too long to summarize in one go: try it whole, then with tool
+  // results and long messages cut short, then only its most recent part.
+  const cut = (n) => m => ({ ...m, content: typeof m.content === "string" && m.content.length > n ? m.content.slice(0, n) + " […]" : m.content });
+  const full = apiMessages(msgs), [sys, ...rest] = full;
+  const tries = [full, [sys, ...rest.map(cut(1500))], [sys, ...rest.slice(-24).map(cut(800))]];
   try {
-    const r = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    const j = await r.json(); if (!r.ok) throw new Error((j.error && j.error.message) || "The model did not answer.");
+    let j;
+    for (let t = 0; t < tries.length; t++) {
+      const body = { messages: [...tries[t], ask], stream: false, ...thinking(false), ...extModel() };
+      const r = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      j = await r.json();
+      if (r.ok) break;
+      const why = (j.error && j.error.message) || "The model did not answer.";
+      if (!/context|exceed|too long|n_ctx/i.test(why) || t === tries.length - 1) throw new Error(why);
+    }
     const n = newChat(); n.summary = j.choices[0].message.content; n.title = (c.title || "Chat") + " (continued)"; n.titled = true;
     S.cur = n; S.folder = null; S.pending = []; await saveChat(n); drawAll(); toast("Continuing in a fresh chat with the summary.");
+    if (again) { n.messages.push({ id: uid(), role: "user", content: again.content, files: again.files, t: Date.now() }); n.title = c.title + " (continued)"; await saveChat(n); drawAll(); S.compacting = false; drawStatus(); return generate(); }
   } catch (e) { toast("Could not summarize: " + e.message); }
   S.compacting = false; drawStatus();
 }
@@ -1151,8 +1270,8 @@ function switchSheet(x) {
   sheet(`<h3>${x.running ? "Reload" : "Switch to"} ${esc(x.title || x.file)}</h3>
     <p class="muted">${x.running ? "Reloading takes a minute or two." : "The model that is running now is stopped first. Loading takes a few minutes; you can watch the progress above the chat."} Chats are kept.</p>
     <label class="f" for="sw-ctx">Conversation memory</label>
-    <select id="sw-ctx">${[4096, 8192, 16384, 32768].map(n => `<option value="${n}" ${n === cur ? "selected" : ""}>${num(n)} tokens${n === 4096 ? " (normal)" : n === 8192 ? " (long)" : n === 16384 ? " (very long)" : " (longest, needs more memory)"}</option>`).join("")}</select>
-    <p class="muted small">A longer memory fits bigger files and longer chats, and uses more of each computer's memory.</p>
+    <select id="sw-ctx"><option value="0" selected>Automatic: as long as fits without slowing down</option>${[8192, 16384, 32768, 65536, 131072].map(n => `<option value="${n}">${num(n)} tokens</option>`).join("")}</select>
+    <p class="muted small">A longer memory fits bigger files and longer chats, and uses more of each computer's memory. Now: ${num(cur)} tokens.</p>
     <div class="foot"><button class="btn ghost" data-a="close">Cancel</button><button class="btn" data-a="do-switch">${x.running ? "Reload" : "Switch"}</button></div>`,
     { "do-switch": async () => { const ctx = +$("#sw-ctx").value; closeSheet(); try { await api("/potluck/switch", { file: x.file, node: x.node || "", ctx }); toast("Loading " + (x.title || x.file) + "…"); poll(); } catch (e) { toast("Could not switch: " + e.message); } } });
 }
@@ -1175,7 +1294,7 @@ function chatMenu(a, id) {
   showPop(a, mi("rename", "Rename", { icon: "edit" }) + mi("star", meta && meta.starred ? "Remove star" : "Star", { icon: "star" }) + mi("export", "Export as Markdown", { icon: "file" }) +
     (cur ? mi("compact", "Summarize and continue in a new chat", { icon: "retry" }) : "") + `<hr>` + mi("delete", "Delete", { icon: "trash", danger: 1 }),
     async v => {
-      const c = cur ? S.cur : await Store.getChat(id); if (!c) return;
+      const c = cur ? S.cur : cleanChat(await Store.getChat(id)); if (!c) return;
       if (v === "rename") { if (!cur) await openChat(id); startRename(); }
       else if (v === "star") { c.starred = !c.starred; await Store.putChat(c); const m = S.chats.find(x => x.id === c.id); if (m) m.starred = c.starred; drawHeader(); drawList(); }
       else if (v === "export") exportChat(c);
@@ -1203,6 +1322,47 @@ function sheet(html, handlers = {}) {
   hidePop(); const m = $("#modal"); $(".sheet", m).innerHTML = html; m.hidden = false; m.handlers = handlers;
   const f = $("input,textarea,select,button.btn:not(.ghost)", m); f && f.focus();
 }
+// Scheduled tasks (schedules.go): set once, run by Potluck at their times as ordinary tasks.
+async function schedulesSheet() {
+  let j;
+  try { j = await taskApi("schedules"); } catch (e) { return toast(e.message); }
+  const when = sc => sc.every === "hours" ? `every ${sc.hours} hours` : (sc.every === "weekdays" ? "weekdays" : "every day") + " at " + sc.at;
+  const proj = S.cur && S.cur.project && S.cur.project.root ? S.cur.project : null;
+  const list = (j.schedules || []).map(sc => `<div class="sched"><div><b>${esc(sc.title)}</b> <span class="muted small">${esc(when(sc))}${sc.on ? (sc.next ? " · next " + new Date(sc.next).toLocaleString() : "") : " · off"}</span>${sc.note ? `<div class="small err">${esc(sc.note)}</div>` : ""}</div>` +
+    `<div class="row"><button class="btn small ghost" data-a="sc-run" data-id="${esc(sc.id)}">Run now</button><button class="btn small ghost" data-a="sc-toggle" data-id="${esc(sc.id)}" data-on="${sc.on ? 1 : 0}">${sc.on ? "Turn off" : "Turn on"}</button><button class="btn small ghost" data-a="sc-del" data-id="${esc(sc.id)}">Delete</button></div></div>`).join("");
+  sheet(`<h3>Scheduled tasks</h3><p class="small muted">Each run is an ordinary task: its questions reach your phone, and it ends with a report. A run is skipped while the last one still goes; a time missed while the computer was off runs once when Potluck is back.</p>` +
+    (list || `<p class="small">None yet.</p>`) +
+    `<h4>New scheduled task</h4><label class="f" for="sc-text">What should it do each time?</label><textarea id="sc-text" rows="3" placeholder="Pull the latest code, run the tests, fix what fails and tell me what you changed."></textarea>` +
+    `<div class="small muted">${proj ? "In the project " + esc(proj.name || proj.root) : "With no project (open a project's task first to schedule work in it)"}.</div>` +
+    `<div class="row"><select id="sc-every"><option value="daily">Every day</option><option value="weekdays">Weekdays</option><option value="hours">Every few hours</option></select> <input id="sc-at" type="time" value="02:00"> <input id="sc-hours" type="number" min="1" max="168" value="6" style="width:5em" hidden> </div>` +
+    `<label class="opt"><input type="checkbox" id="sc-cmd" checked><span>It may run commands without asking</span></label><label class="opt"><input type="checkbox" id="sc-edit" checked><span>It may change files without asking</span></label>` +
+    `<div class="small muted">Nobody is there to approve things at night: what you allow here is approved for every run. Anything else it needs is asked, and left out if nobody answers.</div>` +
+    `<div class="foot"><button class="btn ghost" data-a="close">Close</button><button class="btn" data-a="sc-add">Schedule it</button></div>`,
+    {
+      "sc-add": async () => {
+        const every = $("#sc-every").value, pol = { ...taskPolicy(), commands: $("#sc-cmd").checked ? "auto" : "ask", files: $("#sc-edit").checked ? "edit" : "read", all: false };
+        try { await taskApi("schedules", { text: $("#sc-text").value, project: proj, policy: pol, every, at: $("#sc-at").value, hours: +$("#sc-hours").value }); toast("Scheduled."); schedulesSheet(); } catch (e) { toast(e.message); }
+      },
+      "sc-run": async b => { try { const r = await taskApi("schedules/" + b.dataset.id + "/run", {}); closeSheet(); await loadTasks(); openTask(r.task); } catch (e) { toast(e.message); } },
+      "sc-toggle": async b => { try { await taskApi("schedules/" + b.dataset.id + (b.dataset.on === "1" ? "/off" : "/on"), {}); schedulesSheet(); } catch (e) { toast(e.message); } },
+      "sc-del": async b => { try { await taskApi("schedules/" + b.dataset.id + "/delete", {}); schedulesSheet(); } catch (e) { toast(e.message); } },
+    });
+  $("#sc-every").onchange = () => { const h = $("#sc-every").value === "hours"; $("#sc-hours").hidden = !h; $("#sc-at").hidden = h; };
+}
+// What the task changed in its project, file by file, with undo (taskchanges.go).
+async function changesSheet() {
+  let j;
+  try { j = await taskApi("sessions/" + S.cur.session + "/changes"); } catch (e) { return toast(e.message); }
+  const ch = (j.changes || []).filter(c => c.kind !== "same");
+  const kind = { changed: "changed", created: "new file", deleted: "deleted since" };
+  sheet(`<h3>What this task changed</h3><p class="small muted">${esc(j.note || "")}</p>` +
+    (ch.length ? ch.map(c => `<details class="change"><summary><b>${esc(c.path)}</b> <span class="muted">${esc(kind[c.kind] || c.kind)}</span> <button class="btn small ghost" data-a="undo-file" data-p="${esc(c.path)}">Undo</button></summary><pre class="diff">${esc(c.diff || "")}</pre></details>`).join("") : `<p>No file changes are kept for this task.</p>`) +
+    `<div class="foot"><button class="btn ghost" data-a="close">Close</button>${ch.length ? `<button class="btn danger" data-a="undo-all">Undo all</button>` : ""}</div>`,
+    {
+      "undo-file": async b => { try { await taskApi("sessions/" + S.cur.session + "/revert", { path: b.dataset.p }); toast(b.dataset.p + " is back as it was."); changesSheet(); } catch (e) { toast(e.message); } },
+      "undo-all": async () => { try { const r = await taskApi("sessions/" + S.cur.session + "/revert", { path: "" }); toast(r.files + " files are back as they were."); changesSheet(); } catch (e) { toast(e.message); } },
+    });
+}
 function closeSheet() { $("#modal").hidden = true; $("#input").focus(); }
 function settingsSheet() {
   const s = S.settings;
@@ -1220,18 +1380,21 @@ function settingsSheet() {
     <h4>For the curious</h4>
     <label class="f" for="st-temp">Creativity (temperature)</label><input type="text" id="st-temp" inputmode="decimal" placeholder="Model's own default" value="${esc(s.temperature)}">
     <label class="f" for="st-max">Longest reply, in tokens</label><input type="text" id="st-max" inputmode="numeric" placeholder="No limit" value="${esc(s.maxTokens)}">
+    <label class="f" for="st-away">When a task asks something and nobody answers</label><select id="st-away">${[[15, "Carry on after 15 minutes"], [30, "Carry on after 30 minutes"], [60, "Carry on after an hour"], [240, "Carry on after 4 hours"], [-1, "Wait for my answer"]].map(([v, t]) => `<option value="${v}" ${(s.away ?? 30) == v ? "selected" : ""}>${t}</option>`).join("")}</select>
+    <div class="small muted">Carrying on means: the task decides its own questions as safely as it can, leaves out anything that needed your approval, and lists both in its report.</div>
     <h4>Your chats</h4>
     <p class="muted small">Chats, settings and usage are kept in this browser on this computer, not on the Potluck computers.</p>
     <div class="row"><button class="btn small ghost" data-a="export-all">Export all chats</button><button class="btn small ghost" data-a="import-all">Import</button><button class="btn small ghost" data-a="wipe">Delete all chats</button></div>
     <div class="foot"><button class="btn ghost" data-a="close">Cancel</button><button class="btn" data-a="save">Save</button></div>`,
     {
       save: () => {
-        Object.assign(s, { instructions: $("#st-ins").value, style: $("#st-style").value, theme: $("#st-theme").value, enterSends: $("#st-enter").checked, autoSend: $("#st-auto").checked, speak: $("#st-speak").checked, temperature: $("#st-temp").value.trim(), maxTokens: $("#st-max").value.trim() });
+        Object.assign(s, { instructions: $("#st-ins").value, style: $("#st-style").value, theme: $("#st-theme").value, enterSends: $("#st-enter").checked, autoSend: $("#st-auto").checked, speak: $("#st-speak").checked, temperature: $("#st-temp").value.trim(), maxTokens: $("#st-max").value.trim(), away: Number($("#st-away").value) });
+        taskPolicySync();
         saveSettings(); applyTheme(); closeSheet(); toast("Saved");
       },
       "export-all": async () => download("potluck-chats.json", JSON.stringify({ potluckChats: 1, chats: await Store.allChats() }), "application/json"),
-      "import-all": () => { const i = document.createElement("input"); i.type = "file"; i.accept = ".json,application/json"; i.onchange = async () => { try { const j = JSON.parse(await i.files[0].text()); if (!j.potluckChats) throw 0; for (const c of j.chats) await Store.putChat(c); await loadChats(); closeSheet(); toast(j.chats.length + " chats imported."); } catch { toast("That is not a Potluck chat export."); } }; i.click(); },
-      wipe: () => sheet(`<h3>Delete all chats?</h3><p>Every chat in this browser will be removed. This cannot be undone.</p><div class="foot"><button class="btn ghost" data-a="close">Cancel</button><button class="btn danger" data-a="yes">Delete all</button></div>`, { yes: async () => { await Store.clearChats(); S.chats = []; S.cur = newChat(); S.folder = null; closeSheet(); drawAll(); } }),
+      "import-all": () => { const i = document.createElement("input"); i.type = "file"; i.accept = ".json,application/json"; i.onchange = async () => { try { const j = JSON.parse(await i.files[0].text()); if (!j.potluckChats || !Array.isArray(j.chats)) throw 0; const ok = j.chats.map(cleanChat).filter(Boolean); for (const c of ok) await Store.putChat(c); await loadChats(); closeSheet(); toast(ok.length + " chats imported" + (ok.length < j.chats.length ? ` (${j.chats.length - ok.length} were not chats)` : "") + "."); } catch { toast("That is not a Potluck chat export."); } }; i.click(); },
+      wipe: () => sheet(`<h3>Delete all chats?</h3><p>Every chat in this browser will be removed. This cannot be undone.</p><div class="foot"><button class="btn ghost" data-a="close">Cancel</button><button class="btn danger" data-a="yes">Delete all</button></div>`, { yes: async () => { S.chats.forEach(c => deletedChats.add(c.id)); if (S.cur) deletedChats.add(S.cur.id); S.gen && stop(); await Store.clearChats(); S.chats = []; S.cur = newChat(); S.folder = null; closeSheet(); drawAll(); } }),
     });
 }
 function shortcutsSheet() {
@@ -1317,7 +1480,13 @@ function showPreview(lang, code) {
 
 // ---------- wiring ----------
 async function loadChats() {
-  const all = await Store.allChats();
+  const all = [];
+  for (const raw of await Store.allChats()) {
+    const c = cleanChat(raw);
+    if (!c) { if (raw && raw.id !== undefined) await Store.delChat(raw.id).catch(() => {}); continue; }
+    if (c.id !== raw.id) { await Store.delChat(raw.id).catch(() => {}); await Store.putChat(c).catch(() => {}); } // kept under a plain id
+    all.push(c);
+  }
   S.chats = all.map(c => ({ id: c.id, title: c.title, updated: c.updated, starred: c.starred, text: c.messages.filter(m => m.role !== "tool").map(m => m.content || "").join(" ").slice(0, 4000).toLowerCase() }));
   drawList();
 }
@@ -1330,7 +1499,7 @@ function wire() {
   $("#side-close").onclick = $("#side-open").onclick = toggleSide;
   $("#new-chat").onclick = () => openChat();
   $("#chat-search").oninput = e => { S.filter = e.target.value; drawList(); };
-  $("#project-list").onclick = e => { if (e.target.closest("[data-a=new-task]")) return newTaskChat(); const tk = e.target.closest("[data-task]"); if (tk) return openTask(tk.dataset.task); if (e.target.closest("[data-a=all-projects]")) return projectsSheet(); const it = e.target.closest("[data-proj]"); if (it) openProject(it.dataset.proj, it.dataset.name); };
+  $("#project-list").onclick = e => { if (e.target.closest("[data-a=new-task]")) return newTaskChat(); if (e.target.closest("[data-a=schedules]")) return schedulesSheet(); const tk = e.target.closest("[data-task]"); if (tk) return openTask(tk.dataset.task); if (e.target.closest("[data-a=all-projects]")) return projectsSheet(); const it = e.target.closest("[data-proj]"); if (it) openProject(it.dataset.proj, it.dataset.name); };
   $("#chat-list").onclick = e => { const more = e.target.closest("[data-a=chat-more]"); if (more) { e.stopPropagation(); return chatMenu(more, more.dataset.id); } const it = e.target.closest(".chat-item"); if (it) openChat(it.dataset.id); };
   $("#chat-list").onkeydown = e => { if (e.key === "Enter" && e.target.classList.contains("chat-item")) openChat(e.target.dataset.id); };
   $("#cluster-chip").onclick = () => usageSheet();
@@ -1435,6 +1604,9 @@ function wire() {
       copyText(S.cur.messages.slice(j, i + 1).filter(x => x.role === "assistant" && x.content).map(x => x.content).join("\n\n"));
     }
     else if (a === "retry") retry();
+    else if (a === "compact-retry") compact(true);
+    else if (a === "continue") send("Continue exactly where you stopped.");
+    else if (a === "task-changes") changesSheet();
     else if (a === "speak") speakText(m.content);
     else if (a === "edit-msg") editMessage(i);
     else if (a === "edit-cancel") drawThread();
@@ -1447,7 +1619,7 @@ function wire() {
     const b = e.target.closest("[data-a]"); if (!b) return;
     if (b.dataset.a === "close") return closeSheet();
     if (b.dataset.a === "cmd") { closeSheet(); return runSlash("/" + b.dataset.c); }
-    const h = $("#modal").handlers[b.dataset.a]; h && h();
+    const h = $("#modal").handlers[b.dataset.a]; h && h(b);
   };
   document.addEventListener("mousedown", e => { if (!$("#pop").hidden && !e.target.closest("#pop") && e.target.closest("button") !== popFor) hidePop(); });
   document.addEventListener("keydown", e => {

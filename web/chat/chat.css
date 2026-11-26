@@ -208,6 +208,8 @@ body:not(.side-closed) #side-open{display:none}
 .sheet .foot{display:flex;gap:8px;justify-content:flex-end;margin-top:18px;flex-wrap:wrap}
 .sheet label.f{display:block;margin:12px 0 4px;font-weight:600;font-size:14.5px}
 .sheet textarea,.sheet input[type=text],.sheet select{width:100%;border:1px solid var(--line);border-radius:10px;background:var(--bg);padding:8px 10px}
+.sheet input[type=time],.sheet input[type=number]{border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);padding:7px 10px;color-scheme:light dark}
+.sheet .row select{width:auto}
 .sheet textarea{min-height:110px;resize:vertical}
 .sheet .opt{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--line)}
 .sheet .opt:last-of-type{border-bottom:0}
@@ -246,6 +248,14 @@ body:not(.side-closed) #side-open{display:none}
 .tool pre.cmd { white-space: pre-wrap; word-break: break-word; background: var(--code-bg, rgba(127,127,127,.12)); padding: 8px 10px; border-radius: 6px; margin: 8px 0 6px; font-size: 13px; max-height: 320px; overflow: auto; }
 
 /* A task's question: Yes / No / your own words */
+.report{border:1px solid var(--line);border-radius:14px;padding:12px 16px;margin:10px 0;background:var(--card)}
+.sched{border-top:1px solid var(--line);padding:8px 0;display:flex;flex-direction:column;gap:6px}
+.change{border-top:1px solid var(--line);padding:6px 0}
+.change summary{cursor:pointer;display:flex;gap:8px;align-items:center}
+.change summary .btn{margin-left:auto}
+pre.diff{max-height:360px;overflow:auto;font-size:.85em;white-space:pre}
+.report .btn{margin-top:8px}
+.report pre{white-space:pre-wrap;margin:6px 0 0;font:inherit;font-size:.92em}
 .qcard{border:1px solid var(--accent);border-radius:14px;padding:14px 16px;margin:10px 0;background:color-mix(in srgb,var(--accent) 7%,transparent)}
 .qcard .qhead{display:flex;gap:8px;align-items:center;margin-bottom:8px}
 .qcard pre.cmd{max-height:260px;overflow:auto;white-space:pre-wrap}

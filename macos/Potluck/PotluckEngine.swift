@@ -58,7 +58,19 @@ final class PotluckEngine {
 
     /// Starts Potluck if nothing answers on this computer yet.
     func ensureRunning() async {
-        if await ping() { await refresh(); return }
+        if await ping() {
+            await refresh()
+            // A Potluck program of another version is still answering (left by an update, or
+            // by a copy of the app installed by hand): end it and start this app's own, or the
+            // panel, the chat and every server change stay on the old version.
+            let mine = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+            guard !version.isEmpty, !mine.isEmpty, version != mine else { return }
+            _ = try? await post(Self.panelURL.appendingPathComponent("api/quit"), [:])
+            for _ in 0..<40 {
+                try? await Task.sleep(for: .milliseconds(250))
+                if !(await ping()) { break }
+            }
+        }
         guard let bin = binary else { problem = "The Potluck program is missing from this app. Download it again."; return }
         let p = Process()
         p.executableURL = bin
@@ -135,6 +147,7 @@ final class PotluckEngine {
     private func ping() async -> Bool {
         var r = URLRequest(url: Self.panelURL.appendingPathComponent("api/state"))
         r.timeoutInterval = 1.5
+        r.setValue("1", forHTTPHeaderField: "X-Potluck") // the panel answers only Potluck's own pages and apps
         return ((try? await URLSession.shared.data(for: r).1) as? HTTPURLResponse)?.statusCode == 200
     }
 
@@ -183,6 +196,7 @@ final class PotluckEngine {
     private func getJSON(_ url: URL) async throws -> [String: Any] {
         var r = URLRequest(url: url)
         r.timeoutInterval = 3
+        r.setValue("1", forHTTPHeaderField: "X-Potluck")
         let (d, resp) = try await URLSession.shared.data(for: r)
         guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
         return (try JSONSerialization.jsonObject(with: d)) as? [String: Any] ?? [:]

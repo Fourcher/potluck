@@ -76,8 +76,9 @@ struct QuestionCard: View {
 
 /// Notifications: asks once for permission, registers for Apple's push alerts, and answers from
 /// the alert's own buttons (Yes, No, Reply) without opening the app.
+@MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
-    var model: AppModel?
+    let model = AppModel()
 
     static let category = "POTLUCK_QUESTION"
 
@@ -101,7 +102,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     func application(_ app: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken token: Data) {
         let hex = token.map { String(format: "%02x", $0) }.joined()
-        Task { @MainActor in self.model?.registerPush(token: hex) }
+        Task { @MainActor in self.model.registerPush(token: hex) }
     }
 
     func application(_ app: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
@@ -111,7 +112,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     // An alert arrives while the app is open: show it anyway and refresh the list.
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent n: UNNotification) async -> UNNotificationPresentationOptions {
-        await MainActor.run { model?.refreshNow() }
+        await MainActor.run { model.refreshNow() }
         return [.banner, .sound, .list]
     }
 
@@ -127,9 +128,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         default: break // the alert itself: the app opens on the list
         }
         if let a = answer, !a.trimmingCharacters(in: .whitespaces).isEmpty {
-            await model?.answer(session: session, question: question, text: a)
+            let sent = await model.answer(session: session, question: question, text: a)
+            if !sent, let again = response.notification.request.content.mutableCopy() as? UNMutableNotificationContent {
+                // Never lose an answer quietly: show the question again, saying why.
+                again.subtitle = "Your answer didn't reach your computer. Try again."
+                try? await center.add(UNNotificationRequest(identifier: UUID().uuidString, content: again, trigger: nil))
+            }
         } else {
-            await MainActor.run { model?.refreshNow() }
+            await MainActor.run { model.refreshNow() }
         }
     }
 }

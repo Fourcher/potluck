@@ -76,9 +76,16 @@ func (app *App) setRole(role string) error {
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Potluck could not write its answer: " + err.Error()})
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(append(b, '\n'))
 }
 
 func fail(w http.ResponseWriter, err error) {
@@ -100,14 +107,7 @@ func (app *App) serveUI() error {
 
 	api := func(path string, fn func(r *http.Request) (any, error)) {
 		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-			// Only pages served by this app may call the API: blocks other websites from
-			// poking at it through the browser.
-			host, _, _ := net.SplitHostPort(r.Host)
-			if host != "127.0.0.1" && host != "localhost" {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-			if r.Method != http.MethodGet && r.Header.Get("X-Potluck") != "1" {
+			if !panelAllowed(r) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
@@ -261,6 +261,14 @@ func (app *App) serveUI() error {
 		return h.storeSearch(r.URL.Query().Get("source"), r.URL.Query().Get("q"))
 	})
 
+	api("/api/lists", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		return h.catalog().Lists, nil
+	})
+
 	api("/api/files", func(r *http.Request) (any, error) {
 		h, err := needMain()
 		if err != nil {
@@ -296,7 +304,7 @@ func (app *App) serveUI() error {
 		if c, err := strconv.Atoi(r.URL.Query().Get("ctx")); err == nil && c > 0 {
 			info.PlanCtx = c
 		}
-		info.WorkSeen = h.cfg.Get().WorkSeen[m.File+"@"+strconv.Itoa(info.PlanCtx)]
+		info.WorkSeen = h.cfg.Get().WorkSeen[workKey(m.File, info.PlanCtx)]
 		// Two ways to run it: pooled across the computers, and (when one computer is close
 		// to big enough) on that computer alone with its disk covering the difference.
 		// A third, for the model families InferSSD knows: one computer streaming the experts
@@ -332,6 +340,10 @@ func (app *App) serveUI() error {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 		defer cancel()
+		if r.Method == http.MethodGet {
+			// What the one-click start would run, shown before anything is downloaded.
+			return h.quickChoice(ctx)
+		}
 		m, err := h.QuickStart(ctx)
 		if err != nil {
 			return nil, err
@@ -452,6 +464,44 @@ func (app *App) serveUI() error {
 		return map[string]string{"id": s.ID}, nil
 	})
 
+	// The crew: extra models, each on one computer (crew.go).
+	// POST {action: "start", node, repo, file, ctx, name} (repo empty: a file already on that
+	// computer) or {action: "stop", name}.
+	api("/api/crew", func(r *http.Request) (any, error) {
+		h, err := needMain()
+		if err != nil {
+			return nil, err
+		}
+		if r.Method == http.MethodPost {
+			var in struct {
+				Action, Name, Node, Repo, File string
+				Ctx                            int
+			}
+			if err := body(r, &in); err != nil {
+				return nil, err
+			}
+			switch in.Action {
+			case "start":
+				m := ModelRef{Source: "hf", Repo: in.Repo, File: in.File}
+				if in.Repo == "" {
+					m = ModelRef{Source: "local", File: in.File, Node: in.Node}
+				}
+				name, err := h.StartCrew(in.Name, in.Node, m, in.Ctx)
+				if err != nil {
+					return nil, err
+				}
+				return map[string]string{"name": name}, nil
+			case "stop":
+				if err := h.StopCrew(in.Name); err != nil {
+					return nil, err
+				}
+			default:
+				return nil, errors.New("unknown action")
+			}
+		}
+		return map[string]any{"crew": h.CrewList()}, nil
+	})
+
 	api("/api/discover", func(r *http.Request) (any, error) {
 		h, err := needMain()
 		if err != nil {
@@ -486,7 +536,7 @@ func (app *App) serveUI() error {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]string{"text": aiMemory(), "guide": h.aiGuide()}, nil
+		return map[string]string{"text": aiMemory(), "guide": h.aiGuide(true, false)}, nil
 	})
 
 	// Bringing an existing AI setup over (continuity.go). Works on any role: it only reads
@@ -611,6 +661,7 @@ func (app *App) serveUI() error {
 			IdleUnload *int      `json:"idleUnload"`
 			Single     *bool     `json:"single"`
 			AgentDir   *string   `json:"agentDir"`
+			HFKey      *string   `json:"hfKey"`
 		}
 		if err := body(r, &in); err != nil {
 			return nil, err
@@ -638,11 +689,15 @@ func (app *App) serveUI() error {
 			if in.AgentDir != nil {
 				c.AgentDir = *in.AgentDir
 			}
+			if in.HFKey != nil {
+				c.HFKey = strings.TrimSpace(*in.HFKey)
+				setHFKey(c.HFKey)
+			}
 			if in.Single != nil {
 				c.Single = *in.Single
 				if c.Single {
 					c.Limits.Enabled = true
-					if c.Limits.Pedal < 50 {
+					if c.Limits.Pedal <= 50 { // the main computer's default share (50%) is not "all it can spare"
 						c.Limits.Pedal = 100
 					}
 				}
@@ -762,7 +817,7 @@ func (app *App) serveUI() error {
 				app.host.Stop()
 			}
 			app.agent.Stop()
-			app.agent.stopAux()
+			app.agent.stopAllAux()
 			killAllEngines()
 			time.Sleep(300 * time.Millisecond)
 			os.Exit(0)
@@ -863,7 +918,7 @@ func (app *App) state() map[string]any {
 			"headChoice": c.HeadChoice, "chatURL": "http://127.0.0.1:" + strconv.Itoa(portChat),
 			"totalOffer": total, "biggestOffer": biggest, "lastModel": c.LastModel, "firewall": app.firewall(), "profiles": c.Profiles, "measured": c.Measured,
 			"shareChat": c.ShareChat, "sharedURL": shared, "shareURLs": shareURLs, "shareKey": shareKey, "dataDir": app.dir, "pauseWhy": pauseWhy, "stale": stale,
-			"lastCtx": lastCtx, "single": c.Single, "idleUnload": c.IdleUnload, "asleep": asleep, "enginePath": c.EnginePath, "modelDirs": c.ModelDirs, "agentDir": app.agentDir(),
+			"lastCtx": lastCtx, "single": c.Single, "idleUnload": c.IdleUnload, "asleep": asleep, "enginePath": c.EnginePath, "modelDirs": c.ModelDirs, "agentDir": app.agentDir(), "hasHFKey": c.HFKey != "",
 		}
 	}
 	if app.helper != nil {
@@ -874,4 +929,17 @@ func (app *App) state() map[string]any {
 		out["hasToken"] = app.token != nil
 	}
 	return out
+}
+
+// panelAllowed: only Potluck's own panel page may call the panel's API. The address must be
+// this computer's (blocks a rebound domain name), and every request, reading ones included,
+// must carry the X-Potluck header: a web page on another site cannot add it without the
+// browser first asking this server, which never agrees. Without it any page the person opens
+// could stop, unpair or quit Potluck with a plain link or image (several actions need no body).
+func panelAllowed(r *http.Request) bool {
+	host, _, _ := net.SplitHostPort(r.Host)
+	if host != "127.0.0.1" && host != "localhost" {
+		return false
+	}
+	return r.Header.Get("X-Potluck") == "1"
 }

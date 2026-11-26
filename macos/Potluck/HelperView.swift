@@ -109,6 +109,7 @@ final class HelperChat {
     }
     private func getPanel(_ path: String) async throws -> Data {
         var r = URLRequest(url: PotluckEngine.panelURL.appendingPathComponent(path)); r.timeoutInterval = 5
+        r.setValue("1", forHTTPHeaderField: "X-Potluck")
         return try await URLSession.shared.data(for: r).0
     }
     private func post(_ path: String, _ body: [String: Any]) async throws -> Data {

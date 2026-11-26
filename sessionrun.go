@@ -8,12 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // The loop that runs a session: ask the model, run the tools it calls (asking the person when
@@ -32,7 +35,18 @@ func (st *sessionStore) maxSteps(s *Session) int {
 
 func (st *sessionStore) run(ctx context.Context, s *Session) {
 	s.setStatus("working", "")
+	began := time.Now()
+	s.mu.Lock()
+	// This run's work: the message that set it going and everything after it, found by time
+	// (an index would point past the end once the run summarises its earlier part).
+	var since time.Time
+	if n := len(s.Messages); n > 0 {
+		since = s.Messages[n-1].At
+	}
+	s.mu.Unlock()
 	defer func() {
+		st.giveModel(s)
+		browsers.release(s.ID)
 		s.mu.Lock()
 		s.cancel = nil
 		status := s.Status
@@ -42,8 +56,50 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 		} else if status == "working" {
 			s.setStatus("idle", "")
 		}
+		// In a git repository, the files it changed however it changed them (commands too).
+		var gitFiles []string
+		s.mu.Lock()
+		base, untracked, proj := s.GitBase, s.GitUntracked, s.Project
+		s.mu.Unlock()
+		if proj != nil {
+			st.noteTaskEnd(s)
+		}
+		if base != "" && proj != nil {
+			gitFiles = []string{}
+			for _, c := range gitChanges(mustReal(proj.Root), base, untracked) {
+				gitFiles = append(gitFiles, c.Path+map[string]string{"created": " (new)", "deleted": " (deleted)"}[c.Kind])
+			}
+		}
+		s.mu.Lock()
+		var this []SMsg
+		for _, m := range s.Messages {
+			if !m.At.Before(since) {
+				this = append(this, m)
+			}
+		}
+		s.Report = taskReport(this, time.Since(began), s.Status, s.Error, gitFiles)
+		end, waitingMsgs := s.Status, s.Inbox
+		if end == "idle" {
+			s.Inbox = nil
+		}
+		s.mu.Unlock()
 		st.save(s)
+		if end == "idle" && len(waitingMsgs) > 0 {
+			// Written just as it finished: carry on with it rather than leave it unread.
+			_ = st.send(s, strings.Join(waitingMsgs, "\n\n"))
+			return
+		}
+		// A task that worked a while ended by itself: say so on the phone. Not one the person
+		// stopped, and not a short one they were watching.
+		s.mu.Lock()
+		end, kind := s.Status, s.Kind
+		s.mu.Unlock()
+		if st.notifyEnd != nil && kind != "helper" && (end == "idle" || end == "error") && time.Since(began) >= taskEndAlertAfter {
+			go st.notifyEnd(s)
+		}
 	}()
+	cuts := 0    // answers in a row cut off at the length limit
+	retries := 0 // model failures in a row (waitForModel)
 	for steps := 0; ; steps++ {
 		if ctx.Err() != nil {
 			return
@@ -52,27 +108,70 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 			st.addMsg(s, SMsg{Role: "assistant", Content: fmt.Sprintf("(Stopped after %d steps. Send a message to carry on.)", steps)})
 			return
 		}
+		st.takeInbox(s)
+		if err := st.takeModel(ctx, s); err != nil {
+			return
+		}
 		if err := st.compactIfNeeded(ctx, s); err != nil && ctx.Err() == nil {
 			s.setStatus("error", err.Error())
 			return
 		}
 		msg, err := st.complete(ctx, s)
 		if err != nil {
+			if ctx.Err() == nil && st.waitForModel(ctx, s, err, &retries) {
+				steps--
+				continue // the same step again, now that the model answers
+			}
 			if ctx.Err() == nil {
 				s.setStatus("error", err.Error())
 			}
 			return
 		}
+		retries = 0
 		st.addMsg(s, msg)
+		if msg.cut && len(msg.Calls) == 0 {
+			// Cut off at the length limit, not finished. Ask it to carry on (the next step
+			// makes room first if the conversation is full); twice in a row, stop and say so.
+			if cuts++; cuts >= 2 {
+				s.setStatus("error", "The model's answers keep reaching the length limit before they are finished. Send a message to carry on, perhaps asking for shorter steps.")
+				return
+			}
+			st.addMsg(s, SMsg{Role: "user", Content: "(Your last answer was cut off by the length limit. Carry on from where it stopped.)"})
+			continue
+		}
+		cuts = 0
 		if len(msg.Calls) == 0 {
+			if st.hasInbox(s) {
+				continue // the person wrote meanwhile: answer that too
+			}
 			return
 		}
 		var pics []string
-		for _, call := range msg.Calls {
+		// Several delegate calls in one step go out at once: each crew member works on its
+		// part in parallel, on its own computer.
+		results := make([]*SMsg, len(msg.Calls))
+		var wg sync.WaitGroup
+		for i, call := range msg.Calls {
+			if call.Name == "delegate" {
+				wg.Add(1)
+				go func(i int, call SToolCall) {
+					defer wg.Done()
+					r := st.runTool(ctx, s, call)
+					results[i] = &r
+				}(i, call)
+			}
+		}
+		wg.Wait()
+		for i, call := range msg.Calls {
 			if ctx.Err() != nil {
 				return
 			}
-			res := st.runTool(ctx, s, call)
+			var res SMsg
+			if results[i] != nil {
+				res = *results[i]
+			} else {
+				res = st.runTool(ctx, s, call)
+			}
 			pics = append(pics, res.Images...)
 			res.Images = nil
 			st.addMsg(s, res)
@@ -98,6 +197,30 @@ func (st *sessionStore) addMsg(s *Session, m SMsg) {
 
 // ---------- what the model is told ----------
 
+// taskSystem is the task's instructions, made once and kept with the task. The engine reuses
+// what it read last time only up to the first difference, and the instructions come first:
+// any change to them (a file count, the crew, whether it is the first step) made it read the
+// whole task again on every step, minutes each at home-computer speeds. They are made again
+// only when what they say changes: the project or approve-everything.
+func (st *sessionStore) taskSystem(s *Session) string {
+	s.mu.Lock()
+	key := fmt.Sprint(s.Policy.All, "|")
+	if s.Project != nil {
+		key += s.Project.Root
+	}
+	if s.System != "" && s.systemKey == key {
+		t := s.System
+		s.mu.Unlock()
+		return t
+	}
+	s.mu.Unlock()
+	t := st.systemPrompt(s)
+	s.mu.Lock()
+	s.System, s.systemKey = t, key
+	s.mu.Unlock()
+	return t
+}
+
 func (st *sessionStore) systemPrompt(s *Session) string {
 	if s.Kind == "helper" {
 		osName := map[string]string{"darwin": "Mac", "windows": "Windows PC", "linux": "Linux computer"}[runtime.GOOS]
@@ -105,10 +228,7 @@ func (st *sessionStore) systemPrompt(s *Session) string {
 	}
 	h := st.host
 	data := h.a.dir
-	ctxTok := h.lastCtx
-	if ctxTok <= 0 {
-		ctxTok = 8192
-	}
+	_, ctxTok := st.taskModel(s)
 	budget := max(2000, ctxTok) // characters of imported text: about a quarter of the context
 	capText := func(t string, n int) string {
 		n = min(n, budget/2)
@@ -123,7 +243,7 @@ func (st *sessionStore) systemPrompt(s *Session) string {
 		"When you truly need the user (a choice only they can make, missing information), use ask_user; they can answer from their phone. "+
 		"Work in small steps: do something, look at the result, then decide the next step. When you are done, say plainly what you did and what you found.", osName)}
 	s.mu.Lock()
-	pol, proj, first := s.Policy, s.Project, len(s.Messages) <= 1
+	pol, proj := s.Policy, s.Project
 	s.mu.Unlock()
 	cx := loadContContext(data)
 	if strings.TrimSpace(cx.Profile) != "" {
@@ -147,10 +267,10 @@ func (st *sessionStore) systemPrompt(s *Session) string {
 		if err != nil {
 			p = append(p, "The project folder "+proj.Root+" could not be opened: "+err.Error())
 		} else {
-			p = append(p, fmt.Sprintf("You are working in the user's project %q, the folder %s%s, %d files. "+
+			p = append(p, fmt.Sprintf("You are working in the user's project %q, the folder %s%s. "+
 				"Use list_files, read_file, search_files, edit_file and write_file with paths relative to that folder, and run_command for builds, tests, git and anything else (it starts in the project folder). "+
 				"Work like a careful senior engineer: read the files you change, make focused edits with edit_file, build or run the tests to check your work, and fix what fails.",
-				pi.Name, pi.Root, map[bool]string{true: " (a git repository)", false: ""}[pi.Git], pi.Files))
+				pi.Name, pi.Root, map[bool]string{true: " (a git repository)", false: ""}[pi.Git]))
 			if strings.TrimSpace(pi.Instructions) != "" {
 				p = append(p, "The project's own instructions ("+pi.InstrFile+"), which you follow:\n\n"+capText(pi.Instructions, 24000))
 			}
@@ -161,12 +281,26 @@ func (st *sessionStore) systemPrompt(s *Session) string {
 	} else {
 		p = append(p, "Commands start in "+h.agentDir()+" unless you give a folder.")
 	}
-	if !pol.All && first {
-		p = append(p, "Before you start, call request_permissions once with everything this task is likely to need (running commands, changing files, which connectors, which apps you will control). "+
+	s.mu.Lock()
+	scheduled := s.Schedule != ""
+	s.mu.Unlock()
+	if scheduled && !pol.All {
+		p = append(p, scheduledNote())
+	} else if !pol.All {
+		p = append(p, "At the start of a task, call request_permissions once with everything this task is likely to need (running commands, changing files, which connectors, which apps you will control). "+
 			"The user approves it all at once now, so the work is not held up later while they are away. Ask for a little more rather than less.")
 	}
 	if pol.All {
 		p = append(p, "The user has chosen to approve everything for this task: act without asking.")
+	}
+	var crew []string
+	for _, c := range h.CrewList() {
+		if c.Phase == "running" {
+			crew = append(crew, fmt.Sprintf("- %s: %s on %s", c.Name, strings.TrimSuffix(c.Model.File, ".gguf"), c.NodeName))
+		}
+	}
+	if len(crew) > 0 {
+		p = append(p, "Your crew (other models on the user's other computers) can work on sub-tasks in parallel with the delegate tool. Split big work (reviewing many files, drafting several parts, checking several options) into self-contained pieces and hand them out at once, then check and combine what comes back:\n"+strings.Join(crew, "\n"))
 	}
 	return strings.Join(p, "\n\n")
 }
@@ -238,6 +372,12 @@ func (st *sessionStore) tools(ctx context.Context, s *Session) []toolSpec {
 			spec("screen_key", "Press keys, e.g. enter, tab, escape, cmd+s, ctrl+shift+t.", `{"type":"object","properties":{"keys":{"type":"string"}},"required":["keys"]}`),
 			spec("screen_scroll", "Scroll at a point: positive amount scrolls down, negative up.", `{"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"},"amount":{"type":"integer"}},"required":["x","y"]}`))
 	}
+	if crew := st.host.CrewList(); len(crew) > 0 {
+		t = append(t, spec("delegate", "Hand a self-contained sub-task to a crew member: another model running on another of the user's computers. It gets only the text you give it (no tools, no files), so include everything it needs. Call delegate several times in one step to have several crew members work at the same time.",
+			`{"type":"object","properties":{"member":{"type":"string","description":"The crew member's name"},"task":{"type":"string","description":"The complete sub-task, with all the material it needs"}},"required":["member","task"]}`))
+	}
+	t = append(t, spec("remember", "Save a short note for your future tasks: a lesson learned, how this project builds or tests, a preference the user stated, where things are. Notes are read at the start of every later task (the project's notes in tasks on this project, global notes everywhere). Save only what will matter again; one fact per note.",
+		`{"type":"object","properties":{"note":{"type":"string"},"scope":{"type":"string","enum":["project","global"],"description":"project (default in a project) or global"}},"required":["note"]}`))
 	if cx := loadContContext(st.host.a.dir); len(cx.Skills) > 0 {
 		t = append(t, spec("use_skill", "Load one of the user's skills (listed in your instructions) and get its full instructions.", `{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`))
 	}
@@ -252,13 +392,23 @@ func (st *sessionStore) tools(ctx context.Context, s *Session) []toolSpec {
 		if proj != nil {
 			root = proj.Root
 		}
+		byName := map[string]MCPTool{}
 		for _, mt := range mcpTools(ctx, st.host.a.dir, root, servers) {
 			params := mt.InputSchema
 			if len(params) == 0 || !bytes.Contains(params, []byte(`"object"`)) {
 				params = json.RawMessage(`{"type":"object","properties":{}}`)
 			}
-			t = append(t, spec(mcpToolName(mt), trimTo("["+mt.Server+"] "+mt.Description, 1000), string(params)))
+			name := mcpToolName(mt)
+			for i := 2; byName[name].Name != ""; i++ { // two tools cut to the same name
+				suf := "_" + strconv.Itoa(i)
+				name = mcpToolName(mt)[:min(len(mcpToolName(mt)), 64-len(suf))] + suf
+			}
+			byName[name] = mt
+			t = append(t, spec(name, trimTo("["+mt.Server+"] "+mt.Description, 1000), string(params)))
 		}
+		s.mu.Lock()
+		s.mcpByName = byName
+		s.mu.Unlock()
 	}
 	return t
 }
@@ -304,7 +454,7 @@ func mcpTools(ctx context.Context, data, root string, servers []string) []MCPToo
 // ---------- asking the model ----------
 
 func (st *sessionStore) apiMessages(s *Session) []map[string]any {
-	out := []map[string]any{{"role": "system", "content": st.systemPrompt(s)}}
+	out := []map[string]any{{"role": "system", "content": st.taskSystem(s)}}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	lastPic := -1 // only the newest picture is sent: each one costs many tokens
@@ -313,7 +463,23 @@ func (st *sessionStore) apiMessages(s *Session) []map[string]any {
 			lastPic = i
 		}
 	}
+	// Every call the model made gets a result, in its place: a task stopped partway through
+	// a step, or Potluck restarting while a question was open, leaves calls without one, and
+	// a call with no result is refused by some engines and confuses the model.
+	var pending []string
+	answered := map[string]bool{}
+	closeStep := func() {
+		for _, id := range pending {
+			if !answered[id] {
+				out = append(out, map[string]any{"role": "tool", "tool_call_id": id, "content": "Stopped before it ran."})
+			}
+		}
+		pending = nil
+	}
 	for i, m := range s.Messages {
+		if m.Role != "tool" {
+			closeStep()
+		}
 		switch m.Role {
 		case "user":
 			if len(m.Images) > 0 {
@@ -333,10 +499,14 @@ func (st *sessionStore) apiMessages(s *Session) []map[string]any {
 			out = append(out, map[string]any{"role": "user", "content": m.Content})
 		case "assistant":
 			a := map[string]any{"role": "assistant", "content": m.Content}
+			// Earlier thinking is not sent back. Measured on Inkling 2 Q6_K (2026-11-25): with
+			// it, a follow-up read 11 new tokens; without it, 19 (only the last answer is read
+			// again), while every kept thought would fill the task's memory for good.
 			if len(m.Calls) > 0 {
 				var calls []map[string]any
 				for _, c := range m.Calls {
 					calls = append(calls, map[string]any{"id": c.ID, "type": "function", "function": map[string]string{"name": c.Name, "arguments": c.Args}})
+					pending = append(pending, c.ID)
 				}
 				a["tool_calls"] = calls
 			}
@@ -345,9 +515,11 @@ func (st *sessionStore) apiMessages(s *Session) []map[string]any {
 			}
 			out = append(out, a)
 		case "tool":
+			answered[m.CallID] = true
 			out = append(out, map[string]any{"role": "tool", "tool_call_id": m.CallID, "content": m.Content})
 		}
 	}
+	closeStep()
 	return out
 }
 
@@ -358,9 +530,9 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 	s.mu.Lock()
 	thinking := s.Policy.Thinking
 	s.mu.Unlock()
-	model := "potluck"
+	model, _ := st.taskModel(s)
 	if s.Kind == "helper" {
-		model, thinking = "potluck-helper", false // the helper's own small model, answering at once
+		thinking = false // the helper's own small model, answering at once
 		// Its model may still be downloading the first time: wait for it rather than fail.
 		st.host.EnsureHelper()
 		for st.host.HelperStatus().Phase != "ready" {
@@ -376,14 +548,9 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 	}
 	body := map[string]any{
 		"model": model, "stream": true, "messages": st.apiMessages(s), "tools": st.tools(ctx, s),
-		"stream_options":       map[string]bool{"include_usage": true},
-		"chat_template_kwargs": map[string]any{"enable_thinking": thinking, "reasoning_effort": map[bool]string{true: "high", false: "none"}[thinking]},
+		"stream_options": map[string]bool{"include_usage": true},
+		"thinking":       map[bool]string{true: "high", false: "off"}[thinking], // Potluck's one switch (thinking.go)
 	}
-	// Some models (Inkling 2) think at length whatever the template is told; a budget is the
-	// only reliable stop: none when thinking is off, a few thousand tokens when it is on, then
-	// the engine tells the model to answer. Measured: 12000 tokens of thinking and no answer
-	// without it; 16 tokens and no thinking with a budget of 0.
-	thinkBudget(body, thinking)
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://127.0.0.1:"+strconv.Itoa(portChat)+"/v1/chat/completions", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
@@ -409,9 +576,14 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 	var order []int
 	sc := bufio.NewScanner(res.Body)
 	sc.Buffer(make([]byte, 1<<20), 64<<20)
+	ended := false // the engine said the answer is complete ([DONE] or a finish reason)
 	for sc.Scan() {
 		data, ok := strings.CutPrefix(sc.Text(), "data: ")
-		if !ok || data == "[DONE]" {
+		if !ok {
+			continue
+		}
+		if data == "[DONE]" {
+			ended = true
 			continue
 		}
 		var ch struct {
@@ -428,17 +600,31 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 						} `json:"function"`
 					} `json:"tool_calls"`
 				} `json:"delta"`
+				Finish *string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage *struct {
 				Prompt int `json:"prompt_tokens"`
 			} `json:"usage"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
 		}
 		if json.Unmarshal([]byte(data), &ch) != nil {
 			continue
 		}
+		// The engine can fail partway (out of memory, context full, a crash on a helper):
+		// it says so in the stream, and the task must stop with that, not carry on with half
+		// an answer as if it were whole.
+		if ch.Error != nil {
+			return SMsg{}, errors.New("the model stopped partway: " + strings.TrimPrefix(ch.Error.Message, "Potluck: "))
+		}
+		if len(ch.Choices) > 0 && ch.Choices[0].Finish != nil && *ch.Choices[0].Finish != "" {
+			ended = true
+			msg.cut = *ch.Choices[0].Finish == "length"
+		}
 		if ch.Usage != nil {
 			s.mu.Lock()
-			s.lastPrompt = ch.Usage.Prompt
+			s.lastPrompt, s.lastPromptN = ch.Usage.Prompt, len(s.Messages)
 			s.mu.Unlock()
 		}
 		if len(ch.Choices) == 0 {
@@ -467,6 +653,9 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 	if err := sc.Err(); err != nil && ctx.Err() == nil {
 		return SMsg{}, fmt.Errorf("the answer broke off: %w", err)
 	}
+	if !ended && ctx.Err() == nil {
+		return SMsg{}, errors.New("the answer broke off before the model finished (the connection to the model closed)")
+	}
 	for _, i := range order {
 		c := calls[i]
 		if c.ID == "" {
@@ -477,31 +666,50 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 	return msg, ctx.Err()
 }
 
+// taskModel is the model a task talks to and the size of its conversation memory.
+func (st *sessionStore) taskModel(s *Session) (string, int) {
+	if s.Kind == "helper" {
+		return "potluck-helper", helperCtx
+	}
+	st.host.mu.Lock()
+	c := st.host.lastCtx
+	st.host.mu.Unlock()
+	if c <= 0 {
+		c = 8192
+	}
+	return "potluck", c
+}
+
 // compactIfNeeded summarises the older part of a long session so it fits the context again.
 func (st *sessionStore) compactIfNeeded(ctx context.Context, s *Session) error {
-	ctxTok := st.host.lastCtx
+	model, ctxTok := st.taskModel(s)
 	s.mu.Lock()
+	// What the model will read next: what it read last time plus what was added since (a tool
+	// can return a whole file at once), at about 3 characters a token.
 	used, n := s.lastPrompt, len(s.Messages)
+	for _, m := range s.Messages[min(s.lastPromptN, n):] {
+		used += (len(m.Content) + len(m.Reasoning)) / 3
+		for _, c := range m.Calls {
+			used += len(c.Args) / 3
+		}
+	}
 	s.mu.Unlock()
-	if ctxTok <= 0 || used < ctxTok*3/4 || n < 8 {
+	if used < ctxTok*3/4 || n < 8 {
 		return nil
 	}
 	s.emit(SEvent{Type: "status", Status: "working", Error: "Summarising the earlier part of this task to make room"})
 	s.mu.Lock()
-	keep := 6 // the latest steps stay as they are
-	old := append([]SMsg(nil), s.Messages[:n-keep]...)
+	cut := compactCut(s.Messages[:n])
+	old := append([]SMsg(nil), s.Messages[:cut]...)
 	s.mu.Unlock()
-	var b strings.Builder
-	for _, m := range old {
-		fmt.Fprintf(&b, "[%s%s] %s\n", m.Role, map[bool]string{true: " " + m.Name, false: ""}[m.Name != ""], trimTo(m.Content, 4000))
-		for _, c := range m.Calls {
-			fmt.Fprintf(&b, "  (called %s %s)\n", c.Name, trimTo(c.Args, 500))
-		}
+	if cut < 2 {
+		return nil // the latest step is all there is: nothing older to summarise
 	}
-	body, _ := json.Marshal(map[string]any{"model": "potluck", "messages": []map[string]string{
+	sum := map[string]any{"model": model, "messages": []map[string]string{
 		{"role": "system", "content": "Summarise this work log for the assistant that continues it: the task, what was done, what was found, files changed, decisions, and what is left. Be complete and specific; it replaces the log."},
-		{"role": "user", "content": trimTo(b.String(), ctxTok*2)},
-	}, "chat_template_kwargs": map[string]any{"enable_thinking": false, "reasoning_effort": "none"}, "reasoning_budget_tokens": 1})
+		{"role": "user", "content": compactLog(old, ctxTok*2)},
+	}, "thinking": "off"}
+	body, _ := json.Marshal(sum)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://127.0.0.1:"+strconv.Itoa(portChat)+"/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	res, err := sessionHTTP.Do(req)
@@ -520,14 +728,9 @@ func (st *sessionStore) compactIfNeeded(ctx context.Context, s *Session) error {
 		return fmt.Errorf("could not summarise the task to make room: %v", err)
 	}
 	s.mu.Lock()
-	rest := s.Messages[n-keep:]
-	// A tool result must follow the call that asked for it: start the kept part at a user or
-	// assistant message.
-	for len(rest) > 0 && rest[0].Role == "tool" {
-		rest = rest[1:]
-	}
+	rest := s.Messages[cut:] // with anything added while the summary was written
 	s.Messages = append([]SMsg{{Role: "user", Content: "Summary of the work so far (it replaces the earlier log):\n\n" + out.Choices[0].Message.Content, At: time.Now()}}, rest...)
-	s.lastPrompt = 0
+	s.lastPrompt, s.lastPromptN = 0, 0
 	s.mu.Unlock()
 	return nil
 }
@@ -572,11 +775,7 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 			if call.Name == "run_applescript" {
 				kind, cmd = "applescript", str("script")
 			}
-			dir := str("folder")
-			if dir == "" {
-				dir = root
-			}
-			r, err := runCommand(ctx, RunReq{Kind: kind, Command: cmd, Dir: dir, Timeout: num("timeout_seconds")}, st.host.agentDir())
+			r, err := runCommand(ctx, RunReq{Kind: kind, Command: cmd, Dir: st.commandDir(s, str("folder")), Timeout: num("timeout_seconds")}, st.host.agentDir())
 			if err != nil {
 				return "", err
 			}
@@ -586,16 +785,27 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 			}
 			return t + "\n" + r.Output, nil
 		case "list_files", "read_file", "search_files", "edit_file", "write_file":
+			op := strings.TrimSuffix(strings.TrimSuffix(call.Name, "_files"), "_file")
+			if out, ok, err := st.readTaskOutput(s, op, args); ok {
+				return out, err // the task's own saved results, with or without a project
+			}
 			if root == "" {
 				return "", errors.New("this task has no project folder")
 			}
-			op := strings.TrimSuffix(strings.TrimSuffix(call.Name, "_files"), "_file")
+			if op == "edit" || op == "write" {
+				// Kept as it was before this task first changes it, for the changes view and undo.
+				if err := st.backupBefore(s, root, str("path")); err != nil {
+					return "", fmt.Errorf("could not keep a copy of %s before changing it: %w", str("path"), err)
+				}
+			}
 			b, _ := args["all"].(bool)
 			return projectFS(FSReq{Op: op, Root: root, Path: str("path"), Glob: str("pattern"), Query: str("query"), Start: num("start_line"), Max: num("max_lines"), Content: str("content"), Old: str("old"), New: str("new"), All: b})
+		case "remember":
+			return remember(st.host.a.dir, root, str("scope"), str("note"))
 		case "use_skill":
 			return readSkill(st.host.a.dir, str("name"))
 		case "browser_open", "browser_read", "browser_click", "browser_type", "browser_back", "browser_screenshot":
-			return browserTool(ctx, st.host.a.dir, call.Name, args)
+			return browserTool(ctx, st.host.a.dir, s.ID, call.Name, args)
 		case "screen_look", "screen_click", "screen_type", "screen_key", "screen_scroll":
 			text, pic, err := screenTool(ctx, st.host.a.dir, call.Name, args)
 			if pic != "" {
@@ -617,23 +827,19 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 			return "The user answered: " + ans, nil
 		case "request_permissions":
 			return st.requestPermissions(ctx, s, args)
+		case "delegate":
+			return st.delegate(ctx, str("member"), str("task"))
 		}
 		if strings.HasPrefix(call.Name, "mcp__") {
 			s.mu.Lock()
-			var servers []string
-			for n, on := range s.Policy.Connectors {
-				if on {
-					servers = append(servers, n)
-				}
-			}
+			mt, ok := s.mcpByName[call.Name]
+			on := s.Policy.Connectors[mt.Server]
 			s.mu.Unlock()
-			for _, mt := range mcpTools(ctx, st.host.a.dir, root, servers) {
-				if mcpToolName(mt) == call.Name {
-					for _, c := range mcps.connectors(root) {
-						if c.Name == mt.Server {
-							raw, _ := json.Marshal(args)
-							return mcps.client(c).callTool(ctx, mt.Name, raw)
-						}
+			if ok && on {
+				for _, c := range mcps.connectors(root) {
+					if c.Name == mt.Server {
+						raw, _ := json.Marshal(args)
+						return mcps.client(c).callTool(ctx, mt.Name, raw)
 					}
 				}
 			}
@@ -644,9 +850,56 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 	if err != nil {
 		res.State, res.Content = "error", "Could not do that: "+err.Error()
 	} else {
-		res.State, res.Content = "ok", out
+		res.State, res.Content = "ok", st.fitResult(s, call, out)
 	}
 	return res
+}
+
+// fitResult keeps one tool result to a quarter of the model's memory. A whole file or a long
+// build log could otherwise fill it in one step: the newest steps are kept whole when a task
+// is summarised, so the next request would not fit and the task would stop. The full result
+// is saved with the task, and the model can read the rest in parts.
+func (st *sessionStore) fitResult(s *Session, call SToolCall, out string) string {
+	_, ctxTok := st.taskModel(s)
+	limit := max(ctxTok*3/4, 6000) // about a quarter, at 3 characters a token
+	if len(out) <= limit {
+		return out
+	}
+	s.saveMu.Lock()
+	gone := s.deleted
+	s.saveMu.Unlock()
+	if gone {
+		return trimTo(out, limit) // deleted meanwhile: nothing more is written for it
+	}
+	name := safeName(call.Name+"-"+call.ID) + ".txt"
+	dir := filepath.Join(st.dir, s.ID+"-output")
+	saved := ""
+	if os.MkdirAll(dir, 0o700) == nil && os.WriteFile(filepath.Join(dir, name), []byte(out), 0o600) == nil {
+		saved = fmt.Sprintf(" The whole result is saved: read it in parts with read_file and the path %q (start_line and max_lines), or search it with search_files on that path.", taskOutputPrefix+name)
+	}
+	head, tail := trimTo(out, limit*2/3), out[len(out)-limit/3:]
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	return head + fmt.Sprintf("\n\n[… %s left out here: the result was too long for the model's memory.%s]\n\n", humanBytes(int64(len(out)-len(head)-len(tail))), saved) + tail
+}
+
+// taskEndAlertAfter: a task that ran at least this long sends an alert when it ends.
+var taskEndAlertAfter = 2 * time.Minute
+
+// taskOutputPrefix is how a task names its own saved results (fitResult) to read_file.
+const taskOutputPrefix = "task-output/"
+
+// readTaskOutput serves read_file and search_files on a task's saved results.
+func (st *sessionStore) readTaskOutput(s *Session, op string, args map[string]any) (string, bool, error) {
+	str := func(k string) string { v, _ := args[k].(string); return v }
+	num := func(k string) int { v, _ := args[k].(float64); return int(v) }
+	rel, ok := strings.CutPrefix(str("path"), taskOutputPrefix)
+	if !ok || (op != "read" && op != "search") {
+		return "", false, nil
+	}
+	out, err := projectFS(FSReq{Op: op, Root: filepath.Join(st.dir, s.ID+"-output"), Path: rel, Query: str("query"), Start: num("start_line"), Max: num("max_lines")})
+	return out, true, err
 }
 
 // requestPermissions puts the model's up-front request to the person as one question.
@@ -749,14 +1002,387 @@ func (st *sessionStore) requestPermissions(ctx context.Context, s *Session, args
 	return out + ".", nil
 }
 
-// thinkBudget caps a request's thinking (see complete).
-func thinkBudget(body map[string]any, on bool) {
-	if on {
-		body["reasoning_budget_tokens"] = 4096
-		body["reasoning_budget_message"] = "Time to stop thinking and give the answer."
-	} else {
-		// 1, not 0: a budget of exactly 0 makes some model files (Inkling 2 Mini IQ2_M,
-		// measured on 2026-11-24) repeat their own markers instead of answering. 1 is as fast.
-		body["reasoning_budget_tokens"] = 1
+// delegate runs one sub-task on a crew member and returns its answer.
+func (st *sessionStore) delegate(ctx context.Context, member, task string) (string, error) {
+	c := st.host.crewMember(member)
+	if c == nil || c.Phase != "running" {
+		var names []string
+		for _, m := range st.host.CrewList() {
+			if m.Phase == "running" {
+				names = append(names, m.Name)
+			}
+		}
+		return "", fmt.Errorf("no running crew member called %q (running: %s)", member, strings.Join(names, ", "))
 	}
+	body := map[string]any{"model": "crew:" + c.Name, "stream": false,
+		"messages": []map[string]string{{"role": "user", "content": task}},
+		"thinking": "off"}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequestWithContext(ctx, "POST", "http://127.0.0.1:"+strconv.Itoa(portChat)+"/v1/chat/completions", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	res, err := sessionHTTP.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	if out.Error.Message != "" {
+		return "", errors.New(out.Error.Message)
+	}
+	if len(out.Choices) == 0 {
+		return "", errors.New("the crew member gave no answer")
+	}
+	return c.Name + " answered:\n" + out.Choices[0].Message.Content, nil
+}
+
+// commandDir is the folder a task's command runs in: the folder the model named, taken from
+// the project folder when it is relative (or the agent folder for a task with no project),
+// and the project or agent folder itself when it named none. The approval question shows
+// this same folder, so a "yes" is to what will actually run.
+func (st *sessionStore) commandDir(s *Session, folder string) string {
+	s.mu.Lock()
+	proj := s.Project
+	s.mu.Unlock()
+	base := st.host.agentDir()
+	if proj != nil && proj.Root != "" {
+		base = proj.Root
+	}
+	if folder == "" {
+		return base
+	}
+	if filepath.IsAbs(folder) {
+		return filepath.Clean(folder)
+	}
+	return filepath.Join(base, folder)
+}
+
+// compactCut is where the kept part of a task's log starts when the older part is
+// summarised: the last six messages, moved back to the step that owns them, since a tool
+// result must follow the call that asked for it. Every result is then either summarised
+// with its call or kept with it, never dropped.
+func compactCut(ms []SMsg) int {
+	cut := len(ms) - 6
+	for cut > 0 && ms[cut].Role == "tool" {
+		cut--
+	}
+	return max(cut, 0)
+}
+
+// compactLog is the older part of a task's log, as the model that summarises it reads it.
+// The person's task and an earlier summary are given whole; other messages are shortened;
+// when it is still too long, the oldest work in between is what is left out, never the task
+// and never the most recent work.
+func compactLog(old []SMsg, limit int) string {
+	entry := func(m SMsg, max int) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "[%s%s] %s\n", m.Role, map[bool]string{true: " " + m.Name, false: ""}[m.Name != ""], trimTo(m.Content, max))
+		for _, c := range m.Calls {
+			fmt.Fprintf(&b, "  (called %s %s)\n", c.Name, trimTo(c.Args, 500))
+		}
+		return b.String()
+	}
+	head, i := "", 0
+	if len(old) > 0 && old[0].Role == "user" {
+		head, i = entry(old[0], 24000), 1 // the task, or the summary that carries it
+	}
+	var parts []string
+	for _, m := range old[i:] {
+		parts = append(parts, entry(m, 4000))
+	}
+	room := limit - len(head)
+	var tail []string
+	for j := len(parts) - 1; j >= 0 && room > 0; j-- {
+		if len(parts[j]) > room {
+			break
+		}
+		room -= len(parts[j])
+		tail = append([]string{parts[j]}, tail...)
+	}
+	if left := len(parts) - len(tail); left > 0 {
+		head += fmt.Sprintf("… (%d older steps left out for room) …\n", left)
+	}
+	return head + strings.Join(tail, "")
+}
+
+// taskReport sums up one run of a task from its own log (no model asked): how long it took,
+// the files it changed, the commands that failed, what it decided because nobody answered and
+// what waited for approval. Shown at the top of the task and sent with its end alert.
+func taskReport(msgs []SMsg, took time.Duration, status, errText string, gitFiles []string) string {
+	calls := map[string]SToolCall{}
+	steps := 0
+	for _, m := range msgs {
+		if m.Role == "assistant" {
+			steps++
+			for _, c := range m.Calls {
+				calls[c.ID] = c
+			}
+		}
+	}
+	arg := func(c SToolCall, k string) string {
+		var a map[string]any
+		_ = json.Unmarshal([]byte(c.Args), &a)
+		v, _ := a[k].(string)
+		return v
+	}
+	var changed, failed, decided, waiting []string
+	seen := map[string]bool{}
+	commands := 0
+	for _, m := range msgs {
+		if m.Role != "tool" {
+			continue
+		}
+		c := calls[m.CallID]
+		switch {
+		case strings.Contains(m.Content, "(No answer within") || strings.Contains(m.Content, "(No answer: the person"):
+			if c.Name == "ask_user" {
+				decided = append(decided, trimTo(arg(c, "question"), 160))
+			} else {
+				waiting = append(waiting, c.Name+" "+trimTo(firstNonEmpty(arg(c, "command"), arg(c, "path"), arg(c, "url"), c.Args), 160))
+			}
+		case (c.Name == "edit_file" || c.Name == "write_file") && m.State == "ok":
+			if p := arg(c, "path"); p != "" && !seen[p] {
+				seen[p] = true
+				changed = append(changed, p)
+			}
+		case c.Name == "run_command" || c.Name == "run_applescript":
+			commands++
+			if m.State == "error" || (m.State == "ok" && !strings.HasPrefix(m.Content, "Exit code 0,")) {
+				failed = append(failed, trimTo(firstNonEmpty(arg(c, "command"), arg(c, "script")), 160))
+			}
+		}
+	}
+	var b strings.Builder
+	outcome := map[string]string{"idle": "Finished", "error": "Stopped with an error", "stopped": "Stopped"}[status]
+	if outcome == "" {
+		outcome = status
+	}
+	plural := func(n int, one string) string {
+		if n == 1 {
+			return "1 " + one
+		}
+		return fmt.Sprintf("%d %ss", n, one)
+	}
+	fmt.Fprintf(&b, "%s after %s, %s, %s run.", outcome, roundDur(took), plural(steps, "step"), plural(commands, "command"))
+	if status == "error" && errText != "" {
+		fmt.Fprintf(&b, " %s", trimTo(errText, 300))
+	}
+	list := func(title string, xs []string) {
+		if len(xs) == 0 {
+			return
+		}
+		fmt.Fprintf(&b, "\n%s (%d):", title, len(xs))
+		for i, x := range xs {
+			if i == 12 {
+				fmt.Fprintf(&b, "\n- and %d more", len(xs)-i)
+				break
+			}
+			fmt.Fprintf(&b, "\n- %s", x)
+		}
+	}
+	if gitFiles != nil {
+		changed = gitFiles // since the task started, by any means (its git starting point)
+	}
+	list("Files changed", changed)
+	list("Commands that failed", failed)
+	list("Decided without you (nobody answered)", decided)
+	list("Waiting for your approval (not done)", waiting)
+	return b.String()
+}
+
+func firstNonEmpty(xs ...string) string {
+	for _, x := range xs {
+		if strings.TrimSpace(x) != "" {
+			return x
+		}
+	}
+	return ""
+}
+
+func roundDur(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%d seconds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%d minutes", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%.1f hours", d.Hours())
+}
+
+// takeInbox moves the messages the person sent while the task worked into the task, at a step
+// boundary (every call of the last step has its result by then).
+func (st *sessionStore) takeInbox(s *Session) {
+	s.mu.Lock()
+	in := s.Inbox
+	s.Inbox = nil
+	s.mu.Unlock()
+	for _, t := range in {
+		st.addMsg(s, SMsg{Role: "user", Content: t})
+	}
+}
+
+func (st *sessionStore) hasInbox(s *Session) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.Inbox) > 0
+}
+
+// Waiting out the model. A task runs for hours on computers that also live their lives: a
+// helper's link drops, the model is reloaded, the guard stops it. One such moment used to end
+// the task. Now it waits and tries the same step again; a model that was stopped is waited for
+// (up to half a day) but never started by the task: starting one again by itself is how a
+// computer that ran out of memory would run out again.
+var (
+	modelRetryBase = 30 * time.Second
+	modelWaitMax   = 12 * time.Hour
+)
+
+func (st *sessionStore) waitForModel(ctx context.Context, s *Session, err error, retries *int) bool {
+	msg := err.Error()
+	low := strings.ToLower(msg)
+	for _, lasting := range []string{"too long", "context", "exceed", "n_ctx", "invalid", "not valid", "no longer fits"} {
+		if strings.Contains(low, lasting) {
+			return false // the request itself is wrong: trying it again gives the same answer
+		}
+	}
+	if *retries >= 8 {
+		return false
+	}
+	*retries++
+	wait := min(modelRetryBase<<(*retries-1), 10*time.Minute)
+	s.setStatus("working", fmt.Sprintf("The model did not answer (%s); trying again in %s", trimTo(msg, 160), roundDur(wait)))
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(wait):
+	}
+	if s.Kind == "helper" {
+		return true
+	}
+	// A model that is not running and not resting will not answer: wait until one is.
+	deadline := time.Now().Add(modelWaitMax)
+	for {
+		h := st.host
+		h.mu.Lock()
+		phase, resting := h.cluster.Phase, h.asleep != nil
+		h.mu.Unlock()
+		if phase == "running" || phase == "starting" || resting {
+			s.setStatus("working", "")
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		s.setStatus("working", "Waiting for a model to be started in Potluck; the task carries on by itself once one runs")
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(min(15*time.Second, max(time.Until(deadline), time.Millisecond))):
+		}
+	}
+}
+
+// The model is taken by one task at a time. The engine answers one request at a time and
+// keeps what it read for the last one only: two tasks taking turns step by step each made it
+// read the other's whole conversation again, every step. A task keeps the model for its whole
+// run, lets go while it waits for the person, and after 20 steps lets a waiting task have a turn.
+type modelLease struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	holder  string
+	held    int // steps taken by the holder in this turn
+	waiting map[string]int
+	seq     int
+}
+
+func (st *sessionStore) leaseOf() *modelLease {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.lease == nil {
+		st.lease = &modelLease{waiting: map[string]int{}}
+		st.lease.cond = sync.NewCond(&st.lease.mu)
+	}
+	return st.lease
+}
+
+// takeModel waits until this task may use the model for its next step.
+func (st *sessionStore) takeModel(ctx context.Context, s *Session) error {
+	if s.Kind == "helper" {
+		return nil // the Potluck helper has its own small model
+	}
+	l := st.leaseOf()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.holder == s.ID {
+		l.held++
+		if l.held <= 20 || len(l.waiting) == 0 {
+			return nil
+		}
+		l.holder = "" // its turn is over: the one waiting longest goes next
+		l.cond.Broadcast()
+	}
+	l.seq++
+	l.waiting[s.ID] = l.seq
+	defer delete(l.waiting, s.ID)
+	stop := context.AfterFunc(ctx, func() { l.mu.Lock(); l.cond.Broadcast(); l.mu.Unlock() })
+	defer stop()
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if l.holder == "" && l.first() == s.ID {
+			l.holder, l.held = s.ID, 1
+			s.mu.Lock()
+			was := s.Error
+			s.mu.Unlock()
+			if was == queuedNote {
+				s.setStatus("working", "")
+			}
+			return nil
+		}
+		if l.holder != "" && l.holder != s.ID {
+			s.mu.Lock()
+			note := s.Error
+			s.mu.Unlock()
+			if note != queuedNote {
+				s.setStatus("working", queuedNote)
+			}
+		}
+		l.cond.Wait()
+	}
+}
+
+const queuedNote = "Waiting for the model: another task is using it"
+
+// first is the task waiting longest. Called with l.mu held.
+func (l *modelLease) first() string {
+	best, at := "", 0
+	for id, n := range l.waiting {
+		if best == "" || n < at {
+			best, at = id, n
+		}
+	}
+	return best
+}
+
+// giveModel lets another task use the model (the run ended, or it waits for the person).
+func (st *sessionStore) giveModel(s *Session) {
+	l := st.leaseOf()
+	l.mu.Lock()
+	if l.holder == s.ID {
+		l.holder = ""
+		l.cond.Broadcast()
+	}
+	l.mu.Unlock()
 }

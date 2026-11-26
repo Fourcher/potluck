@@ -86,6 +86,26 @@ func TestPhonePairing(t *testing.T) {
 		}
 	}
 
+	// Tasks: a phone can read them and tell one to carry on, but never reach one without its key.
+	h.a = &Agent{dir: dir}
+	ts := h.sessionStore().create(nil, Policy{})
+	ts.Title, ts.Report = "Nightly tests", "Finished after 2 hours, 40 steps, 12 commands run.\nFiles changed (1):\n- a.go"
+	ts.Messages = []SMsg{{Role: "user", Content: "run the tests"}, {Role: "assistant", Content: "All green.", Calls: []SToolCall{{ID: "x", Name: "run_command", Args: `{"command":"make test"}`}}}}
+	if w := do("GET", "/phone/tasks", "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("tasks without a key: %d", w.Code)
+	}
+	w = do("GET", "/phone/tasks", got.Key, "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "Nightly tests") || !strings.Contains(w.Body.String(), "Finished after 2 hours") || strings.Contains(w.Body.String(), "a.go") {
+		t.Fatalf("task list: %d %s", w.Code, w.Body.String())
+	}
+	w = do("GET", "/phone/tasks/"+ts.ID, got.Key, "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "All green.") || !strings.Contains(w.Body.String(), "run_command") {
+		t.Fatalf("one task: %d %s", w.Code, w.Body.String())
+	}
+	if w := do("GET", "/phone/tasks/nope", got.Key, ""); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown task: %d", w.Code)
+	}
+
 	// Removed from the control panel: the key stops working at once.
 	h.cfg.Update(func(c *Config) { delete(c.Phones, got.ID) })
 	if w := do("GET", "/potluck/state", got.Key, ""); w.Code != http.StatusUnauthorized {
