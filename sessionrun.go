@@ -134,6 +134,30 @@ func (st *sessionStore) addMsg(s *Session, m SMsg) {
 
 // ---------- what the model is told ----------
 
+// taskSystem is the task's instructions, made once and kept with the task. The engine reuses
+// what it read last time only up to the first difference, and the instructions come first:
+// any change to them (a file count, the crew, whether it is the first step) made it read the
+// whole task again on every step, minutes each at home-computer speeds. They are made again
+// only when what they say changes: the project or approve-everything.
+func (st *sessionStore) taskSystem(s *Session) string {
+	s.mu.Lock()
+	key := fmt.Sprint(s.Policy.All, "|")
+	if s.Project != nil {
+		key += s.Project.Root
+	}
+	if s.System != "" && s.systemKey == key {
+		t := s.System
+		s.mu.Unlock()
+		return t
+	}
+	s.mu.Unlock()
+	t := st.systemPrompt(s)
+	s.mu.Lock()
+	s.System, s.systemKey = t, key
+	s.mu.Unlock()
+	return t
+}
+
 func (st *sessionStore) systemPrompt(s *Session) string {
 	if s.Kind == "helper" {
 		osName := map[string]string{"darwin": "Mac", "windows": "Windows PC", "linux": "Linux computer"}[runtime.GOOS]
@@ -156,7 +180,7 @@ func (st *sessionStore) systemPrompt(s *Session) string {
 		"When you truly need the user (a choice only they can make, missing information), use ask_user; they can answer from their phone. "+
 		"Work in small steps: do something, look at the result, then decide the next step. When you are done, say plainly what you did and what you found.", osName)}
 	s.mu.Lock()
-	pol, proj, first := s.Policy, s.Project, len(s.Messages) <= 1
+	pol, proj := s.Policy, s.Project
 	s.mu.Unlock()
 	cx := loadContContext(data)
 	if strings.TrimSpace(cx.Profile) != "" {
@@ -180,10 +204,10 @@ func (st *sessionStore) systemPrompt(s *Session) string {
 		if err != nil {
 			p = append(p, "The project folder "+proj.Root+" could not be opened: "+err.Error())
 		} else {
-			p = append(p, fmt.Sprintf("You are working in the user's project %q, the folder %s%s, %d files. "+
+			p = append(p, fmt.Sprintf("You are working in the user's project %q, the folder %s%s. "+
 				"Use list_files, read_file, search_files, edit_file and write_file with paths relative to that folder, and run_command for builds, tests, git and anything else (it starts in the project folder). "+
 				"Work like a careful senior engineer: read the files you change, make focused edits with edit_file, build or run the tests to check your work, and fix what fails.",
-				pi.Name, pi.Root, map[bool]string{true: " (a git repository)", false: ""}[pi.Git], pi.Files))
+				pi.Name, pi.Root, map[bool]string{true: " (a git repository)", false: ""}[pi.Git]))
 			if strings.TrimSpace(pi.Instructions) != "" {
 				p = append(p, "The project's own instructions ("+pi.InstrFile+"), which you follow:\n\n"+capText(pi.Instructions, 24000))
 			}
@@ -194,8 +218,8 @@ func (st *sessionStore) systemPrompt(s *Session) string {
 	} else {
 		p = append(p, "Commands start in "+h.agentDir()+" unless you give a folder.")
 	}
-	if !pol.All && first {
-		p = append(p, "Before you start, call request_permissions once with everything this task is likely to need (running commands, changing files, which connectors, which apps you will control). "+
+	if !pol.All {
+		p = append(p, "At the start of a task, call request_permissions once with everything this task is likely to need (running commands, changing files, which connectors, which apps you will control). "+
 			"The user approves it all at once now, so the work is not held up later while they are away. Ask for a little more rather than less.")
 	}
 	if pol.All {
@@ -360,7 +384,7 @@ func mcpTools(ctx context.Context, data, root string, servers []string) []MCPToo
 // ---------- asking the model ----------
 
 func (st *sessionStore) apiMessages(s *Session) []map[string]any {
-	out := []map[string]any{{"role": "system", "content": st.systemPrompt(s)}}
+	out := []map[string]any{{"role": "system", "content": st.taskSystem(s)}}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	lastPic := -1 // only the newest picture is sent: each one costs many tokens
@@ -405,6 +429,12 @@ func (st *sessionStore) apiMessages(s *Session) []map[string]any {
 			out = append(out, map[string]any{"role": "user", "content": m.Content})
 		case "assistant":
 			a := map[string]any{"role": "assistant", "content": m.Content}
+			// Its thinking goes back too: a template that shows earlier thinking (Inkling 2)
+			// otherwise writes a different history from the one the engine read, and the
+			// engine reads everything after it again on every step.
+			if m.Reasoning != "" {
+				a["reasoning_content"] = m.Reasoning
+			}
 			if len(m.Calls) > 0 {
 				var calls []map[string]any
 				for _, c := range m.Calls {

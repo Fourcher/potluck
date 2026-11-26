@@ -335,3 +335,21 @@ func TestLongResultsSavedAndReadable(t *testing.T) {
 		t.Fatal("a short result changed")
 	}
 }
+
+// The task's instructions read the same at every step, so the engine reuses what it read.
+func TestTaskInstructionsStayTheSame(t *testing.T) {
+	_, st := withFakeModel(t)
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a"), 0o644)
+	s := st.create(&ProjectRef{Root: dir, Name: "p"}, Policy{})
+	first := st.taskSystem(s)
+	s.Messages = append(s.Messages, SMsg{Role: "user", Content: "go"}, SMsg{Role: "assistant", Content: "ok"})
+	_ = os.WriteFile(filepath.Join(dir, "b.go"), []byte("package a"), 0o644) // the task made a file
+	if again := st.taskSystem(s); again != first {
+		t.Fatal("the instructions changed between steps")
+	}
+	s.Policy.All = true
+	if st.taskSystem(s) == first {
+		t.Fatal("approve-everything did not reach the instructions")
+	}
+}

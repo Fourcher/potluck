@@ -116,6 +116,9 @@ type Session struct {
 	Messages []SMsg      `json:"messages"`
 	Question *Question   `json:"question,omitempty"` // the open question, if waiting
 	Steps    int         `json:"steps"`
+	// System: the task's instructions as the model first read them (taskSystem), kept so
+	// every later step, and the task after a restart, starts with exactly the same text.
+	System string `json:"system,omitempty"`
 
 	lastPrompt  int // tokens the model read last time, to know when to make room
 	lastPromptN int // how many messages the task had then
@@ -125,7 +128,8 @@ type Session struct {
 	// (cleaned up and cut to 64 characters, so it cannot be read back into the connector's
 	// own name, which may hold spaces or colons).
 	mcpByName map[string]MCPTool
-	subs        map[chan SEvent]bool
+	systemKey string // what System was made for (taskSystem)
+	subs      map[chan SEvent]bool
 	// saveMu keeps one save at a time from snapshot to rename (two could land in the wrong
 	// order); deleted, under it, stops a run that is still ending from writing a deleted task
 	// back to disk.
