@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -167,6 +169,7 @@ func (st *sessionStore) handle(w http.ResponseWriter, r *http.Request, mutate bo
 		s.saveMu.Lock()
 		s.deleted = true // the run still ending saves nothing more
 		err = removeFile(st.dir, s.ID+".json")
+		_ = os.RemoveAll(filepath.Join(st.dir, s.ID+"-output")) // its saved long results
 		s.saveMu.Unlock()
 	default:
 		err = errors.New("unknown action")

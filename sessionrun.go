@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // The loop that runs a session: ask the model, run the tools it calls (asking the person when
@@ -686,10 +688,13 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 			}
 			return t + "\n" + r.Output, nil
 		case "list_files", "read_file", "search_files", "edit_file", "write_file":
+			op := strings.TrimSuffix(strings.TrimSuffix(call.Name, "_files"), "_file")
+			if out, ok, err := st.readTaskOutput(s, op, args); ok {
+				return out, err // the task's own saved results, with or without a project
+			}
 			if root == "" {
 				return "", errors.New("this task has no project folder")
 			}
-			op := strings.TrimSuffix(strings.TrimSuffix(call.Name, "_files"), "_file")
 			b, _ := args["all"].(bool)
 			return projectFS(FSReq{Op: op, Root: root, Path: str("path"), Glob: str("pattern"), Query: str("query"), Start: num("start_line"), Max: num("max_lines"), Content: str("content"), Old: str("old"), New: str("new"), All: b})
 		case "use_skill":
@@ -740,9 +745,47 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 	if err != nil {
 		res.State, res.Content = "error", "Could not do that: "+err.Error()
 	} else {
-		res.State, res.Content = "ok", out
+		res.State, res.Content = "ok", st.fitResult(s, call, out)
 	}
 	return res
+}
+
+// fitResult keeps one tool result to a quarter of the model's memory. A whole file or a long
+// build log could otherwise fill it in one step: the newest steps are kept whole when a task
+// is summarised, so the next request would not fit and the task would stop. The full result
+// is saved with the task, and the model can read the rest in parts.
+func (st *sessionStore) fitResult(s *Session, call SToolCall, out string) string {
+	_, ctxTok := st.taskModel(s)
+	limit := max(ctxTok*3/4, 6000) // about a quarter, at 3 characters a token
+	if len(out) <= limit {
+		return out
+	}
+	name := safeName(call.Name+"-"+call.ID) + ".txt"
+	dir := filepath.Join(st.dir, s.ID+"-output")
+	saved := ""
+	if os.MkdirAll(dir, 0o700) == nil && os.WriteFile(filepath.Join(dir, name), []byte(out), 0o600) == nil {
+		saved = fmt.Sprintf(" The whole result is saved: read it in parts with read_file and the path %q (start_line and max_lines), or search it with search_files on that path.", taskOutputPrefix+name)
+	}
+	head, tail := trimTo(out, limit*2/3), out[len(out)-limit/3:]
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	return head + fmt.Sprintf("\n\n[… %s left out here: the result was too long for the model's memory.%s]\n\n", humanBytes(int64(len(out)-len(head)-len(tail))), saved) + tail
+}
+
+// taskOutputPrefix is how a task names its own saved results (fitResult) to read_file.
+const taskOutputPrefix = "task-output/"
+
+// readTaskOutput serves read_file and search_files on a task's saved results.
+func (st *sessionStore) readTaskOutput(s *Session, op string, args map[string]any) (string, bool, error) {
+	str := func(k string) string { v, _ := args[k].(string); return v }
+	num := func(k string) int { v, _ := args[k].(float64); return int(v) }
+	rel, ok := strings.CutPrefix(str("path"), taskOutputPrefix)
+	if !ok || (op != "read" && op != "search") {
+		return "", false, nil
+	}
+	out, err := projectFS(FSReq{Op: op, Root: filepath.Join(st.dir, s.ID+"-output"), Path: rel, Query: str("query"), Start: num("start_line"), Max: num("max_lines")})
+	return out, true, err
 }
 
 // requestPermissions puts the model's up-front request to the person as one question.

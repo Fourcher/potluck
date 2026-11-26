@@ -403,6 +403,9 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 			title, detail = "Write "+str("path")+"?", trimTo(str("content"), 3000)
 		}
 	case call.Name == "read_file" || call.Name == "list_files" || call.Name == "search_files":
+		if p, _ := args["path"].(string); strings.HasPrefix(p, taskOutputPrefix) && call.Name != "list_files" {
+			return "", nil // the task's own saved results
+		}
 		if pol.Files == "read" || pol.Files == "edit" || g.Read {
 			return "", nil
 		}

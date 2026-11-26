@@ -311,3 +311,27 @@ func TestQuestionsAnsweredWhenAway(t *testing.T) {
 		t.Fatal("away defaults")
 	}
 }
+
+// A result too long for the model's memory is cut, saved whole, and readable in parts.
+func TestLongResultsSavedAndReadable(t *testing.T) {
+	_, st := withFakeModel(t)
+	s := st.create(nil, Policy{})
+	var b strings.Builder
+	for i := 1; i <= 5000; i++ {
+		fmt.Fprintf(&b, "line %d of the build log\n", i)
+	}
+	out := st.fitResult(s, SToolCall{ID: "c9", Name: "run_command"}, b.String())
+	if len(out) > 8000 || !strings.Contains(out, "line 1 of") || !strings.Contains(out, "line 5000 of") || !strings.Contains(out, taskOutputPrefix) {
+		t.Fatalf("cut result (%d chars) misses its head, tail or the saved path", len(out))
+	}
+	part, ok, err := st.readTaskOutput(s, "read", map[string]any{"path": taskOutputPrefix + safeName("run_command-c9") + ".txt", "start_line": float64(2500), "max_lines": float64(2)})
+	if !ok || err != nil || !strings.Contains(part, "line 2500 of") {
+		t.Fatalf("reading the saved result: %v %q", err, part)
+	}
+	if no, _ := st.allowed(t.Context(), s, SToolCall{Name: "read_file"}, map[string]any{"path": taskOutputPrefix + "x.txt"}); no != "" {
+		t.Fatal("reading its own saved result asked for permission")
+	}
+	if short := st.fitResult(s, SToolCall{ID: "c1", Name: "x"}, "small"); short != "small" {
+		t.Fatal("a short result changed")
+	}
+}
