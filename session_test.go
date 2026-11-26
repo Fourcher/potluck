@@ -505,3 +505,25 @@ func TestResumeAfterRestart(t *testing.T) {
 		t.Fatal("a finished task was resumed again")
 	}
 }
+
+// Two tasks do not take turns step by step: the first finishes its run, then the second goes.
+func TestTasksQueueForTheModel(t *testing.T) {
+	f, st := withFakeModel(t, `call:run_command:{"command":"sleep 0.3"}`, "text:A done", "text:B done")
+	a := st.create(nil, Policy{Commands: "auto"})
+	b := st.create(nil, Policy{Commands: "auto"})
+	_ = st.send(a, "task A")
+	waitStatus(t, a, "working")
+	time.Sleep(50 * time.Millisecond)
+	_ = st.send(b, "task B")
+	waitStatus(t, a, "idle")
+	waitStatus(t, b, "idle")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var order []string
+	for _, msgs := range f.seen {
+		order = append(order, fmt.Sprint(msgs[1]["content"]))
+	}
+	if strings.Join(order, ",") != "task A,task A,task B" {
+		t.Fatalf("model requests in the order %v, want A's run whole before B", order)
+	}
+}

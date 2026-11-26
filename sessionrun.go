@@ -40,6 +40,7 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 	from := len(s.Messages) - 1 // this run's work starts at the message that set it going
 	s.mu.Unlock()
 	defer func() {
+		st.giveModel(s)
 		browsers.release(s.ID)
 		s.mu.Lock()
 		s.cancel = nil
@@ -83,6 +84,9 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 			return
 		}
 		st.takeInbox(s)
+		if err := st.takeModel(ctx, s); err != nil {
+			return
+		}
 		if err := st.compactIfNeeded(ctx, s); err != nil && ctx.Err() == nil {
 			s.setStatus("error", err.Error())
 			return
@@ -1245,4 +1249,98 @@ func (st *sessionStore) waitForModel(ctx context.Context, s *Session, err error,
 		case <-time.After(min(15*time.Second, max(time.Until(deadline), time.Millisecond))):
 		}
 	}
+}
+
+// The model is taken by one task at a time. The engine answers one request at a time and
+// keeps what it read for the last one only: two tasks taking turns step by step each made it
+// read the other's whole conversation again, every step. A task keeps the model for its whole
+// run, lets go while it waits for the person, and after 20 steps lets a waiting task have a turn.
+type modelLease struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	holder  string
+	held    int // steps taken by the holder in this turn
+	waiting map[string]int
+	seq     int
+}
+
+func (st *sessionStore) leaseOf() *modelLease {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.lease == nil {
+		st.lease = &modelLease{waiting: map[string]int{}}
+		st.lease.cond = sync.NewCond(&st.lease.mu)
+	}
+	return st.lease
+}
+
+// takeModel waits until this task may use the model for its next step.
+func (st *sessionStore) takeModel(ctx context.Context, s *Session) error {
+	if s.Kind == "helper" {
+		return nil // the Potluck helper has its own small model
+	}
+	l := st.leaseOf()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.holder == s.ID {
+		l.held++
+		if l.held <= 20 || len(l.waiting) == 0 {
+			return nil
+		}
+		l.holder = "" // its turn is over: the one waiting longest goes next
+		l.cond.Broadcast()
+	}
+	l.seq++
+	l.waiting[s.ID] = l.seq
+	defer delete(l.waiting, s.ID)
+	stop := context.AfterFunc(ctx, func() { l.mu.Lock(); l.cond.Broadcast(); l.mu.Unlock() })
+	defer stop()
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if l.holder == "" && l.first() == s.ID {
+			l.holder, l.held = s.ID, 1
+			s.mu.Lock()
+			was := s.Error
+			s.mu.Unlock()
+			if was == queuedNote {
+				s.setStatus("working", "")
+			}
+			return nil
+		}
+		if l.holder != "" && l.holder != s.ID {
+			s.mu.Lock()
+			note := s.Error
+			s.mu.Unlock()
+			if note != queuedNote {
+				s.setStatus("working", queuedNote)
+			}
+		}
+		l.cond.Wait()
+	}
+}
+
+const queuedNote = "Waiting for the model: another task is using it"
+
+// first is the task waiting longest. Called with l.mu held.
+func (l *modelLease) first() string {
+	best, at := "", 0
+	for id, n := range l.waiting {
+		if best == "" || n < at {
+			best, at = id, n
+		}
+	}
+	return best
+}
+
+// giveModel lets another task use the model (the run ended, or it waits for the person).
+func (st *sessionStore) giveModel(s *Session) {
+	l := st.leaseOf()
+	l.mu.Lock()
+	if l.holder == s.ID {
+		l.holder = ""
+		l.cond.Broadcast()
+	}
+	l.mu.Unlock()
 }

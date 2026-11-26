@@ -167,6 +167,7 @@ type sessionStore struct {
 	sessions  map[string]*Session
 	notify    func(q *Question, s *Session) // phones and other alerts (set by the host)
 	notifyEnd func(s *Session)              // a task finished or stopped with an error
+	lease     *modelLease                   // which task uses the model now (takeModel)
 }
 
 func newSessionStore(h *Host, data string) *sessionStore {
@@ -394,6 +395,7 @@ func (st *sessionStore) ask(ctx context.Context, s *Session, kind, title, detail
 		defer t.Stop()
 		away = t.C
 	}
+	st.giveModel(s) // nothing to compute while the person decides
 	var ans string
 	auto := false
 	select {
