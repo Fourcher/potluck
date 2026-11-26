@@ -26,6 +26,7 @@ type scriptModel struct {
 func (f *scriptModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Messages []map[string]any `json:"messages"`
+		Stream   bool             `json:"stream"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	f.mu.Lock()
@@ -35,6 +36,11 @@ func (f *scriptModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply, f.replies = f.replies[0], f.replies[1:]
 	}
 	f.mu.Unlock()
+	if !body.Stream { // a request for one whole answer (summarising)
+		t, _ := strings.CutPrefix(reply, "text:")
+		writeJSON(w, map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": t}}}})
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	chunk := func(delta any) {
 		b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": delta}}})
@@ -525,5 +531,23 @@ func TestTasksQueueForTheModel(t *testing.T) {
 	}
 	if strings.Join(order, ",") != "task A,task A,task B" {
 		t.Fatalf("model requests in the order %v, want A's run whole before B", order)
+	}
+}
+
+// A later run that summarises the task's earlier part ends normally, with its report (an
+// index kept from before the summary pointed past the end and crashed Potluck).
+func TestReportAfterSummary(t *testing.T) {
+	_, st := withFakeModel(t, "text:the summary", "text:done")
+	s := st.create(nil, Policy{})
+	for i := 0; i < 20; i++ {
+		s.Messages = append(s.Messages, SMsg{Role: "user", Content: "old", At: time.Now()}, SMsg{Role: "assistant", Content: "old answer", At: time.Now()})
+	}
+	s.lastPrompt, s.lastPromptN = 1_000_000, len(s.Messages) // the memory is full: summarise
+	_ = st.send(s, "carry on")
+	waitStatus(t, s, "idle", "error")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Status != "idle" || len(s.Messages) > 10 || !strings.HasPrefix(s.Report, "Finished") {
+		t.Fatalf("status %s, %d messages, report %q", s.Status, len(s.Messages), s.Report)
 	}
 }

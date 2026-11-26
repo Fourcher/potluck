@@ -198,6 +198,9 @@ func (st *sessionStore) handle(w http.ResponseWriter, r *http.Request, mutate bo
 		err = removeFile(st.dir, s.ID+".json")
 		_ = os.RemoveAll(filepath.Join(st.dir, s.ID+"-output")) // its saved long results
 		_ = os.RemoveAll(st.backupDir(s))                       // and the files it kept for undo
+		if s.GitBase != "" && s.Project != nil {
+			gitForget(s.Project.Root, s.ID) // and its git starting point
+		}
 		s.saveMu.Unlock()
 	default:
 		err = errors.New("unknown action")

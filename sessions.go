@@ -129,7 +129,10 @@ type Session struct {
 	// In a git repository: where the task started (taskchanges.go), for its changes and undo.
 	GitBase      string   `json:"gitBase,omitempty"`
 	GitUntracked []string `json:"gitUntracked,omitempty"`
-	interrupted  bool     // Potluck restarted while it ran
+	// TaskEnd: what the task left in each file it changed (noteTaskEnd), so undo leaves alone
+	// a file changed since.
+	TaskEnd     map[string]string `json:"taskEnd,omitempty"`
+	interrupted bool              // Potluck restarted while it ran
 
 	lastPrompt  int // tokens the model read last time, to know when to make room
 	lastPromptN int // how many messages the task had then
@@ -307,9 +310,12 @@ func (st *sessionStore) send(s *Session, text string) error {
 		// A task starting in a git repository knows its branch, what is uncommitted and the
 		// latest commits (in its first message, not its instructions, which stay the same).
 		root := s.Project.Root
+		// Working from here on: a second message while git answers goes to the inbox
+		// instead of starting a second run beside this one.
+		s.Status, s.Error = "working", ""
 		s.mu.Unlock()
 		g := gitContext(root)
-		base, untracked := gitStart(root)
+		base, untracked := gitStart(root, s.ID)
 		s.mu.Lock()
 		s.GitBase, s.GitUntracked = base, untracked
 		if g != "" && len(s.Messages) == 0 {
@@ -420,7 +426,11 @@ func (st *sessionStore) ask(ctx context.Context, s *Session, kind, title, detail
 	case <-ctx.Done():
 		ans = "no"
 	case <-away:
-		ans, auto = awayAnswer(kind, wait), true
+		select {
+		case ans = <-q.answered: // answered at the same moment: the person's answer counts
+		default:
+			ans, auto = awayAnswer(kind, wait), true
+		}
 	}
 	// A question is never changed once shown (watchers read it without the lock): the
 	// answered one is a copy.
@@ -480,6 +490,18 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 			return "", nil
 		}
 		kind, title, detail = "read", "Look at the project's files?", call.Name+" "+call.Args
+	case call.Name == "remember":
+		// A note is read by every later task (global ones by all tasks, even those that run
+		// commands without asking): a task that read an untrusted page or file must not plant
+		// one unseen. Project notes go freely where it may change files; global ones are asked.
+		scope, _ := args["scope"].(string)
+		if (scope == "project" || scope == "") && s.Project != nil && (pol.Files == "edit" || g.Write) {
+			return "", nil
+		}
+		kind, title, detail = "write", "Remember this for every later task?", str("note")
+		if s.Project != nil && scope != "global" {
+			title = "Remember this for later tasks on this project?"
+		}
 	case strings.HasPrefix(call.Name, "browser_"):
 		// Each kind of access has its own yes: running commands freely does not include the
 		// browser, the screen or connectors (found by the self-review on the pool). Reading

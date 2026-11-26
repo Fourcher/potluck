@@ -37,7 +37,12 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 	s.setStatus("working", "")
 	began := time.Now()
 	s.mu.Lock()
-	from := len(s.Messages) - 1 // this run's work starts at the message that set it going
+	// This run's work: the message that set it going and everything after it, found by time
+	// (an index would point past the end once the run summarises its earlier part).
+	var since time.Time
+	if n := len(s.Messages); n > 0 {
+		since = s.Messages[n-1].At
+	}
 	s.mu.Unlock()
 	defer func() {
 		st.giveModel(s)
@@ -56,6 +61,9 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 		s.mu.Lock()
 		base, untracked, proj := s.GitBase, s.GitUntracked, s.Project
 		s.mu.Unlock()
+		if proj != nil {
+			st.noteTaskEnd(s)
+		}
 		if base != "" && proj != nil {
 			gitFiles = []string{}
 			for _, c := range gitChanges(mustReal(proj.Root), base, untracked) {
@@ -63,7 +71,13 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 			}
 		}
 		s.mu.Lock()
-		s.Report = taskReport(s.Messages[max(from, 0):], time.Since(began), s.Status, s.Error, gitFiles)
+		var this []SMsg
+		for _, m := range s.Messages {
+			if !m.At.Before(since) {
+				this = append(this, m)
+			}
+		}
+		s.Report = taskReport(this, time.Since(began), s.Status, s.Error, gitFiles)
 		end, waitingMsgs := s.Status, s.Inbox
 		if end == "idle" {
 			s.Inbox = nil
@@ -850,6 +864,12 @@ func (st *sessionStore) fitResult(s *Session, call SToolCall, out string) string
 	limit := max(ctxTok*3/4, 6000) // about a quarter, at 3 characters a token
 	if len(out) <= limit {
 		return out
+	}
+	s.saveMu.Lock()
+	gone := s.deleted
+	s.saveMu.Unlock()
+	if gone {
+		return trimTo(out, limit) // deleted meanwhile: nothing more is written for it
 	}
 	name := safeName(call.Name+"-"+call.ID) + ".txt"
 	dir := filepath.Join(st.dir, s.ID+"-output")

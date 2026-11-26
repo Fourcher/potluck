@@ -934,7 +934,7 @@ func remember(data, root, scope, note string) (string, error) {
 	}
 	f := ownMemoryFile(data, root, scope)
 	if st, err := os.Stat(f); err == nil && st.Size() > 48<<10 {
-		return "", errors.New("these notes are full (48 KB): fold some together with edit_file on " + f + " first, or keep this one in the project's own files")
+		return "", errors.New("these notes are full (48 KB): keep this one in the project's own files instead (a notes or README file), and tell the user their Potluck notes are full")
 	}
 	if err := os.MkdirAll(filepath.Dir(f), 0o700); err != nil {
 		return "", err
