@@ -256,7 +256,12 @@ func (st *sessionStore) systemPrompt(s *Session) string {
 	} else {
 		p = append(p, "Commands start in "+h.agentDir()+" unless you give a folder.")
 	}
-	if !pol.All {
+	s.mu.Lock()
+	scheduled := s.Schedule != ""
+	s.mu.Unlock()
+	if scheduled && !pol.All {
+		p = append(p, scheduledNote())
+	} else if !pol.All {
 		p = append(p, "At the start of a task, call request_permissions once with everything this task is likely to need (running commands, changing files, which connectors, which apps you will control). "+
 			"The user approves it all at once now, so the work is not held up later while they are away. Ask for a little more rather than less.")
 	}

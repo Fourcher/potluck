@@ -143,6 +143,12 @@ func (h *Host) chatHandler(api http.Handler) http.Handler {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = io.WriteString(w, h.aiGuide(chatOwner(r), isShared(r)))
+		case r.URL.Path == "/potluck/schedules" || strings.HasPrefix(r.URL.Path, "/potluck/schedules/"):
+			if !chatOwner(r) {
+				http.NotFound(w, r)
+				return
+			}
+			h.sessionStore().handleSchedules(w, r)
 		case strings.HasPrefix(r.URL.Path, "/potluck/sessions") || r.URL.Path == "/potluck/questions":
 			if !chatOwner(r) {
 				http.NotFound(w, r)

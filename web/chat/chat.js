@@ -398,7 +398,7 @@ function drawProjects() {
   if (!S.server || !S.server.owner) { el.innerHTML = ""; return; }
   const ts = (S.tasks || []).slice().sort((a, b) => (b.status === "waiting") - (a.status === "waiting") || Date.parse(b.updated) - Date.parse(a.updated)).slice(0, 6);
   const dot = st => st === "waiting" ? `<span class="tdot wait" title="Waiting for you"></span>` : st === "working" ? `<span class="tdot work" title="Working"></span>` : `<span class="tdot" title="${esc(st)}"></span>`;
-  const tasksHTML = `<h4>Tasks <button class="icon small" data-a="new-task" title="New task" aria-label="New task">${ic("plus")}</button></h4>` +
+  const tasksHTML = `<h4>Tasks <button class="icon small" data-a="new-task" title="New task" aria-label="New task">${ic("plus")}</button><button class="btn small ghost" data-a="schedules" title="Tasks that run by themselves at set times">Scheduled</button></h4>` +
     (ts.length ? ts.map(t => `<div class="chat-item ${S.cur && S.cur.session === t.id ? "on" : ""}" data-task="${esc(t.id)}" tabindex="0" role="button" title="${esc(t.question ? "Waiting: " + t.question.title : t.status)}">${dot(t.status)}<span class="t">${esc(t.title || "Task")}</span></div>`).join("") : `<div class="empty-list small">Tasks keep going in Potluck when you close this page.</div>`);
   el.innerHTML = tasksHTML + `<h4>Projects</h4>` + ps.slice(0, 6).map(p => `<div class="chat-item proj ${S.cur && S.cur.project && S.cur.project.root === p.path ? "on" : ""}" data-proj="${esc(p.path)}" data-name="${esc(p.name)}" tabindex="0" role="button" title="${esc(p.path)}"><span class="ic">${icon("folder")}</span><span class="t">${esc(p.name)}</span></div>`).join("") +
     `<div class="chat-item proj" data-a="all-projects" tabindex="0" role="button"><span class="t muted">${ps.length > 6 ? `All ${ps.length} projects…` : "Open a project…"}</span></div>`;
@@ -1320,6 +1320,33 @@ function sheet(html, handlers = {}) {
   hidePop(); const m = $("#modal"); $(".sheet", m).innerHTML = html; m.hidden = false; m.handlers = handlers;
   const f = $("input,textarea,select,button.btn:not(.ghost)", m); f && f.focus();
 }
+// Scheduled tasks (schedules.go): set once, run by Potluck at their times as ordinary tasks.
+async function schedulesSheet() {
+  let j;
+  try { j = await taskApi("schedules"); } catch (e) { return toast(e.message); }
+  const when = sc => sc.every === "hours" ? `every ${sc.hours} hours` : (sc.every === "weekdays" ? "weekdays" : "every day") + " at " + sc.at;
+  const proj = S.cur && S.cur.project && S.cur.project.root ? S.cur.project : null;
+  const list = (j.schedules || []).map(sc => `<div class="sched"><div><b>${esc(sc.title)}</b> <span class="muted small">${esc(when(sc))}${sc.on ? (sc.next ? " · next " + new Date(sc.next).toLocaleString() : "") : " · off"}</span>${sc.note ? `<div class="small err">${esc(sc.note)}</div>` : ""}</div>` +
+    `<div class="row"><button class="btn small ghost" data-a="sc-run" data-id="${esc(sc.id)}">Run now</button><button class="btn small ghost" data-a="sc-toggle" data-id="${esc(sc.id)}" data-on="${sc.on ? 1 : 0}">${sc.on ? "Turn off" : "Turn on"}</button><button class="btn small ghost" data-a="sc-del" data-id="${esc(sc.id)}">Delete</button></div></div>`).join("");
+  sheet(`<h3>Scheduled tasks</h3><p class="small muted">Each run is an ordinary task: its questions reach your phone, and it ends with a report. A run is skipped while the last one still goes; a time missed while the computer was off runs once when Potluck is back.</p>` +
+    (list || `<p class="small">None yet.</p>`) +
+    `<h4>New scheduled task</h4><label class="f" for="sc-text">What should it do each time?</label><textarea id="sc-text" rows="3" placeholder="Pull the latest code, run the tests, fix what fails and tell me what you changed."></textarea>` +
+    `<div class="small muted">${proj ? "In the project " + esc(proj.name || proj.root) : "With no project (open a project's task first to schedule work in it)"}.</div>` +
+    `<div class="row"><select id="sc-every"><option value="daily">Every day</option><option value="weekdays">Weekdays</option><option value="hours">Every few hours</option></select> <input id="sc-at" type="time" value="02:00"> <input id="sc-hours" type="number" min="1" max="168" value="6" style="width:5em" hidden> </div>` +
+    `<label class="opt"><input type="checkbox" id="sc-cmd" checked><span>It may run commands without asking</span></label><label class="opt"><input type="checkbox" id="sc-edit" checked><span>It may change files without asking</span></label>` +
+    `<div class="small muted">Nobody is there to approve things at night: what you allow here is approved for every run. Anything else it needs is asked, and left out if nobody answers.</div>` +
+    `<div class="foot"><button class="btn ghost" data-a="close">Close</button><button class="btn" data-a="sc-add">Schedule it</button></div>`,
+    {
+      "sc-add": async () => {
+        const every = $("#sc-every").value, pol = { ...taskPolicy(), commands: $("#sc-cmd").checked ? "auto" : "ask", files: $("#sc-edit").checked ? "edit" : "read", all: false };
+        try { await taskApi("schedules", { text: $("#sc-text").value, project: proj, policy: pol, every, at: $("#sc-at").value, hours: +$("#sc-hours").value }); toast("Scheduled."); schedulesSheet(); } catch (e) { toast(e.message); }
+      },
+      "sc-run": async b => { try { const r = await taskApi("schedules/" + b.dataset.id + "/run", {}); closeSheet(); await loadTasks(); openTask(r.task); } catch (e) { toast(e.message); } },
+      "sc-toggle": async b => { try { await taskApi("schedules/" + b.dataset.id + (b.dataset.on === "1" ? "/off" : "/on"), {}); schedulesSheet(); } catch (e) { toast(e.message); } },
+      "sc-del": async b => { try { await taskApi("schedules/" + b.dataset.id + "/delete", {}); schedulesSheet(); } catch (e) { toast(e.message); } },
+    });
+  $("#sc-every").onchange = () => { const h = $("#sc-every").value === "hours"; $("#sc-hours").hidden = !h; $("#sc-at").hidden = h; };
+}
 // What the task changed in its project, file by file, with undo (taskchanges.go).
 async function changesSheet() {
   let j;
@@ -1470,7 +1497,7 @@ function wire() {
   $("#side-close").onclick = $("#side-open").onclick = toggleSide;
   $("#new-chat").onclick = () => openChat();
   $("#chat-search").oninput = e => { S.filter = e.target.value; drawList(); };
-  $("#project-list").onclick = e => { if (e.target.closest("[data-a=new-task]")) return newTaskChat(); const tk = e.target.closest("[data-task]"); if (tk) return openTask(tk.dataset.task); if (e.target.closest("[data-a=all-projects]")) return projectsSheet(); const it = e.target.closest("[data-proj]"); if (it) openProject(it.dataset.proj, it.dataset.name); };
+  $("#project-list").onclick = e => { if (e.target.closest("[data-a=new-task]")) return newTaskChat(); if (e.target.closest("[data-a=schedules]")) return schedulesSheet(); const tk = e.target.closest("[data-task]"); if (tk) return openTask(tk.dataset.task); if (e.target.closest("[data-a=all-projects]")) return projectsSheet(); const it = e.target.closest("[data-proj]"); if (it) openProject(it.dataset.proj, it.dataset.name); };
   $("#chat-list").onclick = e => { const more = e.target.closest("[data-a=chat-more]"); if (more) { e.stopPropagation(); return chatMenu(more, more.dataset.id); } const it = e.target.closest(".chat-item"); if (it) openChat(it.dataset.id); };
   $("#chat-list").onkeydown = e => { if (e.key === "Enter" && e.target.classList.contains("chat-item")) openChat(e.target.dataset.id); };
   $("#cluster-chip").onclick = () => usageSheet();

@@ -124,8 +124,9 @@ type Session struct {
 	// Inbox: messages the person sent while the task worked, given to it at its next step.
 	Inbox []string `json:"inbox,omitempty"`
 	// Resumed: how often it carried on by itself after Potluck restarted (resumeInterrupted).
-	Resumed     int  `json:"resumed,omitempty"`
-	interrupted bool // Potluck restarted while it ran
+	Resumed     int    `json:"resumed,omitempty"`
+	Schedule    string `json:"schedule,omitempty"` // the schedule that started it (schedules.go)
+	interrupted bool   // Potluck restarted while it ran
 
 	lastPrompt  int // tokens the model read last time, to know when to make room
 	lastPromptN int // how many messages the task had then

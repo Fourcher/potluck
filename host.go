@@ -226,6 +226,7 @@ func (h *Host) Run() error {
 	go h.crewWatch()
 	go h.crewKeep()
 	go h.sessionStore().resumeInterrupted() // tasks cut off by a restart carry on
+	go h.sessionStore().scheduleLoop()      // scheduled tasks (schedules.go)
 	return nil
 }
 

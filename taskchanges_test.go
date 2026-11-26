@@ -52,7 +52,11 @@ func TestGitContext(t *testing.T) {
 		t.Skip("no git")
 	}
 	dir := t.TempDir()
-	run := func(a ...string) { c := exec.Command("git", append([]string{"-C", dir}, a...)...); c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t"); _ = c.Run() }
+	run := func(a ...string) {
+		c := exec.Command("git", append([]string{"-C", dir}, a...)...)
+		c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		_ = c.Run()
+	}
 	run("init", "-q", "-b", "main")
 	_ = os.WriteFile(filepath.Join(dir, "x"), []byte("1"), 0o644)
 	run("add", "x")
