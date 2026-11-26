@@ -342,10 +342,7 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 		if call.Name == "run_applescript" {
 			title, detail = "Run this AppleScript to control an app?", str("script")
 		} else {
-			title, detail = "Run this command?", str("command")
-			if f := str("folder"); f != "" {
-				detail += "\n\n(in " + f + ")"
-			}
+			title, detail = "Run this command?", str("command")+"\n\n(in "+st.commandDir(s, str("folder"))+")"
 		}
 	case call.Name == "edit_file" || call.Name == "write_file":
 		if pol.Files == "edit" || g.Write {
@@ -364,8 +361,9 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 		kind, title, detail = "read", "Look at the project's files?", call.Name+" "+call.Args
 	case strings.HasPrefix(call.Name, "browser_"):
 		// Each kind of access has its own yes: running commands freely does not include the
-		// browser, the screen or connectors (found by the self-review on the pool).
-		if g.Browser || call.Name == "browser_read" || call.Name == "browser_screenshot" {
+		// browser, the screen or connectors (found by the self-review on the pool). Reading
+		// counts too: the browser is signed in to the person's sites.
+		if g.Browser {
 			return "", nil
 		}
 		kind = "browser"

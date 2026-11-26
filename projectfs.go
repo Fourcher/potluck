@@ -52,10 +52,48 @@ func inRoot(root, rel string) (string, error) {
 		p = filepath.Join(root, rel)
 	}
 	p = filepath.Clean(p)
-	if p != root && !strings.HasPrefix(p, root+string(os.PathSeparator)) {
+	if !within(root, p) {
 		return "", fmt.Errorf("%s is outside the project folder", rel)
 	}
-	return p, nil
+	// The same check on the real paths: a link inside the project (docs -> the home folder)
+	// must not lead the tools out of it. The project folder itself may sit behind a link.
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("the project folder %s cannot be opened: %v", root, err)
+	}
+	real, err := realPath(p)
+	if err != nil {
+		return "", err
+	}
+	if !within(realRoot, real) {
+		return "", fmt.Errorf("%s leads outside the project folder (through a link)", rel)
+	}
+	return real, nil
+}
+
+func within(root, p string) bool {
+	return p == root || strings.HasPrefix(p, root+string(os.PathSeparator))
+}
+
+// realPath resolves every link in p. For a file not made yet, it resolves the nearest
+// folder that exists and adds the rest of the path back.
+func realPath(p string) (string, error) {
+	rest := ""
+	for {
+		r, err := filepath.EvalSymlinks(p)
+		if err == nil {
+			return filepath.Join(r, rest), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return "", err
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
 }
 
 func matchGlob(pattern, rel string) bool {
@@ -85,6 +123,10 @@ func walkProject(root, sub, glob string, max int) ([]string, bool) {
 	if err != nil {
 		return nil, false
 	}
+	// Paths are listed relative to the real project folder, which start is inside.
+	if r, err := filepath.EvalSymlinks(filepath.Clean(root)); err == nil {
+		root = r
+	}
 	_ = filepath.WalkDir(start, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -96,6 +138,11 @@ func walkProject(root, sub, glob string, max int) ([]string, bool) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, p)
+		if d.Type()&fs.ModeSymlink != 0 {
+			if _, err := inRoot(root, rel); err != nil {
+				return nil // a link to somewhere outside the project
+			}
+		}
 		if !matchGlob(glob, rel) {
 			return nil
 		}

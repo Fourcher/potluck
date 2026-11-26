@@ -34,6 +34,7 @@ func (st *sessionStore) maxSteps(s *Session) int {
 func (st *sessionStore) run(ctx context.Context, s *Session) {
 	s.setStatus("working", "")
 	defer func() {
+		browsers.release(s.ID)
 		s.mu.Lock()
 		s.cancel = nil
 		status := s.Status
@@ -557,19 +558,15 @@ func (st *sessionStore) compactIfNeeded(ctx context.Context, s *Session) error {
 	}
 	s.emit(SEvent{Type: "status", Status: "working", Error: "Summarising the earlier part of this task to make room"})
 	s.mu.Lock()
-	keep := 6 // the latest steps stay as they are
-	old := append([]SMsg(nil), s.Messages[:n-keep]...)
+	cut := compactCut(s.Messages[:n])
+	old := append([]SMsg(nil), s.Messages[:cut]...)
 	s.mu.Unlock()
-	var b strings.Builder
-	for _, m := range old {
-		fmt.Fprintf(&b, "[%s%s] %s\n", m.Role, map[bool]string{true: " " + m.Name, false: ""}[m.Name != ""], trimTo(m.Content, 4000))
-		for _, c := range m.Calls {
-			fmt.Fprintf(&b, "  (called %s %s)\n", c.Name, trimTo(c.Args, 500))
-		}
+	if cut < 2 {
+		return nil // the latest step is all there is: nothing older to summarise
 	}
 	sum := map[string]any{"model": model, "messages": []map[string]string{
 		{"role": "system", "content": "Summarise this work log for the assistant that continues it: the task, what was done, what was found, files changed, decisions, and what is left. Be complete and specific; it replaces the log."},
-		{"role": "user", "content": trimTo(b.String(), ctxTok*2)},
+		{"role": "user", "content": compactLog(old, ctxTok*2)},
 	}, "thinking": "off"}
 	body, _ := json.Marshal(sum)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://127.0.0.1:"+strconv.Itoa(portChat)+"/v1/chat/completions", bytes.NewReader(body))
@@ -590,12 +587,7 @@ func (st *sessionStore) compactIfNeeded(ctx context.Context, s *Session) error {
 		return fmt.Errorf("could not summarise the task to make room: %v", err)
 	}
 	s.mu.Lock()
-	rest := s.Messages[n-keep:]
-	// A tool result must follow the call that asked for it: start the kept part at a user or
-	// assistant message.
-	for len(rest) > 0 && rest[0].Role == "tool" {
-		rest = rest[1:]
-	}
+	rest := s.Messages[cut:] // with anything added while the summary was written
 	s.Messages = append([]SMsg{{Role: "user", Content: "Summary of the work so far (it replaces the earlier log):\n\n" + out.Choices[0].Message.Content, At: time.Now()}}, rest...)
 	s.lastPrompt, s.lastPromptN = 0, 0
 	s.mu.Unlock()
@@ -642,11 +634,7 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 			if call.Name == "run_applescript" {
 				kind, cmd = "applescript", str("script")
 			}
-			dir := str("folder")
-			if dir == "" {
-				dir = root
-			}
-			r, err := runCommand(ctx, RunReq{Kind: kind, Command: cmd, Dir: dir, Timeout: num("timeout_seconds")}, st.host.agentDir())
+			r, err := runCommand(ctx, RunReq{Kind: kind, Command: cmd, Dir: st.commandDir(s, str("folder")), Timeout: num("timeout_seconds")}, st.host.agentDir())
 			if err != nil {
 				return "", err
 			}
@@ -665,7 +653,7 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 		case "use_skill":
 			return readSkill(st.host.a.dir, str("name"))
 		case "browser_open", "browser_read", "browser_click", "browser_type", "browser_back", "browser_screenshot":
-			return browserTool(ctx, st.host.a.dir, call.Name, args)
+			return browserTool(ctx, st.host.a.dir, s.ID, call.Name, args)
 		case "screen_look", "screen_click", "screen_type", "screen_key", "screen_scroll":
 			text, pic, err := screenTool(ctx, st.host.a.dir, call.Name, args)
 			if pic != "" {
@@ -864,4 +852,73 @@ func (st *sessionStore) delegate(ctx context.Context, member, task string) (stri
 		return "", errors.New("the crew member gave no answer")
 	}
 	return c.Name + " answered:\n" + out.Choices[0].Message.Content, nil
+}
+
+// commandDir is the folder a task's command runs in: the folder the model named, taken from
+// the project folder when it is relative (or the agent folder for a task with no project),
+// and the project or agent folder itself when it named none. The approval question shows
+// this same folder, so a "yes" is to what will actually run.
+func (st *sessionStore) commandDir(s *Session, folder string) string {
+	s.mu.Lock()
+	proj := s.Project
+	s.mu.Unlock()
+	base := st.host.agentDir()
+	if proj != nil && proj.Root != "" {
+		base = proj.Root
+	}
+	if folder == "" {
+		return base
+	}
+	if filepath.IsAbs(folder) {
+		return filepath.Clean(folder)
+	}
+	return filepath.Join(base, folder)
+}
+
+// compactCut is where the kept part of a task's log starts when the older part is
+// summarised: the last six messages, moved back to the step that owns them, since a tool
+// result must follow the call that asked for it. Every result is then either summarised
+// with its call or kept with it, never dropped.
+func compactCut(ms []SMsg) int {
+	cut := len(ms) - 6
+	for cut > 0 && ms[cut].Role == "tool" {
+		cut--
+	}
+	return max(cut, 0)
+}
+
+// compactLog is the older part of a task's log, as the model that summarises it reads it.
+// The person's task and an earlier summary are given whole; other messages are shortened;
+// when it is still too long, the oldest work in between is what is left out, never the task
+// and never the most recent work.
+func compactLog(old []SMsg, limit int) string {
+	entry := func(m SMsg, max int) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "[%s%s] %s\n", m.Role, map[bool]string{true: " " + m.Name, false: ""}[m.Name != ""], trimTo(m.Content, max))
+		for _, c := range m.Calls {
+			fmt.Fprintf(&b, "  (called %s %s)\n", c.Name, trimTo(c.Args, 500))
+		}
+		return b.String()
+	}
+	head, i := "", 0
+	if len(old) > 0 && old[0].Role == "user" {
+		head, i = entry(old[0], 24000), 1 // the task, or the summary that carries it
+	}
+	var parts []string
+	for _, m := range old[i:] {
+		parts = append(parts, entry(m, 4000))
+	}
+	room := limit - len(head)
+	var tail []string
+	for j := len(parts) - 1; j >= 0 && room > 0; j-- {
+		if len(parts[j]) > room {
+			break
+		}
+		room -= len(parts[j])
+		tail = append([]string{parts[j]}, tail...)
+	}
+	if left := len(parts) - len(tail); left > 0 {
+		head += fmt.Sprintf("… (%d older steps left out for room) …\n", left)
+	}
+	return head + strings.Join(tail, "")
 }

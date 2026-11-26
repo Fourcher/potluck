@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -251,7 +253,17 @@ func fileKey(real string) string {
 
 var unsafeChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
-func safeName(s string) string { return strings.Trim(unsafeChars.ReplaceAllString(s, "_"), "_.") }
+// safeName makes a file or folder name from any text. It is never empty: a name with no
+// letters it can keep (written in Japanese, or just "!!") becomes "n-" and a short hash of
+// it, so it can never stand for its parent folder (a skill called "..." once meant the whole
+// skills folder) and two such names stay apart.
+func safeName(s string) string {
+	if n := strings.Trim(unsafeChars.ReplaceAllString(s, "_"), "_."); n != "" {
+		return n
+	}
+	sum := sha256.Sum256([]byte(s))
+	return "n-" + hex.EncodeToString(sum[:4])
+}
 
 // spotlightModels asks macOS's own file index for every .gguf file on the computer. It
 // answers in a fraction of a second and does not read the disk.

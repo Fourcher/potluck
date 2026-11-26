@@ -33,7 +33,7 @@ func TestBrowserReal(t *testing.T) {
 	defer browsers.close()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	page, err := browserTool(ctx, data, "browser_open", map[string]any{"url": srv.URL})
+	page, err := browserTool(ctx, data, "t1", "browser_open", map[string]any{"url": srv.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,17 +50,17 @@ func TestBrowserReal(t *testing.T) {
 		return n
 	}
 	field := num(page, "Search")
-	res, err := browserTool(ctx, data, "browser_type", map[string]any{"ref": float64(field), "text": "silver paint", "submit": true})
+	res, err := browserTool(ctx, data, "t1", "browser_type", map[string]any{"ref": float64(field), "text": "silver paint", "submit": true})
 	if err != nil || !strings.Contains(res, "You searched for silver paint") {
 		t.Fatalf("type and submit: %v\n%s", err, res)
 	}
-	res, _ = browserTool(ctx, data, "browser_back", nil)
+	res, _ = browserTool(ctx, data, "t1", "browser_back", nil)
 	link := num(res, "About us")
-	res, err = browserTool(ctx, data, "browser_click", map[string]any{"ref": float64(link)})
+	res, err = browserTool(ctx, data, "t1", "browser_click", map[string]any{"ref": float64(link)})
 	if err != nil || !strings.Contains(res, "We sell roof paint") {
 		t.Fatalf("click: %v\n%s", err, res)
 	}
-	if _, err := browserTool(ctx, data, "browser_click", map[string]any{"ref": float64(999)}); err == nil {
+	if _, err := browserTool(ctx, data, "t1", "browser_click", map[string]any{"ref": float64(999)}); err == nil {
 		t.Fatal("clicking a number that is not there should say so")
 	}
 }
