@@ -318,7 +318,9 @@ async function taskSend(text) {
   try {
     if (!c.session) { const ss = await taskApi("sessions", { project: c.project && c.project.root ? c.project : null, policy: taskPolicy(), text }); c.session = ss.id; }
     else await taskApi("sessions/" + c.session + "/message", { text });
-    S.task = { status: "working" }; await saveChat(c); taskFollow(); drawTools(); drawThread();
+    // Sent while it works: the answer being written stays where it is (S.task.live).
+    if (!(S.task && S.task.status === "working")) S.task = { status: "working" };
+    await saveChat(c); taskFollow(); drawTools(); drawThread();
   } catch (e) { toast(e.message); }
 }
 async function taskAnswer(answer) {

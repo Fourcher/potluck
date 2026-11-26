@@ -411,3 +411,38 @@ func TestTaskReport(t *testing.T) {
 		}
 	}
 }
+
+// A message sent while the task works is kept and given to it at its next step.
+func TestMessageWhileWorking(t *testing.T) {
+	f, st := withFakeModel(t, `call:run_command:{"command":"sleep 1"}`, "text:first done", "text:second done")
+	s := st.create(nil, Policy{Commands: "auto"})
+	_ = st.send(s, "start")
+	waitStatus(t, s, "working")
+	time.Sleep(300 * time.Millisecond) // the command is running
+	if err := st.send(s, "also do this"); err != nil {
+		t.Fatalf("a message while working was refused: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		f.mu.Lock()
+		n := len(f.seen)
+		f.mu.Unlock()
+		if n >= 3 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	waitStatus(t, s, "idle")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	last := f.seen[len(f.seen)-1]
+	found := false
+	for _, m := range last {
+		if m["role"] == "user" && m["content"] == "also do this" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the model never saw the message (%d requests)", len(f.seen))
+	}
+}

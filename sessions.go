@@ -121,6 +121,8 @@ type Session struct {
 	System string `json:"system,omitempty"`
 	// Report sums up the last run (taskReport).
 	Report string `json:"report,omitempty"`
+	// Inbox: messages the person sent while the task worked, given to it at its next step.
+	Inbox []string `json:"inbox,omitempty"`
 
 	lastPrompt  int // tokens the model read last time, to know when to make room
 	lastPromptN int // how many messages the task had then
@@ -250,9 +252,18 @@ func (st *sessionStore) get(id string) *Session {
 // send adds the person's message and starts the loop if it is not running.
 func (st *sessionStore) send(s *Session, text string) error {
 	s.mu.Lock()
-	if s.Status == "working" || s.Status == "waiting" {
+	if s.Status == "waiting" {
 		s.mu.Unlock()
-		return errors.New("this task is still working: stop it first, or answer its question")
+		return errors.New("this task is waiting for your answer to its question: answer it first")
+	}
+	if s.Status == "working" {
+		// Kept for the model's next step, instead of making the person stop a long answer
+		// half-way just to add a note.
+		s.Inbox = append(s.Inbox, text)
+		s.mu.Unlock()
+		s.emit(SEvent{Type: "status", Status: "working", Error: "Your message is kept for the task's next step"})
+		st.save(s)
+		return nil
 	}
 	s.Messages = append(s.Messages, SMsg{Role: "user", Content: text, At: time.Now()})
 	if s.Title == "" || (s.Project != nil && s.Title == s.Project.Name && len(s.Messages) == 1) {

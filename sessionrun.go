@@ -52,8 +52,17 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 		}
 		s.mu.Lock()
 		s.Report = taskReport(s.Messages[max(from, 0):], time.Since(began), s.Status, s.Error)
+		end, waitingMsgs := s.Status, s.Inbox
+		if end == "idle" {
+			s.Inbox = nil
+		}
 		s.mu.Unlock()
 		st.save(s)
+		if end == "idle" && len(waitingMsgs) > 0 {
+			// Written just as it finished: carry on with it rather than leave it unread.
+			_ = st.send(s, strings.Join(waitingMsgs, "\n\n"))
+			return
+		}
 		// A task that worked a while ended by itself: say so on the phone. Not one the person
 		// stopped, and not a short one they were watching.
 		s.mu.Lock()
@@ -72,6 +81,7 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 			st.addMsg(s, SMsg{Role: "assistant", Content: fmt.Sprintf("(Stopped after %d steps. Send a message to carry on.)", steps)})
 			return
 		}
+		st.takeInbox(s)
 		if err := st.compactIfNeeded(ctx, s); err != nil && ctx.Err() == nil {
 			s.setStatus("error", err.Error())
 			return
@@ -96,6 +106,9 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 		}
 		cuts = 0
 		if len(msg.Calls) == 0 {
+			if st.hasInbox(s) {
+				continue // the person wrote meanwhile: answer that too
+			}
 			return
 		}
 		var pics []string
@@ -1153,4 +1166,22 @@ func roundDur(d time.Duration) string {
 		return fmt.Sprintf("%d minutes", int(d.Minutes()))
 	}
 	return fmt.Sprintf("%.1f hours", d.Hours())
+}
+
+// takeInbox moves the messages the person sent while the task worked into the task, at a step
+// boundary (every call of the last step has its result by then).
+func (st *sessionStore) takeInbox(s *Session) {
+	s.mu.Lock()
+	in := s.Inbox
+	s.Inbox = nil
+	s.mu.Unlock()
+	for _, t := range in {
+		st.addMsg(s, SMsg{Role: "user", Content: t})
+	}
+}
+
+func (st *sessionStore) hasInbox(s *Session) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.Inbox) > 0
 }
