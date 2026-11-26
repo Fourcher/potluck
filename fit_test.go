@@ -178,7 +178,7 @@ func TestCardShortCountsHostMemory(t *testing.T) {
 	if s := cardShortMiB(res, 0, map[string]int64{hostBudget: 24000}); s != 0 {
 		t.Fatalf("fits in 24000 MiB, short %d", s)
 	}
-	if s := cardShortMiB(res, 0, map[string]int64{hostBudget: 18000}); s != 20000+cardMarginMiB-18000 {
+	if s := cardShortMiB(res, 0, map[string]int64{hostBudget: 18000}); s != 20000-18000 {
 		t.Fatalf("short %d", s)
 	}
 	if s := cardShortMiB(res, 0, nil); s != 0 {

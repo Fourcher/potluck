@@ -155,9 +155,11 @@ func cardShortMiB(res MeasureRes, extra int64, budget map[string]int64) int64 {
 		}
 	}
 	// This computer's own memory: what the engine keeps there (the layers and experts left
-	// off the card, the image add-on on the processor) against what it lends.
-	if b := budget[hostBudget]; b > 0 && res.Host.Self+cardMarginMiB > b {
-		short = max(short, res.Host.Self+cardMarginMiB-b)
+	// off the card, the image add-on on the processor) against what it lends. What it lends
+	// already leaves a reserve for the system and other apps (offer), so no card margin is
+	// added here: with one, Inkling 2 Q6_K on Monolith, which runs well, was refused 46 MB short.
+	if b := budget[hostBudget]; b > 0 && res.Host.Self > b {
+		short = max(short, res.Host.Self-b)
 	}
 	return short
 }
