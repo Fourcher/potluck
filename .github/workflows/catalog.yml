@@ -1,4 +1,4 @@
-# Refreshes catalog/models.json once a day from Hugging Face's public lists, so Potluck shows
+# Refreshes catalog/models-v2.json (and models.json for Potluck before 1.12) once a day from Hugging Face's public lists, so Potluck shows
 # new and trending models without an update. Commits only when a list changed.
 name: Model catalog
 on:
@@ -16,9 +16,9 @@ jobs:
       - run: python3 tools/catalog.py
       - name: Commit when it changed
         run: |
-          if git diff --quiet catalog/models.json; then echo "no change"; exit 0; fi
+          if git diff --quiet catalog/models.json catalog/models-v2.json; then echo "no change"; exit 0; fi
           git config user.name "potluck-catalog"
           git config user.email "potluck-catalog@users.noreply.github.com"
-          git add catalog/models.json
+          git add catalog/models.json catalog/models-v2.json
           git commit -m "Daily model catalog"
           git push

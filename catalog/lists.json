@@ -1,5 +1,5 @@
 {
-  "note": "Ranked lists made by other people, shown on the Models page with their age. Each list says who ranked it and how; Potluck has not measured these rankings. A list past its expiry date is shown folded away as out of date. tools/catalog.py copies this file into models.json.",
+  "note": "Ranked lists made by other people, shown on the Models page with their age. Each list says who ranked it and how; Potluck has not measured these rankings. A list past its expiry date is shown folded away as out of date. tools/catalog.py copies this file into models-v2.json and models.json.",
   "lists": [
     {
       "id": "uncensored-tier-2026-11",

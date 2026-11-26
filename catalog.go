@@ -14,16 +14,35 @@ import (
 // refreshed daily in the repository by tools/catalog.py. Potluck carries the copy it was
 // built with and fetches the newest one once a day.
 
-//go:embed catalog/models.json
+//go:embed catalog/models-v2.json
 var builtinCatalog []byte
 
-const catalogURL = "https://raw.githubusercontent.com/Fourcher/potluck/main/catalog/models.json"
+const catalogURL = "https://raw.githubusercontent.com/Fourcher/potluck/main/catalog/models-v2.json"
+
+// models.json, at the old address, is the copy for Potluck before 1.12: it leaves out picks
+// that need a newer engine, which those versions cannot check.
 
 type CatalogPick struct {
 	Repo    string   `json:"repo"`
 	Blurb   string   `json:"blurb"`
 	GoodFor []string `json:"good_for"`
 	Sources []string `json:"sources"`
+	// NeedsEngine is the oldest engine build that runs the pick's files correctly (0: any).
+	// A pick for a newer engine than this Potluck installs is left out.
+	NeedsEngine int `json:"needsEngine,omitempty"`
+}
+
+// usable drops the picks this Potluck's engine cannot run correctly.
+func (c *Catalog) usable() *Catalog {
+	have := tagBuild(engineTag)
+	out := *c
+	out.Picks = nil
+	for _, p := range c.Picks {
+		if p.NeedsEngine <= have {
+			out.Picks = append(out.Picks, p)
+		}
+	}
+	return &out
 }
 
 type CatalogEntry struct {
@@ -79,14 +98,14 @@ func (h *Host) catalog() *Catalog {
 		if b, err := os.ReadFile(cache); err == nil {
 			var c Catalog
 			if json.Unmarshal(b, &c) == nil && len(c.Picks) > 0 {
-				catCurrent = &c
+				catCurrent = c.usable()
 			}
 		}
 		// A newer Potluck carries a newer catalog than the copy fetched before the update.
 		var built Catalog
 		_ = json.Unmarshal(builtinCatalog, &built)
 		if catCurrent == nil || built.Updated > catCurrent.Updated {
-			catCurrent = &built
+			catCurrent = built.usable()
 		}
 		if st, err := os.Stat(cache); err == nil {
 			catChecked = st.ModTime()
@@ -111,7 +130,7 @@ func (h *Host) catalog() *Catalog {
 			}
 			catMu.Lock()
 			if c.Updated >= catCurrent.Updated {
-				catCurrent = &c
+				catCurrent = c.usable()
 			}
 			catMu.Unlock()
 		}()

@@ -1,0 +1,501 @@
+{
+ "version": 1,
+ "updated": "2026-11-26T00:22Z",
+ "source": "Hugging Face public API (downloads, likes and trending as Hugging Face reports them)",
+ "picks": [
+  {
+   "repo": "AtomicChat/Inkling-2-Mini-Uncensored-GGUF",
+   "blurb": "Our pick to start with: Inkling 2 Mini, 26 billion parameters, whose smallest size runs on a 12 GB laptop. This version has had its refusals removed: it answers what it is asked.",
+   "good_for": [
+    "chat",
+    "writing",
+    "code",
+    "pictures"
+   ],
+   "sources": [
+    "https://huggingface.co/AtomicChat/Inkling-2-Mini-Uncensored-GGUF"
+   ]
+  },
+  {
+   "repo": "orcarouter/Inkling-2-Mini-abliterated-GGUF",
+   "blurb": "Inkling 2 Mini with its refusals removed, in two sizes (15.7 and 11.6 GB) whose quality loss is measured and published (KL 0.004 and 0.017). Text only: no pictures. Gated: accept its terms on Hugging Face while signed in, then add your Hugging Face key on this page.",
+   "good_for": [
+    "chat",
+    "code",
+    "security research",
+    "writing"
+   ],
+   "sources": [
+    "https://huggingface.co/orcarouter/Inkling-2-Mini-abliterated-GGUF"
+   ],
+   "needsEngine": 12728
+  },
+  {
+   "repo": "unsloth/gemma-4-12B-it-GGUF",
+   "blurb": "Small and quick. Runs on almost anything.",
+   "good_for": [
+    "chat",
+    "small computers"
+   ],
+   "sources": [
+    "https://huggingface.co/unsloth/gemma-4-12B-it-GGUF"
+   ]
+  },
+  {
+   "repo": "unsloth/Qwen3.8-27B-GGUF",
+   "blurb": "Strong all-rounder.",
+   "good_for": [
+    "chat",
+    "code",
+    "reasoning"
+   ],
+   "sources": [
+    "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF"
+   ]
+  },
+  {
+   "repo": "unsloth/gemma-4-26B-A4B-it-GGUF",
+   "blurb": "Fast for its size: only part of it runs per word.",
+   "good_for": [
+    "chat",
+    "speed"
+   ],
+   "sources": [
+    "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF"
+   ]
+  },
+  {
+   "repo": "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF",
+   "blurb": "Fast mixture-of-experts model, good first test.",
+   "good_for": [
+    "chat",
+    "speed"
+   ],
+   "sources": [
+    "https://huggingface.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF"
+   ]
+  },
+  {
+   "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
+   "blurb": "Good at tools and agent work.",
+   "good_for": [
+    "tasks",
+    "tools",
+    "code"
+   ],
+   "sources": [
+    "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF"
+   ]
+  },
+  {
+   "repo": "NousResearch/Hermes-4.3-36B-GGUF",
+   "blurb": "Large general model.",
+   "good_for": [
+    "chat",
+    "writing"
+   ],
+   "sources": [
+    "https://huggingface.co/NousResearch/Hermes-4.3-36B-GGUF"
+   ]
+  },
+  {
+   "repo": "unsloth/Qwen3.5-122B-A10B-GGUF",
+   "blurb": "Very large. Needs several computers pooled together.",
+   "good_for": [
+    "reasoning",
+    "pooling"
+   ],
+   "sources": [
+    "https://huggingface.co/unsloth/Qwen3.5-122B-A10B-GGUF"
+   ]
+  }
+ ],
+ "trending": [
+  {
+   "repo": "unsloth/Inkling-2-Mini-GGUF",
+   "downloads": 2445633,
+   "likes": 1370,
+   "created": "2026-11-20"
+  },
+  {
+   "repo": "prism-ml/Ternary-Bonsai-2.5-27B-GGUF",
+   "downloads": 59366,
+   "likes": 322,
+   "created": "2026-11-24"
+  },
+  {
+   "repo": "nari-labs/Qwen3.8-27B-NariQ-GGUF",
+   "downloads": 14337,
+   "likes": 159,
+   "created": "2026-11-20"
+  },
+  {
+   "repo": "DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF",
+   "downloads": 1873950,
+   "likes": 4375,
+   "created": "2026-09-01"
+  },
+  {
+   "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF",
+   "downloads": 4628141,
+   "likes": 2649,
+   "created": "2026-08-16"
+  },
+  {
+   "repo": "DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF",
+   "downloads": 2236527,
+   "likes": 2186,
+   "created": "2026-07-19"
+  },
+  {
+   "repo": "nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-4GB",
+   "downloads": 196058,
+   "likes": 1545,
+   "created": "2026-10-05"
+  },
+  {
+   "repo": "sensenova/SenseNova-Loop-9B-GGUF",
+   "downloads": 117621,
+   "likes": 289,
+   "created": "2026-11-18"
+  },
+  {
+   "repo": "AtomicChat/Inkling-2-Mini-GGUF",
+   "downloads": 177045,
+   "likes": 160,
+   "created": "2026-11-20"
+  },
+  {
+   "repo": "AtomicChat/Ternary-Bonsai-2.5-27B-Uncensored-GGUF",
+   "downloads": 4055,
+   "likes": 83,
+   "created": "2026-11-24"
+  },
+  {
+   "repo": "orcarouter/Qwen3.8-27B-Uncensored-GGUF",
+   "downloads": 120587,
+   "likes": 2040,
+   "created": "2026-08-16"
+  },
+  {
+   "repo": "CaryPalmer/Kintsugi-27B",
+   "downloads": 14793,
+   "likes": 118,
+   "created": "2026-11-20"
+  }
+ ],
+ "new": [
+  {
+   "repo": "Edge0/Edge0-145B-NVFP4",
+   "downloads": 104914,
+   "likes": 834,
+   "created": "2026-11-11"
+  },
+  {
+   "repo": "AtomicChat/DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-GGUF",
+   "downloads": 246532,
+   "likes": 654,
+   "created": "2026-10-28"
+  },
+  {
+   "repo": "ccore/Qwen3.5-4B-GLB-3D-Coder",
+   "downloads": 75378,
+   "likes": 411,
+   "created": "2026-11-01"
+  },
+  {
+   "repo": "AtomicChat/LFM3-1.7B-Uncensored-GGUF",
+   "downloads": 193591,
+   "likes": 359,
+   "created": "2026-10-27"
+  },
+  {
+   "repo": "mradermacher/DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic-GGUF",
+   "downloads": 1194651,
+   "likes": 309,
+   "created": "2026-11-12"
+  },
+  {
+   "repo": "DavidAU/Qwen3.8-27B-Ultimate-Heretic-Uncensored-Turbo-Brilliance-50x-AGI-NEO-GGUF",
+   "downloads": 159301,
+   "likes": 282,
+   "created": "2026-11-04"
+  },
+  {
+   "repo": "ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-GGUF",
+   "downloads": 592600,
+   "likes": 253,
+   "created": "2026-11-02"
+  },
+  {
+   "repo": "AngelSlim/Hy4-flash-GGUF",
+   "downloads": 154473,
+   "likes": 240,
+   "created": "2026-11-16"
+  },
+  {
+   "repo": "LiquidAI/LFM3-Omni-2B-GGUF",
+   "downloads": 574520,
+   "likes": 205,
+   "created": "2026-10-27"
+  },
+  {
+   "repo": "DavidAU/Qwen3.8-40B-Ultimate-Heretic-Uncensored-Turbo-Brilliance-50x-AGI-NEO-GGUF",
+   "downloads": 71161,
+   "likes": 153,
+   "created": "2026-11-10"
+  },
+  {
+   "repo": "harness-hub/Qwen3.8-27B-pi-adapted-GGUF",
+   "downloads": 13632,
+   "likes": 137,
+   "created": "2026-11-16"
+  },
+  {
+   "repo": "nokeepai/Inkling-2-Mini-Unbound-GGUF",
+   "downloads": 122028,
+   "likes": 99,
+   "created": "2026-11-21"
+  }
+ ],
+ "popular": [
+  {
+   "repo": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF",
+   "downloads": 7683242,
+   "likes": 1340,
+   "created": "2026-09-07"
+  },
+  {
+   "repo": "Serveurperso/YuE2-GGUF",
+   "downloads": 5216198,
+   "likes": 33,
+   "created": "2026-09-12"
+  },
+  {
+   "repo": "ornith-ai/Ornith-1.5-9B-GGUF",
+   "downloads": 5086272,
+   "likes": 824,
+   "created": "2026-08-19"
+  },
+  {
+   "repo": "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF",
+   "downloads": 4250081,
+   "likes": 149,
+   "created": "2026-05-19"
+  },
+  {
+   "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+   "downloads": 4051762,
+   "likes": 1978,
+   "created": "2026-08-26"
+  },
+  {
+   "repo": "SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF",
+   "downloads": 4051113,
+   "likes": 1196,
+   "created": "2026-10-02"
+  },
+  {
+   "repo": "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
+   "downloads": 3718592,
+   "likes": 686,
+   "created": "2026-08-18"
+  },
+  {
+   "repo": "ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF",
+   "downloads": 3682279,
+   "likes": 686,
+   "created": "2026-10-23"
+  },
+  {
+   "repo": "cdiamond/Qwen3.8-27B-iMatrix-NVFP4-MTP-GGUF",
+   "downloads": 3335303,
+   "likes": 55,
+   "created": "2026-08-17"
+  },
+  {
+   "repo": "farbodtavakkoli/OTel-2.0-Decision-26B-A4B-4bit",
+   "downloads": 3193842,
+   "likes": 9,
+   "created": "2026-10-06"
+  },
+  {
+   "repo": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+   "downloads": 3049815,
+   "likes": 1086,
+   "created": "2026-05-11"
+  },
+  {
+   "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+   "downloads": 2560418,
+   "likes": 228,
+   "created": "2025-10-31"
+  }
+ ],
+ "lists": [
+  {
+   "id": "uncensored-tier-2026-11",
+   "title": "Uncensored models tier list",
+   "by": "A community tier list shared on X",
+   "asOf": "November 2026",
+   "added": "2026-11-25",
+   "expires": "2027-01-25",
+   "about": "Open models with their refusals removed (abliterated, heretic or trained uncensored), ranked on how much ability they kept, how often they are downloaded and what people actually run. S is best. Potluck checks each model's sizes against your computers when you open it.",
+   "tiers": [
+    {
+     "tier": "S",
+     "items": [
+      {
+       "name": "Qwen3.8-27B Abliterated",
+       "maker": "Alibaba",
+       "note": "The most downloaded uncensored model on Hugging Face; the usual first choice.",
+       "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF"
+      },
+      {
+       "name": "DeepSeek V4.1 Flash Uncensored",
+       "maker": "DeepSeek",
+       "note": "Very large (748B) mixture-of-experts with vision; needs many computers.",
+       "repo": "AtomicChat/DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-GGUF"
+      },
+      {
+       "name": "GLM-5.3 Abliterated",
+       "maker": "Z.ai",
+       "note": "Top of the uncensored intelligence rankings; refusals cut from 90% to 3%.",
+       "repo": "huihui-ai/Huihui-GLM-5.3-abliterated-GGUF"
+      },
+      {
+       "name": "Qwen3.6-35B-A3B Uncensored",
+       "maker": "Alibaba",
+       "note": "Only 3B parameters work per word, so it is fast; strong at tools and agent work.",
+       "repo": "HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive"
+      }
+     ]
+    },
+    {
+     "tier": "A",
+     "items": [
+      {
+       "name": "Gemma 4 12B Heretic",
+       "maker": "Google",
+       "note": "Best for small graphics cards; reported 99 refusals down to 0 with little quality lost (KL 0.028).",
+       "search": "gemma-4-12B heretic"
+      },
+      {
+       "name": "Kimi K2.6 Abliterated Heretic",
+       "maker": "Moonshot",
+       "note": "1T-parameter mixture-of-experts with vision; needs a rack of computers.",
+       "search": "Kimi-K2.6 abliterated"
+      },
+      {
+       "name": "Hermes 4.3 36B",
+       "maker": "Nous",
+       "note": "Trained without refusals rather than edited afterwards; long context.",
+       "repo": "NousResearch/Hermes-4.3-36B-GGUF"
+      },
+      {
+       "name": "Mistral Small 3.2 Abliterated",
+       "maker": "Mistral",
+       "note": "A favourite for fiction and role-play, on an older base.",
+       "search": "Mistral-Small-3.2 abliterated"
+      },
+      {
+       "name": "Gemma 4 26B-A4B Abliterated",
+       "maker": "Google",
+       "note": "Fast for its quality on modest graphics cards.",
+       "search": "gemma-4-26B-A4B abliterated"
+      }
+     ]
+    },
+    {
+     "tier": "B",
+     "items": [
+      {
+       "name": "Qwen3.5-9B Heretic",
+       "maker": "Alibaba",
+       "note": "Best quality under 8 GB (KL 0.08).",
+       "search": "Qwen3.5-9B heretic"
+      },
+      {
+       "name": "Qwen3.5-4B Uncensored (HauhauCS)",
+       "maker": "Alibaba",
+       "note": "For computers without a graphics card; about 3 GB (KL 0.02).",
+       "repo": "HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive"
+      },
+      {
+       "name": "Gemma 4 E4B Heretic",
+       "maker": "Google",
+       "note": "Runs in 5 GB: phones and old laptops.",
+       "search": "gemma-4-E4B heretic"
+      },
+      {
+       "name": "MiniMax M3",
+       "maker": "MiniMax",
+       "note": "Unfiltered through MiniMax's paid service; no version to run at home yet."
+      },
+      {
+       "name": "Llama 3.3 70B Abliterated",
+       "maker": "Meta",
+       "note": "Still sharp, but needs about 40 GB and its base is old.",
+       "repo": "bartowski/Llama-3.3-70B-Instruct-abliterated-GGUF"
+      }
+     ]
+    },
+    {
+     "tier": "C",
+     "items": [
+      {
+       "name": "Dolphin 3",
+       "maker": "Cognitive",
+       "note": "Coherent fine-tune, but its bases are two generations old.",
+       "search": "Dolphin3"
+      },
+      {
+       "name": "Venice Uncensored 1.2",
+       "maker": "Venice",
+       "note": "Built on Dolphin; fine, not leading.",
+       "search": "venice uncensored"
+      },
+      {
+       "name": "Llama 3.1 8B Abliterated",
+       "maker": "Meta",
+       "note": "The old starting point everyone began with.",
+       "repo": "mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated-GGUF"
+      },
+      {
+       "name": "Gemma 4 E2B",
+       "maker": "Google",
+       "note": "Runs anywhere, but it is not clever.",
+       "repo": "unsloth/gemma-4-E2B-it-GGUF"
+      }
+     ]
+    },
+    {
+     "tier": "D",
+     "items": [
+      {
+       "name": "Huihui Qwen3.5-4B Abliterated",
+       "maker": "Alibaba",
+       "note": "Badly damaged by the edit (KL 3.65): avoid.",
+       "repo": "mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF"
+      },
+      {
+       "name": "Dolphin 1.x / 2.x on Llama 3.1",
+       "maker": "Cognitive",
+       "note": "First-generation edits, replaced by 2026 retrains."
+      },
+      {
+       "name": "Llama 2 fine-tunes / Vicuna",
+       "maker": "Meta",
+       "note": "Still in 2026 listicles; three generations behind."
+      },
+      {
+       "name": "Any \"uncensored\" model with no KL number",
+       "maker": "",
+       "note": "If the model page does not say how much quality the edit cost, skip it."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

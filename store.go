@@ -84,7 +84,7 @@ func (h *Host) recommended() string {
 }
 
 // recommendedRepo is the model Potluck suggests first when no catalog can be read at all; the
-// catalog built into Potluck (catalog/models.json, made from catalog/picks.json) always has
+// catalog built into Potluck (catalog/models-v2.json, made from catalog/picks.json) always has
 // picks, so this is a last resort, not a second list to keep in step.
 const recommendedRepo = "AtomicChat/Inkling-2-Mini-Uncensored-GGUF"
 
