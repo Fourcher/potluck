@@ -119,6 +119,8 @@ type Session struct {
 	// System: the task's instructions as the model first read them (taskSystem), kept so
 	// every later step, and the task after a restart, starts with exactly the same text.
 	System string `json:"system,omitempty"`
+	// Report sums up the last run (taskReport).
+	Report string `json:"report,omitempty"`
 
 	lastPrompt  int // tokens the model read last time, to know when to make room
 	lastPromptN int // how many messages the task had then

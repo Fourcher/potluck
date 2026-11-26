@@ -394,3 +394,20 @@ func TestRememberReachesNextTask(t *testing.T) {
 		t.Fatal("a project's note reached another project")
 	}
 }
+
+func TestTaskReport(t *testing.T) {
+	msgs := []SMsg{{Role: "user", Content: "fix it"},
+		{Role: "assistant", Calls: []SToolCall{{ID: "a", Name: "edit_file", Args: `{"path":"main.go"}`}, {ID: "b", Name: "run_command", Args: `{"command":"go test ./..."}`}}},
+		{Role: "tool", CallID: "a", State: "ok", Content: "Changed."},
+		{Role: "tool", CallID: "b", State: "ok", Content: "Exit code 1, 2.0 s, in /p\nFAIL"},
+		{Role: "assistant", Calls: []SToolCall{{ID: "c", Name: "run_command", Args: `{"command":"git push"}`}, {ID: "d", Name: "ask_user", Args: `{"question":"Which branch?"}`}}},
+		{Role: "tool", CallID: "c", State: "denied", Content: awayAnswer("run", 30*time.Minute)},
+		{Role: "tool", CallID: "d", State: "ok", Content: awayAnswer("ask", 30*time.Minute)},
+		{Role: "assistant", Content: "Done."}}
+	r := taskReport(msgs, 90*time.Minute, "idle", "")
+	for _, want := range []string{"Finished after 1.5 hours, 3 steps, 1 command run.", "Files changed (1):\n- main.go", "Commands that failed (1):\n- go test ./...", "Decided without you (nobody answered) (1):\n- Which branch?", "Waiting for your approval (not done) (1):\n- run_command git push"} {
+		if !strings.Contains(r, want) {
+			t.Fatalf("report misses %q:\n%s", want, r)
+		}
+	}
+}

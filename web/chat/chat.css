@@ -246,6 +246,8 @@ body:not(.side-closed) #side-open{display:none}
 .tool pre.cmd { white-space: pre-wrap; word-break: break-word; background: var(--code-bg, rgba(127,127,127,.12)); padding: 8px 10px; border-radius: 6px; margin: 8px 0 6px; font-size: 13px; max-height: 320px; overflow: auto; }
 
 /* A task's question: Yes / No / your own words */
+.report{border:1px solid var(--line);border-radius:14px;padding:12px 16px;margin:10px 0;background:var(--card)}
+.report pre{white-space:pre-wrap;margin:6px 0 0;font:inherit;font-size:.92em}
 .qcard{border:1px solid var(--accent);border-radius:14px;padding:14px 16px;margin:10px 0;background:color-mix(in srgb,var(--accent) 7%,transparent)}
 .qcard .qhead{display:flex;gap:8px;align-items:center;margin-bottom:8px}
 .qcard pre.cmd{max-height:260px;overflow:auto;white-space:pre-wrap}

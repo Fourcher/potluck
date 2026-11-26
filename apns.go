@@ -171,7 +171,7 @@ func (h *Host) pushTaskEnd(s *Session) {
 		return
 	}
 	s.mu.Lock()
-	title, status, why, id := s.Title, s.Status, s.Error, s.ID
+	title, status, why, id, report := s.Title, s.Status, s.Error, s.ID, s.Report
 	answer := ""
 	for i := len(s.Messages) - 1; i >= 0; i-- {
 		if m := s.Messages[i]; m.Role == "assistant" && strings.TrimSpace(m.Content) != "" {
@@ -183,6 +183,9 @@ func (h *Host) pushTaskEnd(s *Session) {
 	head, body := "Potluck finished a task", answer
 	if status == "error" {
 		head, body = "A Potluck task stopped", why
+	}
+	if first, _, _ := strings.Cut(report, "\n"); first != "" && status != "error" {
+		body = first + "\n" + body // "Finished after 3.2 hours, 140 steps, 38 commands."
 	}
 	payload, _ := json.Marshal(map[string]any{
 		"aps": map[string]any{

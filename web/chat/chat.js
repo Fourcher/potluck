@@ -271,7 +271,7 @@ async function taskLoad() {
   if (!isTask() || !S.cur.session) return;
   try {
     const ss = await taskApi("sessions/" + S.cur.session);
-    S.cur.messages = (ss.messages || []).map(fromSMsg); S.task = { status: ss.status, error: ss.error, q: ss.question, live: null };
+    S.cur.messages = (ss.messages || []).map(fromSMsg); S.task = { status: ss.status, error: ss.error, q: ss.question, live: null, report: ss.report || "" };
     drawThread(); scrollDown(true);
   } catch (e) { S.task = { status: "error", error: "This task is gone from Potluck: " + e.message }; }
   taskFollow();
@@ -304,6 +304,8 @@ function taskFollow() {
       if (t.q) { $("#input").focus(); notifyQuestion(t.q); }
     } else if (ev.type === "status") {
       t.status = ev.status; t.error = ev.error; drawTools(); drawThread();
+      // A run ended: read the task again for its report.
+      if (ev.status !== "working" && ev.status !== "waiting") taskApi("sessions/" + id).then(ss => { if (S.cur === chat && S.task) { S.task.report = ss.report || ""; drawThread(); } }).catch(() => { });
     }
   };
 }
@@ -516,6 +518,8 @@ function drawThread() {
     if (S.task.q) h += questionCard(S.task.q);
     else if (S.task.status === "working" && !S.task.live) h += `<div class="wrap"><div class="waiting"><span class="spin"></span><span>${esc(S.task.error || "Working on it. You can close this page; the task keeps going in Potluck.")}</span></div></div>`;
     else if (S.task.status === "error" || S.task.status === "stopped") h += `<div class="wrap"><div class="err">${esc(S.task.error || (S.task.status === "stopped" ? "Stopped." : "Something went wrong."))}</div></div>`;
+    // What the last run did, from Potluck's own record of it (not the model's word).
+    if (S.task.report && S.task.status !== "working" && !S.task.q) h += `<div class="wrap"><div class="report"><b>Report</b><pre>${esc(S.task.report)}</pre></div></div>`;
   }
   el.innerHTML = h;
 }

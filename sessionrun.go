@@ -36,6 +36,9 @@ func (st *sessionStore) maxSteps(s *Session) int {
 func (st *sessionStore) run(ctx context.Context, s *Session) {
 	s.setStatus("working", "")
 	began := time.Now()
+	s.mu.Lock()
+	from := len(s.Messages) - 1 // this run's work starts at the message that set it going
+	s.mu.Unlock()
 	defer func() {
 		browsers.release(s.ID)
 		s.mu.Lock()
@@ -47,6 +50,9 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 		} else if status == "working" {
 			s.setStatus("idle", "")
 		}
+		s.mu.Lock()
+		s.Report = taskReport(s.Messages[max(from, 0):], time.Since(began), s.Status, s.Error)
+		s.mu.Unlock()
 		st.save(s)
 		// A task that worked a while ended by itself: say so on the phone. Not one the person
 		// stopped, and not a short one they were watching.
@@ -1046,4 +1052,105 @@ func compactLog(old []SMsg, limit int) string {
 		head += fmt.Sprintf("… (%d older steps left out for room) …\n", left)
 	}
 	return head + strings.Join(tail, "")
+}
+
+// taskReport sums up one run of a task from its own log (no model asked): how long it took,
+// the files it changed, the commands that failed, what it decided because nobody answered and
+// what waited for approval. Shown at the top of the task and sent with its end alert.
+func taskReport(msgs []SMsg, took time.Duration, status, errText string) string {
+	calls := map[string]SToolCall{}
+	steps := 0
+	for _, m := range msgs {
+		if m.Role == "assistant" {
+			steps++
+			for _, c := range m.Calls {
+				calls[c.ID] = c
+			}
+		}
+	}
+	arg := func(c SToolCall, k string) string {
+		var a map[string]any
+		_ = json.Unmarshal([]byte(c.Args), &a)
+		v, _ := a[k].(string)
+		return v
+	}
+	var changed, failed, decided, waiting []string
+	seen := map[string]bool{}
+	commands := 0
+	for _, m := range msgs {
+		if m.Role != "tool" {
+			continue
+		}
+		c := calls[m.CallID]
+		switch {
+		case strings.Contains(m.Content, "(No answer within") || strings.Contains(m.Content, "(No answer: the person"):
+			if c.Name == "ask_user" {
+				decided = append(decided, trimTo(arg(c, "question"), 160))
+			} else {
+				waiting = append(waiting, c.Name+" "+trimTo(firstNonEmpty(arg(c, "command"), arg(c, "path"), arg(c, "url"), c.Args), 160))
+			}
+		case (c.Name == "edit_file" || c.Name == "write_file") && m.State == "ok":
+			if p := arg(c, "path"); p != "" && !seen[p] {
+				seen[p] = true
+				changed = append(changed, p)
+			}
+		case c.Name == "run_command" || c.Name == "run_applescript":
+			commands++
+			if m.State == "error" || (m.State == "ok" && !strings.HasPrefix(m.Content, "Exit code 0,")) {
+				failed = append(failed, trimTo(firstNonEmpty(arg(c, "command"), arg(c, "script")), 160))
+			}
+		}
+	}
+	var b strings.Builder
+	outcome := map[string]string{"idle": "Finished", "error": "Stopped with an error", "stopped": "Stopped"}[status]
+	if outcome == "" {
+		outcome = status
+	}
+	plural := func(n int, one string) string {
+		if n == 1 {
+			return "1 " + one
+		}
+		return fmt.Sprintf("%d %ss", n, one)
+	}
+	fmt.Fprintf(&b, "%s after %s, %s, %s run.", outcome, roundDur(took), plural(steps, "step"), plural(commands, "command"))
+	if status == "error" && errText != "" {
+		fmt.Fprintf(&b, " %s", trimTo(errText, 300))
+	}
+	list := func(title string, xs []string) {
+		if len(xs) == 0 {
+			return
+		}
+		fmt.Fprintf(&b, "\n%s (%d):", title, len(xs))
+		for i, x := range xs {
+			if i == 12 {
+				fmt.Fprintf(&b, "\n- and %d more", len(xs)-i)
+				break
+			}
+			fmt.Fprintf(&b, "\n- %s", x)
+		}
+	}
+	list("Files changed", changed)
+	list("Commands that failed", failed)
+	list("Decided without you (nobody answered)", decided)
+	list("Waiting for your approval (not done)", waiting)
+	return b.String()
+}
+
+func firstNonEmpty(xs ...string) string {
+	for _, x := range xs {
+		if strings.TrimSpace(x) != "" {
+			return x
+		}
+	}
+	return ""
+}
+
+func roundDur(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%d seconds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%d minutes", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%.1f hours", d.Hours())
 }
