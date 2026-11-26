@@ -121,6 +121,7 @@ type Host struct {
 	pushErr        string               // the last problem sending a phone alert
 	pushTestAnswer string               // what the phone answered to the last test alert
 	vision         bool                 // the running model can see images
+	waking         bool                 // a resting model is being loaded again (wake)
 	guardWhy       string               // why the guard stopped the model, shown instead of "stopped"
 	guardSeen      map[string]time.Time // each computer's last guard event acted on
 	pending        map[string]*Pending
@@ -760,10 +761,11 @@ func (h *Host) watchLoop() {
 		}
 		h.mu.Unlock()
 		switch {
+		// Checked with the same plan start makes (a model file on one computer runs there).
 		case len(gone) > 0 && model != nil:
 			why := strings.Join(gone, " and ") + " stopped lending"
 			h.Stop()
-			if info != nil && h.plan(info, h.soloChoice()).Fits {
+			if info != nil && h.planFor(info, h.soloChoice(), model.Node).Fits {
 				_ = h.Start(*model, ctxSize, h.soloChoice())
 			} else {
 				h.mu.Lock()
@@ -772,7 +774,7 @@ func (h *Host) watchLoop() {
 				h.mu.Unlock()
 			}
 		case paused != nil && phase == "idle" && pInfo != nil:
-			if h.plan(pInfo, h.soloChoice()).Fits {
+			if h.planFor(pInfo, h.soloChoice(), paused.Node).Fits {
 				_ = h.Start(*paused, pCtx, h.soloChoice())
 			}
 		}
@@ -1182,10 +1184,17 @@ func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 	running := h.cluster.Phase == "running"
 	if h.cancel != nil {
 		h.cancel()
-		h.cancel = nil
 	}
+	// This start's number and its cancel are set now, before the old model is stopped: a
+	// Stop meanwhile cancels this start and moves the number on, and this start sees that
+	// below instead of loading after the person said stop.
+	ctx, cancel := context.WithCancel(context.Background())
+	h.cancel = cancel
 	h.startGen++ // whatever an earlier start still does no longer touches the cluster
+	gen := h.startGen
 	prev := h.startDone
+	finished := make(chan struct{})
+	h.startDone = finished
 	h.paused, h.pausedInfo, h.pauseWhy = nil, nil, "" // what runs now was chosen: no old model comes back
 	h.cluster = ClusterState{Phase: "starting", Model: &model, Since: time.Now()}
 	h.mu.Unlock()
@@ -1200,13 +1209,14 @@ func (h *Host) Start(model ModelRef, ctxSize int, solo string) error {
 		h.vision = false
 		h.mu.Unlock()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	h.mu.Lock()
-	h.cancel = cancel
-	h.startGen++
-	gen := h.startGen
-	finished := make(chan struct{})
-	h.startDone = finished
+	if h.startGen != gen {
+		// Stopped (or replaced) while the old model was being stopped.
+		h.mu.Unlock()
+		cancel()
+		close(finished)
+		return errors.New("stopped")
+	}
 	h.cluster = ClusterState{Phase: "starting", Model: &model, Since: time.Now()}
 	h.guardWhy = ""
 	h.lastCtx, h.lastSolo, h.stale = ctxSize, solo, false
@@ -1720,12 +1730,21 @@ func (h *Host) Stop() {
 		return
 	}
 	h.startGen++
+	gen := h.startGen
 	prev := h.startDone
 	h.cluster.Phase = "stopping"
 	h.mu.Unlock()
+	// Tell the computers first: "stop" also cancels a download or an engine install the start
+	// is waiting on, which a cancelled start cannot interrupt by itself (its calls run to
+	// their own end). Then wait for the start to finish, and stop whatever it started meanwhile.
+	h.stopAll()
 	waitStart(prev)
 	h.stopAll()
 	h.mu.Lock()
+	if h.startGen != gen {
+		h.mu.Unlock() // a new start began meanwhile: it owns the cluster now
+		return
+	}
 	h.cluster = ClusterState{Phase: "idle"}
 	h.vision = false
 	h.mu.Unlock()
