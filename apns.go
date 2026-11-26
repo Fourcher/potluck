@@ -146,12 +146,6 @@ func (h *Host) pushAlert(q *Question, task string) (sent int, first error) {
 	if c.Push == nil || c.Push.KeyPath == "" {
 		return 0, nil
 	}
-	problem := func(err error) {
-		h.pushProblem(err)
-		if first == nil {
-			first = err
-		}
-	}
 	body := q.Title
 	if q.Detail != "" && q.Kind != "plan" {
 		body += "\n" + trimTo(strings.TrimSpace(q.Detail), 180)
@@ -166,9 +160,54 @@ func (h *Host) pushAlert(q *Question, task string) (sent int, first error) {
 		},
 		"session": q.Session, "question": q.ID,
 	})
+	return h.pushSend(payload, q.ID, h.pushProblem)
+}
+
+// pushTaskEnd tells the paired phones that a task finished or stopped with an error, with the
+// start of its answer or the reason: work left running at night is checked from the phone.
+func (h *Host) pushTaskEnd(s *Session) {
+	c := h.cfg.Get()
+	if c.Push == nil || c.Push.KeyPath == "" {
+		return
+	}
+	s.mu.Lock()
+	title, status, why, id := s.Title, s.Status, s.Error, s.ID
+	answer := ""
+	for i := len(s.Messages) - 1; i >= 0; i-- {
+		if m := s.Messages[i]; m.Role == "assistant" && strings.TrimSpace(m.Content) != "" {
+			answer = m.Content
+			break
+		}
+	}
+	s.mu.Unlock()
+	head, body := "Potluck finished a task", answer
+	if status == "error" {
+		head, body = "A Potluck task stopped", why
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"aps": map[string]any{
+			"alert":     map[string]string{"title": head, "subtitle": title, "body": trimTo(strings.TrimSpace(body), 240)},
+			"category":  "POTLUCK_DONE",
+			"sound":     "default",
+			"thread-id": id,
+		},
+		"session": id,
+	})
+	_, _ = h.pushSend(payload, "done-"+id, h.pushProblem)
+}
+
+// pushSend sends one alert to every paired phone that takes alerts.
+func (h *Host) pushSend(payload []byte, collapse string, problem func(error)) (sent int, first error) {
+	c := h.cfg.Get()
+	report := func(err error) {
+		problem(err)
+		if first == nil {
+			first = err
+		}
+	}
 	tok, err := apnsToken(*c.Push)
 	if err != nil {
-		problem(err)
+		report(err)
 		return 0, first
 	}
 	for id, p := range c.Phones {
@@ -176,7 +215,7 @@ func (h *Host) pushAlert(q *Question, task string) (sent int, first error) {
 			continue
 		}
 		env := p.PushEnv
-		res, b, err := h.apnsSend(env, p.PushToken, tok, c.Push.Topic, q.ID, payload)
+		res, b, err := h.apnsSend(env, p.PushToken, tok, c.Push.Topic, collapse, payload)
 		if err == nil && res == 400 && strings.Contains(string(b), "BadDeviceToken") {
 			// A token from the other push server (a test build talks to Apple's sandbox, an App
 			// Store build to production). Try the other one and remember which worked.
@@ -184,7 +223,7 @@ func (h *Host) pushAlert(q *Question, task string) (sent int, first error) {
 			if env == "development" {
 				other = "production"
 			}
-			if r2, b2, err2 := h.apnsSend(other, p.PushToken, tok, c.Push.Topic, q.ID, payload); err2 == nil && r2 == 200 {
+			if r2, b2, err2 := h.apnsSend(other, p.PushToken, tok, c.Push.Topic, collapse, payload); err2 == nil && r2 == 200 {
 				h.cfg.Update(func(c *Config) { c.editPhone(id, func(p *PhoneKey) { p.PushEnv = other }) })
 				sent++
 				continue
@@ -193,7 +232,7 @@ func (h *Host) pushAlert(q *Question, task string) (sent int, first error) {
 			}
 		}
 		if err != nil {
-			problem(err)
+			report(err)
 			continue
 		}
 		if res == 200 {
@@ -203,7 +242,7 @@ func (h *Host) pushAlert(q *Question, task string) (sent int, first error) {
 				c.editPhone(id, func(p *PhoneKey) { p.PushToken = "" })
 			})
 		} else {
-			problem(fmt.Errorf("Apple refused the alert (%d): %s", res, strings.TrimSpace(string(b))))
+			report(fmt.Errorf("Apple refused the alert (%d): %s", res, strings.TrimSpace(string(b))))
 		}
 	}
 	return sent, first

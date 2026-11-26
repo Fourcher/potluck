@@ -35,6 +35,7 @@ func (st *sessionStore) maxSteps(s *Session) int {
 
 func (st *sessionStore) run(ctx context.Context, s *Session) {
 	s.setStatus("working", "")
+	began := time.Now()
 	defer func() {
 		browsers.release(s.ID)
 		s.mu.Lock()
@@ -47,6 +48,14 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 			s.setStatus("idle", "")
 		}
 		st.save(s)
+		// A task that worked a while ended by itself: say so on the phone. Not one the person
+		// stopped, and not a short one they were watching.
+		s.mu.Lock()
+		end, kind := s.Status, s.Kind
+		s.mu.Unlock()
+		if st.notifyEnd != nil && kind != "helper" && (end == "idle" || end == "error") && time.Since(began) >= taskEndAlertAfter {
+			go st.notifyEnd(s)
+		}
 	}()
 	cuts := 0 // answers in a row cut off at the length limit
 	for steps := 0; ; steps++ {
@@ -802,6 +811,9 @@ func (st *sessionStore) fitResult(s *Session, call SToolCall, out string) string
 	}
 	return head + fmt.Sprintf("\n\n[… %s left out here: the result was too long for the model's memory.%s]\n\n", humanBytes(int64(len(out)-len(head)-len(tail))), saved) + tail
 }
+
+// taskEndAlertAfter: a task that ran at least this long sends an alert when it ends.
+var taskEndAlertAfter = 2 * time.Minute
 
 // taskOutputPrefix is how a task names its own saved results (fitResult) to read_file.
 const taskOutputPrefix = "task-output/"

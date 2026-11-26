@@ -154,11 +154,12 @@ type SEvent struct {
 }
 
 type sessionStore struct {
-	mu       sync.Mutex
-	dir      string
-	host     *Host
-	sessions map[string]*Session
-	notify   func(q *Question, s *Session) // phones and other alerts (set by the host)
+	mu        sync.Mutex
+	dir       string
+	host      *Host
+	sessions  map[string]*Session
+	notify    func(q *Question, s *Session) // phones and other alerts (set by the host)
+	notifyEnd func(s *Session)              // a task finished or stopped with an error
 }
 
 func newSessionStore(h *Host, data string) *sessionStore {
@@ -536,6 +537,7 @@ func (h *Host) sessionStore() *sessionStore {
 	h.sessOnce.Do(func() {
 		h.sess = newSessionStore(h, h.a.dir)
 		h.sess.notify = h.pushQuestion // paired phones hear about every question (apns.go)
+		h.sess.notifyEnd = h.pushTaskEnd
 	})
 	return h.sess
 }

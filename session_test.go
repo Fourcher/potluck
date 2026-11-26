@@ -353,3 +353,23 @@ func TestTaskInstructionsStayTheSame(t *testing.T) {
 		t.Fatal("approve-everything did not reach the instructions")
 	}
 }
+
+// A task that worked a while tells the phones when it ends; a stopped one does not.
+func TestTaskEndAlert(t *testing.T) {
+	old := taskEndAlertAfter
+	taskEndAlertAfter = 0
+	t.Cleanup(func() { taskEndAlertAfter = old })
+	_, st := withFakeModel(t, "text:all done")
+	ended := make(chan string, 2)
+	st.notifyEnd = func(s *Session) { ended <- s.Status }
+	s := st.create(nil, Policy{})
+	_ = st.send(s, "go")
+	select {
+	case got := <-ended:
+		if got != "idle" {
+			t.Fatalf("alert for status %s", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no alert when the task finished")
+	}
+}
