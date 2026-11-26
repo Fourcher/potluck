@@ -123,6 +123,9 @@ type Session struct {
 	Report string `json:"report,omitempty"`
 	// Inbox: messages the person sent while the task worked, given to it at its next step.
 	Inbox []string `json:"inbox,omitempty"`
+	// Resumed: how often it carried on by itself after Potluck restarted (resumeInterrupted).
+	Resumed     int  `json:"resumed,omitempty"`
+	interrupted bool // Potluck restarted while it ran
 
 	lastPrompt  int // tokens the model read last time, to know when to make room
 	lastPromptN int // how many messages the task had then
@@ -176,12 +179,42 @@ func newSessionStore(h *Host, data string) *sessionStore {
 			if s.Status == "working" || s.Status == "waiting" {
 				s.Status, s.Error = "stopped", "Potluck restarted while this was running. Send a message to carry on."
 				s.Question = nil
+				s.interrupted = true
 			}
 			s.subs = map[chan SEvent]bool{}
 			st.sessions[s.ID] = &s
 		}
 	}
 	return st
+}
+
+// resumeInterrupted carries on with the tasks Potluck's restart cut off, once it is up again:
+// a task left running for the night should not end because the computer updated or rebooted.
+// Each task resumes by itself at most twice, so one that keeps bringing Potluck down does not
+// keep doing it. A call that was cut off gets "Stopped before it ran" (apiMessages) and the
+// model can make it again, asking again if it needs approval.
+var resumeAfter = time.Minute
+
+func (st *sessionStore) resumeInterrupted() {
+	time.Sleep(resumeAfter)
+	st.mu.Lock()
+	var list []*Session
+	for _, s := range st.sessions {
+		list = append(list, s)
+	}
+	st.mu.Unlock()
+	for _, s := range list {
+		s.mu.Lock()
+		ok := s.interrupted && s.Status == "stopped" && s.Resumed < 2 && !s.deleted
+		if ok {
+			s.interrupted = false
+			s.Resumed++
+		}
+		s.mu.Unlock()
+		if ok {
+			_ = st.send(s, "(Potluck restarted while you were working. Carry on with the task from where you were; redo any step that was cut off.)")
+		}
+	}
 }
 
 func (st *sessionStore) save(s *Session) {

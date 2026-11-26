@@ -473,3 +473,35 @@ func TestSessionRetriesModelFailure(t *testing.T) {
 		t.Fatalf("status %s, last %q, %d requests", status, last, n)
 	}
 }
+
+// A task cut off by a restart carries on by itself, at most twice.
+func TestResumeAfterRestart(t *testing.T) {
+	f, st := withFakeModel(t, "text:carried on", "text:again")
+	s := st.create(nil, Policy{})
+	s.Messages = []SMsg{{Role: "user", Content: "long job"}}
+	s.Status = "working"
+	st.save(s)
+	st2 := newSessionStore(st.host, st.host.a.dir) // as after a restart
+	old := resumeAfter
+	resumeAfter = 0
+	t.Cleanup(func() { resumeAfter = old })
+	st2.resumeInterrupted()
+	s2 := st2.sessions[s.ID]
+	waitStatus(t, s2, "idle")
+	s2.mu.Lock()
+	resumed := s2.Resumed
+	s2.mu.Unlock()
+	f.mu.Lock()
+	n := len(f.seen)
+	f.mu.Unlock()
+	if resumed != 1 || n != 1 {
+		t.Fatalf("resumed %d, %d requests", resumed, n)
+	}
+	st2.resumeInterrupted() // not interrupted again: nothing happens
+	time.Sleep(100 * time.Millisecond)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.seen) != 1 {
+		t.Fatal("a finished task was resumed again")
+	}
+}

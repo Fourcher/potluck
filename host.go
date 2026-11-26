@@ -225,6 +225,7 @@ func (h *Host) Run() error {
 	go h.helperLoop()
 	go h.crewWatch()
 	go h.crewKeep()
+	go h.sessionStore().resumeInterrupted() // tasks cut off by a restart carry on
 	return nil
 }
 
