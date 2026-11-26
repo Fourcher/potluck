@@ -46,6 +46,7 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 		}
 		st.save(s)
 	}()
+	cuts := 0 // answers in a row cut off at the length limit
 	for steps := 0; ; steps++ {
 		if ctx.Err() != nil {
 			return
@@ -66,6 +67,17 @@ func (st *sessionStore) run(ctx context.Context, s *Session) {
 			return
 		}
 		st.addMsg(s, msg)
+		if msg.cut && len(msg.Calls) == 0 {
+			// Cut off at the length limit, not finished. Ask it to carry on (the next step
+			// makes room first if the conversation is full); twice in a row, stop and say so.
+			if cuts++; cuts >= 2 {
+				s.setStatus("error", "The model's answers keep reaching the length limit before they are finished. Send a message to carry on, perhaps asking for shorter steps.")
+				return
+			}
+			st.addMsg(s, SMsg{Role: "user", Content: "(Your last answer was cut off by the length limit. Carry on from where it stopped.)"})
+			continue
+		}
+		cuts = 0
 		if len(msg.Calls) == 0 {
 			return
 		}
@@ -284,13 +296,23 @@ func (st *sessionStore) tools(ctx context.Context, s *Session) []toolSpec {
 		if proj != nil {
 			root = proj.Root
 		}
+		byName := map[string]MCPTool{}
 		for _, mt := range mcpTools(ctx, st.host.a.dir, root, servers) {
 			params := mt.InputSchema
 			if len(params) == 0 || !bytes.Contains(params, []byte(`"object"`)) {
 				params = json.RawMessage(`{"type":"object","properties":{}}`)
 			}
-			t = append(t, spec(mcpToolName(mt), trimTo("["+mt.Server+"] "+mt.Description, 1000), string(params)))
+			name := mcpToolName(mt)
+			for i := 2; byName[name].Name != ""; i++ { // two tools cut to the same name
+				suf := "_" + strconv.Itoa(i)
+				name = mcpToolName(mt)[:min(len(mcpToolName(mt)), 64-len(suf))] + suf
+			}
+			byName[name] = mt
+			t = append(t, spec(name, trimTo("["+mt.Server+"] "+mt.Description, 1000), string(params)))
 		}
+		s.mu.Lock()
+		s.mcpByName = byName
+		s.mu.Unlock()
 	}
 	return t
 }
@@ -345,7 +367,23 @@ func (st *sessionStore) apiMessages(s *Session) []map[string]any {
 			lastPic = i
 		}
 	}
+	// Every call the model made gets a result, in its place: a task stopped partway through
+	// a step, or Potluck restarting while a question was open, leaves calls without one, and
+	// a call with no result is refused by some engines and confuses the model.
+	var pending []string
+	answered := map[string]bool{}
+	closeStep := func() {
+		for _, id := range pending {
+			if !answered[id] {
+				out = append(out, map[string]any{"role": "tool", "tool_call_id": id, "content": "Stopped before it ran."})
+			}
+		}
+		pending = nil
+	}
 	for i, m := range s.Messages {
+		if m.Role != "tool" {
+			closeStep()
+		}
 		switch m.Role {
 		case "user":
 			if len(m.Images) > 0 {
@@ -369,6 +407,7 @@ func (st *sessionStore) apiMessages(s *Session) []map[string]any {
 				var calls []map[string]any
 				for _, c := range m.Calls {
 					calls = append(calls, map[string]any{"id": c.ID, "type": "function", "function": map[string]string{"name": c.Name, "arguments": c.Args}})
+					pending = append(pending, c.ID)
 				}
 				a["tool_calls"] = calls
 			}
@@ -377,9 +416,11 @@ func (st *sessionStore) apiMessages(s *Session) []map[string]any {
 			}
 			out = append(out, a)
 		case "tool":
+			answered[m.CallID] = true
 			out = append(out, map[string]any{"role": "tool", "tool_call_id": m.CallID, "content": m.Content})
 		}
 	}
+	closeStep()
 	return out
 }
 
@@ -480,6 +521,7 @@ func (st *sessionStore) complete(ctx context.Context, s *Session) (SMsg, error) 
 		}
 		if len(ch.Choices) > 0 && ch.Choices[0].Finish != nil && *ch.Choices[0].Finish != "" {
 			ended = true
+			msg.cut = *ch.Choices[0].Finish == "length"
 		}
 		if ch.Usage != nil {
 			s.mu.Lock()
@@ -680,20 +722,14 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 		}
 		if strings.HasPrefix(call.Name, "mcp__") {
 			s.mu.Lock()
-			var servers []string
-			for n, on := range s.Policy.Connectors {
-				if on {
-					servers = append(servers, n)
-				}
-			}
+			mt, ok := s.mcpByName[call.Name]
+			on := s.Policy.Connectors[mt.Server]
 			s.mu.Unlock()
-			for _, mt := range mcpTools(ctx, st.host.a.dir, root, servers) {
-				if mcpToolName(mt) == call.Name {
-					for _, c := range mcps.connectors(root) {
-						if c.Name == mt.Server {
-							raw, _ := json.Marshal(args)
-							return mcps.client(c).callTool(ctx, mt.Name, raw)
-						}
+			if ok && on {
+				for _, c := range mcps.connectors(root) {
+					if c.Name == mt.Server {
+						raw, _ := json.Marshal(args)
+						return mcps.client(c).callTool(ctx, mt.Name, raw)
 					}
 				}
 			}

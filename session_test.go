@@ -50,6 +50,13 @@ func (f *scriptModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		chunk(map[string]any{"content": t})
 		return
 	}
+	if t, ok := strings.CutPrefix(reply, "length:"); ok { // stopped at the length limit
+		chunk(map[string]any{"content": t})
+		b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{}, "finish_reason": "length"}}})
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		return
+	}
 	if t, ok := strings.CutPrefix(reply, "text:"); ok {
 		chunk(map[string]any{"content": t})
 	} else {
@@ -187,6 +194,7 @@ func TestSessionStopWhileWaiting(t *testing.T) {
 func TestPermissionScopes(t *testing.T) {
 	_, st := withFakeModel(t)
 	s := st.create(nil, Policy{Commands: "auto"})
+	s.mcpByName = map[string]MCPTool{"mcp__files__write": {Server: "files", Name: "write"}} // offered at the last step
 	for _, name := range []string{"browser_click", "screen_click", "mcp__files__write"} {
 		done := make(chan string, 1)
 		go func() {
@@ -222,5 +230,57 @@ func TestSessionStreamFailures(t *testing.T) {
 		if status != "error" || !strings.Contains(msg, tc.want) {
 			t.Fatalf("%s: status %s %q", tc.reply, status, msg)
 		}
+	}
+}
+
+// A connector whose name has spaces is approved by its own name, and a tool name the model
+// made up is refused.
+func TestConnectorToolNames(t *testing.T) {
+	_, st := withFakeModel(t)
+	mt := MCPTool{Server: "Read and Write Apple Notes", Name: "add_note"}
+	name := mcpToolName(mt)
+	s := st.create(nil, Policy{Commands: "auto"})
+	s.Grants.Connectors = map[string]bool{"Read and Write Apple Notes": true}
+	s.mcpByName = map[string]MCPTool{name: mt}
+	if no, _ := st.allowed(t.Context(), s, SToolCall{Name: name, Args: "{}"}, map[string]any{}); no != "" {
+		t.Fatalf("an approved connector was not let through: %q", no)
+	}
+	if no, _ := st.allowed(t.Context(), s, SToolCall{Name: "mcp__other__thing", Args: "{}"}, map[string]any{}); no == "" {
+		t.Fatal("a tool that was not offered ran")
+	}
+}
+
+// An answer cut off at the length limit is carried on, not taken as the end of the task.
+func TestSessionCarriesOnAfterLengthLimit(t *testing.T) {
+	f, st := withFakeModel(t, "length:first half", "text:second half")
+	s := st.create(nil, Policy{})
+	_ = st.send(s, "write it")
+	waitStatus(t, s, "idle")
+	f.mu.Lock()
+	n := len(f.seen)
+	f.mu.Unlock()
+	if n != 2 {
+		t.Fatalf("the model was asked %d times; a cut answer should be carried on", n)
+	}
+	_, st = withFakeModel(t, "length:a", "length:b")
+	s = st.create(nil, Policy{})
+	_ = st.send(s, "write it")
+	waitStatus(t, s, "error")
+}
+
+// A call left without a result (stopped partway) gets one when the model reads the task.
+func TestOrphanCallsGetResults(t *testing.T) {
+	_, st := withFakeModel(t)
+	s := st.create(nil, Policy{})
+	s.Messages = []SMsg{{Role: "user", Content: "go"}, {Role: "assistant", Calls: []SToolCall{{ID: "a", Name: "x"}, {ID: "b", Name: "y"}}},
+		{Role: "tool", CallID: "a", Content: "ok"}, {Role: "user", Content: "carry on"}}
+	var ids []string
+	for _, m := range st.apiMessages(s) {
+		if m["role"] == "tool" {
+			ids = append(ids, m["tool_call_id"].(string))
+		}
+	}
+	if strings.Join(ids, ",") != "a,b" {
+		t.Fatalf("tool results %v, want a,b", ids)
 	}
 }

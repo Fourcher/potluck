@@ -50,6 +50,7 @@ type SMsg struct {
 	State     string      `json:"state,omitempty"`  // tool messages: ok | error | denied
 	Images    []string    `json:"images,omitempty"` // user messages: pictures for a model that can see (file paths)
 	At        time.Time   `json:"at"`
+	cut       bool        // the engine ended this answer at its length limit, not because it was done
 }
 
 type SToolCall struct {
@@ -90,6 +91,10 @@ type Session struct {
 	lastPromptN int // how many messages the task had then
 	mu          sync.Mutex
 	cancel      context.CancelFunc
+	// mcpByName: the connector tools offered at the last step, by the name the model sees
+	// (cleaned up and cut to 64 characters, so it cannot be read back into the connector's
+	// own name, which may hold spaces or colons).
+	mcpByName map[string]MCPTool
 	subs        map[chan SEvent]bool
 	// saveMu keeps one save at a time from snapshot to rename (two could land in the wrong
 	// order); deleted, under it, stops a run that is still ending from writing a deleted task
@@ -332,6 +337,7 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 		return "", nil
 	}
 	kind, title, detail := "", "", ""
+	connServer := "" // the connector's own name, for a connector tool
 	str := func(k string) string { v, _ := args[k].(string); return v }
 	switch {
 	case call.Name == "run_command" || call.Name == "run_applescript":
@@ -395,7 +401,14 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 			title = "Scroll on your screen?"
 		}
 	case strings.HasPrefix(call.Name, "mcp__"):
-		server := strings.SplitN(strings.TrimPrefix(call.Name, "mcp__"), "__", 2)[0]
+		s.mu.Lock()
+		mt, known := s.mcpByName[call.Name]
+		s.mu.Unlock()
+		connServer = mt.Server
+		server := mt.Server
+		if !known {
+			return "That connector tool is not available now.", nil
+		}
 		if g.Connectors[server] {
 			return "", nil
 		}
@@ -427,7 +440,7 @@ func (st *sessionStore) allowed(ctx context.Context, s *Session, call SToolCall,
 			if s.Grants.Connectors == nil {
 				s.Grants.Connectors = map[string]bool{}
 			}
-			s.Grants.Connectors[strings.SplitN(strings.TrimPrefix(call.Name, "mcp__"), "__", 2)[0]] = true
+			s.Grants.Connectors[connServer] = true
 		}
 		s.mu.Unlock()
 		return "", nil
