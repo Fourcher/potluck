@@ -317,6 +317,8 @@ func (st *sessionStore) tools(ctx context.Context, s *Session) []toolSpec {
 		t = append(t, spec("delegate", "Hand a self-contained sub-task to a crew member: another model running on another of the user's computers. It gets only the text you give it (no tools, no files), so include everything it needs. Call delegate several times in one step to have several crew members work at the same time.",
 			`{"type":"object","properties":{"member":{"type":"string","description":"The crew member's name"},"task":{"type":"string","description":"The complete sub-task, with all the material it needs"}},"required":["member","task"]}`))
 	}
+	t = append(t, spec("remember", "Save a short note for your future tasks: a lesson learned, how this project builds or tests, a preference the user stated, where things are. Notes are read at the start of every later task (the project's notes in tasks on this project, global notes everywhere). Save only what will matter again; one fact per note.",
+		`{"type":"object","properties":{"note":{"type":"string"},"scope":{"type":"string","enum":["project","global"],"description":"project (default in a project) or global"}},"required":["note"]}`))
 	if cx := loadContContext(st.host.a.dir); len(cx.Skills) > 0 {
 		t = append(t, spec("use_skill", "Load one of the user's skills (listed in your instructions) and get its full instructions.", `{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`))
 	}
@@ -736,6 +738,8 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 			}
 			b, _ := args["all"].(bool)
 			return projectFS(FSReq{Op: op, Root: root, Path: str("path"), Glob: str("pattern"), Query: str("query"), Start: num("start_line"), Max: num("max_lines"), Content: str("content"), Old: str("old"), New: str("new"), All: b})
+		case "remember":
+			return remember(st.host.a.dir, root, str("scope"), str("note"))
 		case "use_skill":
 			return readSkill(st.host.a.dir, str("name"))
 		case "browser_open", "browser_read", "browser_click", "browser_type", "browser_back", "browser_screenshot":

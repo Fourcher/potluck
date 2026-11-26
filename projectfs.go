@@ -355,6 +355,10 @@ func projectInfo(data, root string) (ProjectInfo, error) {
 			pi.Memory = projectMemory(data, p.Memory)
 		}
 	}
+	// What Potluck's own tasks remembered about this project (the remember tool).
+	if own := strings.TrimSpace(readSmall(ownMemoryFile(data, root, "project"), 1<<20)); own != "" {
+		pi.Memory = strings.TrimSpace(pi.Memory + "\n\n" + own)
+	}
 	return pi, nil
 }
 

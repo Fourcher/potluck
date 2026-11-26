@@ -28,6 +28,8 @@ package main
 // Nothing here is sent anywhere: it is read by Potluck's own chat and agent on this computer.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -907,4 +909,47 @@ func suggestFolders(data, home string) []string {
 		out = out[:8]
 	}
 	return out
+}
+
+// Potluck's own memory: notes its tasks save with the remember tool, one file per project and
+// one for everything, read at the start of every later task (projectInfo, loadContContext).
+
+// ownMemoryFile is where remembered notes go: global, or a project's (by its folder).
+func ownMemoryFile(data, root, scope string) string {
+	if scope == "global" || root == "" {
+		return filepath.Join(contDir(data), "memory", "global", "potluck.md")
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(root)))
+	return filepath.Join(contDir(data), "memory", "project-"+hex.EncodeToString(sum[:6]), "potluck.md")
+}
+
+// remember appends one note. Kept small: every task reads all of it.
+func remember(data, root, scope, note string) (string, error) {
+	note = strings.Join(strings.Fields(note), " ")
+	if note == "" {
+		return "", errors.New("give the note to save")
+	}
+	if len(note) > 1500 {
+		return "", errors.New("keep a note under 1500 characters: one fact per note")
+	}
+	f := ownMemoryFile(data, root, scope)
+	if st, err := os.Stat(f); err == nil && st.Size() > 48<<10 {
+		return "", errors.New("these notes are full (48 KB): fold some together with edit_file on " + f + " first, or keep this one in the project's own files")
+	}
+	if err := os.MkdirAll(filepath.Dir(f), 0o700); err != nil {
+		return "", err
+	}
+	w, err := os.OpenFile(f, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer w.Close()
+	if _, err := fmt.Fprintf(w, "- %s: %s\n", time.Now().Format("2006-01-02"), note); err != nil {
+		return "", err
+	}
+	where := "this project's notes"
+	if scope == "global" || root == "" {
+		where = "your global notes"
+	}
+	return "Saved to " + where + "; later tasks will read it.", nil
 }

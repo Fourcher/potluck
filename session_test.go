@@ -373,3 +373,24 @@ func TestTaskEndAlert(t *testing.T) {
 		t.Fatal("no alert when the task finished")
 	}
 }
+
+// A task's remembered note is read by the next task on the same project, and not elsewhere.
+func TestRememberReachesNextTask(t *testing.T) {
+	_, st := withFakeModel(t)
+	dir := t.TempDir()
+	if _, err := remember(st.host.a.dir, dir, "project", "Run the tests with make check."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remember(st.host.a.dir, dir, "global", "The user likes short reports."); err != nil {
+		t.Fatal(err)
+	}
+	s := st.create(&ProjectRef{Root: dir, Name: "p"}, Policy{})
+	sys := st.taskSystem(s)
+	if !strings.Contains(sys, "make check") || !strings.Contains(sys, "short reports") {
+		t.Fatal("the next task did not read the notes")
+	}
+	other := st.create(&ProjectRef{Root: t.TempDir(), Name: "q"}, Policy{})
+	if strings.Contains(st.taskSystem(other), "make check") {
+		t.Fatal("a project's note reached another project")
+	}
+}
