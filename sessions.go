@@ -299,8 +299,19 @@ func (st *sessionStore) send(s *Session, text string) error {
 		st.save(s)
 		return nil
 	}
+	if len(s.Messages) == 0 && s.Project != nil {
+		// A task starting in a git repository knows its branch, what is uncommitted and the
+		// latest commits (in its first message, not its instructions, which stay the same).
+		root := s.Project.Root
+		s.mu.Unlock()
+		g := gitContext(root)
+		s.mu.Lock()
+		if g != "" && len(s.Messages) == 0 {
+			s.Messages = append(s.Messages, SMsg{Role: "user", Content: g, At: time.Now()})
+		}
+	}
 	s.Messages = append(s.Messages, SMsg{Role: "user", Content: text, At: time.Now()})
-	if s.Title == "" || (s.Project != nil && s.Title == s.Project.Name && len(s.Messages) == 1) {
+	if s.Title == "" || (s.Project != nil && s.Title == s.Project.Name && len(s.Messages) <= 2) {
 		s.Title = titleOf(text, s.Project)
 	}
 	ctx, cancel := context.WithCancel(context.Background())

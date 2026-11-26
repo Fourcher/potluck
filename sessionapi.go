@@ -115,10 +115,11 @@ func (st *sessionStore) handle(w http.ResponseWriter, r *http.Request, mutate bo
 		Question string `json:"question"`
 		Answer   string `json:"answer"`
 		Policy   Policy `json:"policy"`
+		Path     string `json:"path"` // revert: one file ("" = all)
 	}
 	// Only reading the task and following it may be a GET: every action changes something,
 	// so it must come as a POST, which carries the chat page's header check above.
-	if action != "" && action != "events" && r.Method != http.MethodPost {
+	if action != "" && action != "events" && action != "changes" && r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "send this as a POST"})
 		return
@@ -140,6 +141,22 @@ func (st *sessionStore) handle(w http.ResponseWriter, r *http.Request, mutate bo
 		return
 	case action == "events":
 		st.events(w, r, s)
+		return
+	case action == "changes" && r.Method == http.MethodGet:
+		ch, err := st.changes(s)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{"changes": ch, "note": "Changes this task made with its file tools. Changes made by commands it ran (builds, git, scripts) are not kept here."})
+		return
+	case action == "revert":
+		n, err := st.revert(s, in.Path)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "files": n})
 		return
 	case action == "message":
 		err = st.send(s, in.Text)
@@ -170,6 +187,7 @@ func (st *sessionStore) handle(w http.ResponseWriter, r *http.Request, mutate bo
 		s.deleted = true // the run still ending saves nothing more
 		err = removeFile(st.dir, s.ID+".json")
 		_ = os.RemoveAll(filepath.Join(st.dir, s.ID+"-output")) // its saved long results
+		_ = os.RemoveAll(st.backupDir(s))                       // and the files it kept for undo
 		s.saveMu.Unlock()
 	default:
 		err = errors.New("unknown action")

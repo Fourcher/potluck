@@ -521,7 +521,7 @@ function drawThread() {
     else if (S.task.status === "working" && !S.task.live) h += `<div class="wrap"><div class="waiting"><span class="spin"></span><span>${esc(S.task.error || "Working on it. You can close this page; the task keeps going in Potluck.")}</span></div></div>`;
     else if (S.task.status === "error" || S.task.status === "stopped") h += `<div class="wrap"><div class="err">${esc(S.task.error || (S.task.status === "stopped" ? "Stopped." : "Something went wrong."))}</div></div>`;
     // What the last run did, from Potluck's own record of it (not the model's word).
-    if (S.task.report && S.task.status !== "working" && !S.task.q) h += `<div class="wrap"><div class="report"><b>Report</b><pre>${esc(S.task.report)}</pre></div></div>`;
+    if (S.task.report && S.task.status !== "working" && !S.task.q) h += `<div class="wrap"><div class="report"><b>Report</b><pre>${esc(S.task.report)}</pre>${S.cur.project ? `<button class="btn small ghost" data-a="task-changes">See what it changed</button>` : ""}</div></div>`;
   }
   el.innerHTML = h;
 }
@@ -1320,6 +1320,20 @@ function sheet(html, handlers = {}) {
   hidePop(); const m = $("#modal"); $(".sheet", m).innerHTML = html; m.hidden = false; m.handlers = handlers;
   const f = $("input,textarea,select,button.btn:not(.ghost)", m); f && f.focus();
 }
+// What the task changed in its project, file by file, with undo (taskchanges.go).
+async function changesSheet() {
+  let j;
+  try { j = await taskApi("sessions/" + S.cur.session + "/changes"); } catch (e) { return toast(e.message); }
+  const ch = (j.changes || []).filter(c => c.kind !== "same");
+  const kind = { changed: "changed", created: "new file", deleted: "deleted since" };
+  sheet(`<h3>What this task changed</h3><p class="small muted">${esc(j.note || "")}</p>` +
+    (ch.length ? ch.map(c => `<details class="change"><summary><b>${esc(c.path)}</b> <span class="muted">${esc(kind[c.kind] || c.kind)}</span> <button class="btn small ghost" data-a="undo-file" data-p="${esc(c.path)}">Undo</button></summary><pre class="diff">${esc(c.diff || "")}</pre></details>`).join("") : `<p>No file changes are kept for this task.</p>`) +
+    `<div class="foot"><button class="btn ghost" data-a="close">Close</button>${ch.length ? `<button class="btn danger" data-a="undo-all">Undo all</button>` : ""}</div>`,
+    {
+      "undo-file": async b => { try { await taskApi("sessions/" + S.cur.session + "/revert", { path: b.dataset.p }); toast(b.dataset.p + " is back as it was."); changesSheet(); } catch (e) { toast(e.message); } },
+      "undo-all": async () => { try { const r = await taskApi("sessions/" + S.cur.session + "/revert", { path: "" }); toast(r.files + " files are back as they were."); changesSheet(); } catch (e) { toast(e.message); } },
+    });
+}
 function closeSheet() { $("#modal").hidden = true; $("#input").focus(); }
 function settingsSheet() {
   const s = S.settings;
@@ -1562,6 +1576,7 @@ function wire() {
     }
     else if (a === "retry") retry();
     else if (a === "compact-retry") compact(true);
+    else if (a === "task-changes") changesSheet();
     else if (a === "speak") speakText(m.content);
     else if (a === "edit-msg") editMessage(i);
     else if (a === "edit-cancel") drawThread();
@@ -1574,7 +1589,7 @@ function wire() {
     const b = e.target.closest("[data-a]"); if (!b) return;
     if (b.dataset.a === "close") return closeSheet();
     if (b.dataset.a === "cmd") { closeSheet(); return runSlash("/" + b.dataset.c); }
-    const h = $("#modal").handlers[b.dataset.a]; h && h();
+    const h = $("#modal").handlers[b.dataset.a]; h && h(b);
   };
   document.addEventListener("mousedown", e => { if (!$("#pop").hidden && !e.target.closest("#pop") && e.target.closest("button") !== popFor) hidePop(); });
   document.addEventListener("keydown", e => {

@@ -247,6 +247,11 @@ body:not(.side-closed) #side-open{display:none}
 
 /* A task's question: Yes / No / your own words */
 .report{border:1px solid var(--line);border-radius:14px;padding:12px 16px;margin:10px 0;background:var(--card)}
+.change{border-top:1px solid var(--line);padding:6px 0}
+.change summary{cursor:pointer;display:flex;gap:8px;align-items:center}
+.change summary .btn{margin-left:auto}
+pre.diff{max-height:360px;overflow:auto;font-size:.85em;white-space:pre}
+.report .btn{margin-top:8px}
 .report pre{white-space:pre-wrap;margin:6px 0 0;font:inherit;font-size:.92em}
 .qcard{border:1px solid var(--accent);border-radius:14px;padding:14px 16px;margin:10px 0;background:color-mix(in srgb,var(--accent) 7%,transparent)}
 .qcard .qhead{display:flex;gap:8px;align-items:center;margin-bottom:8px}

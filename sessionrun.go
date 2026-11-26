@@ -765,6 +765,12 @@ func (st *sessionStore) runTool(ctx context.Context, s *Session, call SToolCall)
 			if root == "" {
 				return "", errors.New("this task has no project folder")
 			}
+			if op == "edit" || op == "write" {
+				// Kept as it was before this task first changes it, for the changes view and undo.
+				if err := st.backupBefore(s, root, str("path")); err != nil {
+					return "", fmt.Errorf("could not keep a copy of %s before changing it: %w", str("path"), err)
+				}
+			}
 			b, _ := args["all"].(bool)
 			return projectFS(FSReq{Op: op, Root: root, Path: str("path"), Glob: str("pattern"), Query: str("query"), Start: num("start_line"), Max: num("max_lines"), Content: str("content"), Old: str("old"), New: str("new"), All: b})
 		case "remember":
