@@ -3,7 +3,9 @@ import SwiftUI
 @main
 struct PotluckApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @State private var model = AppModel()
+    /// Made by the app delegate at launch: an answer tapped on an alert while the app was not
+    /// running starts the app in the background with no window, and must still reach it.
+    private var model: AppModel { delegate.model }
     @Environment(\.scenePhase) private var phase
 
     var body: some Scene {
@@ -30,13 +32,12 @@ struct PotluckApp: App {
                 }
         }
         .onChange(of: phase) { _, p in
-            delegate.model = model
+            if p == .active { model.ensureChatsLoaded() }
             if p == .active, model.computer != nil { model.startPolling(); if !model.isDemo { delegate.enableAlerts() } }
             if p == .background { model.stopPolling(); model.scheduleSave() }
         }
         // Right after pairing the app is already in the foreground, so ask for alerts then too.
         .onChange(of: model.computer != nil) { _, paired in
-            delegate.model = model
             if paired, !model.isDemo { delegate.enableAlerts() }
         }
     }

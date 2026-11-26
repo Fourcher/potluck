@@ -132,7 +132,9 @@ final class PotluckClient: @unchecked Sendable {
     }
 
     static func url(_ addr: String, _ port: Int, _ path: String) -> URL {
-        URL(string: "https://\(addr):\(port)\(path)")!
+        // An address from a hand-edited pairing link may not make a valid URL: fail the
+        // request (an unreachable host) rather than the whole app.
+        URL(string: "https://\(addr):\(port)\(path)") ?? URL(string: "https://invalid.invalid:\(port)")!
     }
 
     /// Pairs with a computer: swaps the code's one-time secret for a key of this phone's own.

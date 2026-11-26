@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Foundation
 import Observation
+import Security
 
 /// Updates Potluck from its releases: finds a newer version, downloads the Mac app, checks it
 /// against the release's checksums, swaps it in and starts the new one.
@@ -12,6 +13,11 @@ final class Updater {
     var note = ""
 
     private let api = URL(string: "https://api.github.com/repos/Fourcher/potluck/releases/latest")!
+    /// Potluck's releases are signed by this Apple developer team.
+    private static let releaseTeam = "JMC2566X2S"
+    /// Run before the new version starts: stops the running Potluck program, so the new app
+    /// starts its own instead of finding the old one still answering.
+    var beforeRestart: (() async -> Void)?
     private var asset: URL?
     private var sums: URL?
 
@@ -73,33 +79,72 @@ final class Updater {
             let (sumData, _) = try await URLSession.shared.data(from: sums)
             let want = String(decoding: sumData, as: UTF8.self).split(separator: "\n")
                 .first { $0.hasSuffix(asset.lastPathComponent) }?.split(separator: " ").first.map(String.init) ?? ""
-            let got = SHA256.hash(data: try Data(contentsOf: zip)).map { String(format: "%02x", $0) }.joined()
+            // Heavy work off the main thread, so the app keeps answering meanwhile.
+            let got = try await Task.detached { SHA256.hash(data: try Data(contentsOf: zip)).map { String(format: "%02x", $0) }.joined() }.value
             guard !want.isEmpty, want == got else { note = "The download did not match its checksum, so it was not installed."; return }
             let work = FileManager.default.temporaryDirectory.appendingPathComponent("potluck-update-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: work) }
             try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
-            let unzip = Process()
-            unzip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-            unzip.arguments = ["-x", "-k", zip.path, work.path]
-            try unzip.run(); unzip.waitUntilExit()
+            try await Self.run("/usr/bin/ditto", ["-x", "-k", zip.path, work.path])
             guard let newApp = try FileManager.default.contentsOfDirectory(at: work, includingPropertiesForKeys: nil).first(where: { $0.pathExtension == "app" }) else {
                 note = "The download has no app in it."
                 return
             }
-            // Swap the app on disk, then start the new one once this one has quit.
+            // The checksum comes from the same release, so it shows the file arrived whole, not
+            // who made it. The new app must carry a valid signature from the same developer as
+            // this one (or Potluck's own, if this copy is unsigned).
+            let team = Self.teamID(Bundle.main.bundleURL) ?? Self.releaseTeam
+            guard let newTeam = Self.teamID(newApp), newTeam == team else {
+                note = "The new version is not signed by Potluck's developer, so it was not installed."
+                return
+            }
+            // Swap the app on disk, putting the old one back if the swap fails halfway.
             let here = Bundle.main.bundleURL
             let old = here.deletingLastPathComponent().appendingPathComponent(".Potluck-old.app")
             try? FileManager.default.removeItem(at: old)
             try FileManager.default.moveItem(at: here, to: old)
-            try FileManager.default.moveItem(at: newApp, to: here)
+            do {
+                try FileManager.default.moveItem(at: newApp, to: here)
+            } catch {
+                try? FileManager.default.moveItem(at: old, to: here)
+                throw error
+            }
             try? FileManager.default.removeItem(at: old)
-            try? FileManager.default.removeItem(at: work)
+            // Stop the running Potluck program, then start the new app once this one has quit.
+            await beforeRestart?()
             let relaunch = Process()
             relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
-            relaunch.arguments = ["-c", "sleep 1; /usr/bin/open \"\(here.path)\""]
+            relaunch.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", here.path]
             try relaunch.run()
             NSApp.terminate(nil)
         } catch {
             note = "The update did not install: \(error.localizedDescription)"
+        }
+    }
+
+    /// The Apple developer team that signed an app, when its signature is valid (every part
+    /// of it, for every processor); nil when it is unsigned, altered or signed by no team.
+    nonisolated static func teamID(_ url: URL) -> String? {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code else { return nil }
+        let strict = SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSStrictValidate | kSecCSCheckNestedCode)
+        guard SecStaticCodeCheckValidity(code, strict, nil) == errSecSuccess else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let d = info as? [String: Any] else { return nil }
+        return d[kSecCodeInfoTeamIdentifier as String] as? String
+    }
+
+    /// Runs a program and waits for it without holding up the main thread.
+    nonisolated static func run(_ path: String, _ args: [String]) async throws {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            p.terminationHandler = { p in
+                if p.terminationStatus == 0 { c.resume() } else { c.resume(throwing: NSError(domain: "Potluck", code: Int(p.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "\(path) ended with \(p.terminationStatus)"])) }
+            }
+            do { try p.run() } catch { c.resume(throwing: error) }
         }
     }
 }

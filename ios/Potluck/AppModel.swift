@@ -340,16 +340,40 @@ final class AppModel {
         return dir.appendingPathComponent("chats.json")
     }
 
+    /// Whether the saved chats have been read. Not yet, when the app was started in the
+    /// background before the phone was first unlocked (an answer from an alert): the file can't
+    /// be read then, and saving would replace every chat with what is open now.
+    private var chatsLoaded = false
+
     private func loadChats() {
-        if let d = try? Data(contentsOf: chatsURL), let c = try? JSONDecoder().decode([Conversation].self, from: d) {
-            chats = c.sorted { $0.updated > $1.updated }
-        }
+        readSavedChats()
         let c = Conversation()
         chats.insert(c, at: 0)
         currentID = c.id
     }
 
+    /// Reads chats.json into chats, keeping chats already open here. A file that cannot be
+    /// read yet is tried again before the next save; one that cannot be understood is moved
+    /// aside, not written over.
+    private func readSavedChats() {
+        let url = chatsURL
+        guard FileManager.default.fileExists(atPath: url.path) else { chatsLoaded = true; return }
+        guard let d = try? Data(contentsOf: url) else { return } // locked: try again later
+        chatsLoaded = true
+        guard let saved = try? JSONDecoder().decode([Conversation].self, from: d) else {
+            try? FileManager.default.moveItem(at: url, to: url.deletingPathExtension().appendingPathExtension("unreadable-\(Int(Date().timeIntervalSince1970)).json"))
+            return
+        }
+        let open = Set(chats.map(\.id))
+        chats = (chats + saved.filter { !open.contains($0.id) }).sorted { $0.updated > $1.updated }
+    }
+
+    /// Reads the saved chats if they could not be read at launch (the app is now open).
+    func ensureChatsLoaded() { if !chatsLoaded { readSavedChats() } }
+
     func scheduleSave() {
+        if !chatsLoaded { readSavedChats() }
+        guard chatsLoaded else { return } // still locked: saved later, never over the old file
         saveTask?.cancel()
         let snapshot = chats.filter { !$0.messages.isEmpty }
         let url = chatsURL
@@ -357,7 +381,7 @@ final class AppModel {
             try? await Task.sleep(for: .milliseconds(400))
             if Task.isCancelled { return }
             if let d = try? JSONEncoder().encode(snapshot) {
-                try? d.write(to: url, options: [.atomic, .completeFileProtection])
+                try? d.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
             }
         }
     }
