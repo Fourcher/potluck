@@ -256,7 +256,7 @@ function askConnector(call, tool) {
 const isTask = () => !!(S.cur && (S.cur.project || S.cur.task));
 function taskPolicy() {
   return { files: S.settings.perm === "none" ? "ask" : S.settings.perm, commands: S.settings.agent === "auto" ? "auto" : "ask",
-    connectors: { ...(S.settings.connectors || {}) }, all: !!(S.cur && S.cur.approveAll), thinking: !!S.settings.thinking };
+    connectors: { ...(S.settings.connectors || {}) }, all: !!(S.cur && S.cur.approveAll), thinking: !!S.settings.thinking, awayMinutes: S.settings.away ?? 30 };
 }
 async function taskApi(path, body) {
   const r = await fetch("/potluck/" + path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-Potluck": "1" }, body: JSON.stringify(body) });
@@ -332,7 +332,7 @@ function questionCard(q) {
     (q.detail ? `<pre class="cmd">${esc(q.detail)}</pre>` : "") +
     `<div class="qrow"><button class="btn" data-a="q-yes">Yes <kbd>Enter</kbd></button><button class="btn no" data-a="q-no">No <kbd>⌫</kbd></button>` +
     (q.kind !== "ask" && q.kind !== "plan" ? `<button class="btn ghost small" data-a="q-always">Yes, and don't ask again in this task</button>` : "") +
-    `</div><div class="small muted">Or type your own answer in the message box and press Enter.</div></div></div>`;
+    `</div><div class="small muted">Or type your own answer in the message box and press Enter.${(S.settings.away ?? 30) > 0 ? ` If nobody answers within ${S.settings.away ?? 30} minutes, the task carries on without it.` : ""}</div></div></div>`;
 }
 // A question while the page is in the background: a desktop notification (phones get theirs from Potluck).
 function notifyQuestion(q) {
@@ -1328,13 +1328,16 @@ function settingsSheet() {
     <h4>For the curious</h4>
     <label class="f" for="st-temp">Creativity (temperature)</label><input type="text" id="st-temp" inputmode="decimal" placeholder="Model's own default" value="${esc(s.temperature)}">
     <label class="f" for="st-max">Longest reply, in tokens</label><input type="text" id="st-max" inputmode="numeric" placeholder="No limit" value="${esc(s.maxTokens)}">
+    <label class="f" for="st-away">When a task asks something and nobody answers</label><select id="st-away">${[[15, "Carry on after 15 minutes"], [30, "Carry on after 30 minutes"], [60, "Carry on after an hour"], [240, "Carry on after 4 hours"], [-1, "Wait for my answer"]].map(([v, t]) => `<option value="${v}" ${(s.away ?? 30) == v ? "selected" : ""}>${t}</option>`).join("")}</select>
+    <div class="small muted">Carrying on means: the task decides its own questions as safely as it can, leaves out anything that needed your approval, and lists both in its report.</div>
     <h4>Your chats</h4>
     <p class="muted small">Chats, settings and usage are kept in this browser on this computer, not on the Potluck computers.</p>
     <div class="row"><button class="btn small ghost" data-a="export-all">Export all chats</button><button class="btn small ghost" data-a="import-all">Import</button><button class="btn small ghost" data-a="wipe">Delete all chats</button></div>
     <div class="foot"><button class="btn ghost" data-a="close">Cancel</button><button class="btn" data-a="save">Save</button></div>`,
     {
       save: () => {
-        Object.assign(s, { instructions: $("#st-ins").value, style: $("#st-style").value, theme: $("#st-theme").value, enterSends: $("#st-enter").checked, autoSend: $("#st-auto").checked, speak: $("#st-speak").checked, temperature: $("#st-temp").value.trim(), maxTokens: $("#st-max").value.trim() });
+        Object.assign(s, { instructions: $("#st-ins").value, style: $("#st-style").value, theme: $("#st-theme").value, enterSends: $("#st-enter").checked, autoSend: $("#st-auto").checked, speak: $("#st-speak").checked, temperature: $("#st-temp").value.trim(), maxTokens: $("#st-max").value.trim(), away: Number($("#st-away").value) });
+        taskPolicySync();
         saveSettings(); applyTheme(); closeSheet(); toast("Saved");
       },
       "export-all": async () => download("potluck-chats.json", JSON.stringify({ potluckChats: 1, chats: await Store.allChats() }), "application/json"),

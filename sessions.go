@@ -32,6 +32,35 @@ type Policy struct {
 	Connectors map[string]bool `json:"connectors"` // switched-on MCP servers (started only if on)
 	All        bool            `json:"all"`        // approve everything: nothing asks (the person accepted the warning)
 	Thinking   bool            `json:"thinking"`
+	// AwayMinutes: how long a question waits for the person before the task carries on by
+	// itself (0: the default, 30 minutes; below 0: it waits for ever).
+	AwayMinutes int `json:"awayMinutes,omitempty"`
+}
+
+// awayUnit is a minute (tests make it shorter).
+var awayUnit = time.Minute
+
+// awayAfter is how long a question waits before it is answered for an absent person.
+func (p Policy) awayAfter() time.Duration {
+	switch {
+	case p.AwayMinutes < 0:
+		return 0
+	case p.AwayMinutes == 0:
+		return 30 * awayUnit
+	}
+	return time.Duration(p.AwayMinutes) * awayUnit
+}
+
+// awayAnswer is what a question gets when nobody answered in time. A task left running at
+// night must not stop at the first question until morning; nor may it do what was not
+// approved. So: a question to the person gets "decide safely yourself", and an approval is
+// not given, the model told to carry on without it and say so at the end.
+func awayAnswer(kind string, waited time.Duration) string {
+	mins := int(waited / awayUnit)
+	if kind == "ask" {
+		return fmt.Sprintf("(No answer: the person has been away for %d minutes. Choose the safest reasonable option yourself, say which you chose and why, and carry on. Mention it in your final report.)", mins)
+	}
+	return fmt.Sprintf("(No answer within %d minutes: the person is away, so this was not approved and not done. Carry on without it if you can, and list it in your final report as waiting for their approval.)", mins)
 }
 
 // Grants are standing yeses given during a session ("yes, and don't ask again").
@@ -69,6 +98,7 @@ type Question struct {
 	Kind     string    `json:"kind"`   // run | read | write | connector | ask | plan
 	Created  time.Time `json:"created"`
 	Answer   string    `json:"answer,omitempty"`
+	Auto     bool      `json:"auto,omitempty"` // answered by Potluck: nobody answered in time
 	answered chan string
 }
 
@@ -304,16 +334,28 @@ func (st *sessionStore) ask(ctx context.Context, s *Session, kind, title, detail
 	if st.notify != nil {
 		go st.notify(q, s)
 	}
+	s.mu.Lock()
+	wait := s.Policy.awayAfter()
+	s.mu.Unlock()
+	var away <-chan time.Time
+	if wait > 0 {
+		t := time.NewTimer(wait)
+		defer t.Stop()
+		away = t.C
+	}
 	var ans string
+	auto := false
 	select {
 	case ans = <-q.answered:
 	case <-ctx.Done():
 		ans = "no"
+	case <-away:
+		ans, auto = awayAnswer(kind, wait), true
 	}
 	// A question is never changed once shown (watchers read it without the lock): the
 	// answered one is a copy.
 	done := *q
-	done.Answer = ans
+	done.Answer, done.Auto = ans, auto
 	s.mu.Lock()
 	s.Question = nil
 	s.mu.Unlock()

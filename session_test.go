@@ -284,3 +284,30 @@ func TestOrphanCallsGetResults(t *testing.T) {
 		t.Fatalf("tool results %v, want a,b", ids)
 	}
 }
+
+// A question nobody answers does not hold the task for ever: after the person's away time
+// a permission is refused (and reported), a question to them is decided by the model.
+func TestQuestionsAnsweredWhenAway(t *testing.T) {
+	old := awayUnit
+	awayUnit = 20 * time.Millisecond
+	t.Cleanup(func() { awayUnit = old })
+	f, st := withFakeModel(t, `call:run_command:{"command":"echo hi"}`, `call:ask_user:{"question":"Which colour?"}`, "text:done")
+	s := st.create(nil, Policy{Commands: "ask", AwayMinutes: 2})
+	_ = st.send(s, "go")
+	waitStatus(t, s, "idle")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var results []string
+	for _, m := range s.Messages {
+		if m.Role == "tool" {
+			results = append(results, m.State+": "+m.Content)
+		}
+	}
+	if len(results) != 2 || !strings.HasPrefix(results[0], "denied") || !strings.Contains(results[0], "not approved") || !strings.Contains(results[1], "safest reasonable option") {
+		t.Fatalf("results %q", results)
+	}
+	_ = f
+	if (Policy{AwayMinutes: -1}).awayAfter() != 0 || (Policy{}).awayAfter() != 30*awayUnit {
+		t.Fatal("away defaults")
+	}
+}
