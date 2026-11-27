@@ -1,6 +1,6 @@
 {
  "version": 1,
- "updated": "2026-11-26T18:59Z",
+ "updated": "2026-11-27T18:58Z",
  "source": "Hugging Face public API (downloads, likes and trending as Hugging Face reports them)",
  "picks": [
   {
@@ -113,222 +113,222 @@
  "trending": [
   {
    "repo": "unsloth/Inkling-2-Mini-GGUF",
-   "downloads": 2445633,
-   "likes": 1449,
+   "downloads": 3302340,
+   "likes": 1563,
    "created": "2026-11-20"
   },
   {
    "repo": "prism-ml/Ternary-Bonsai-2.5-27B-GGUF",
-   "downloads": 59366,
-   "likes": 476,
+   "downloads": 382546,
+   "likes": 598,
    "created": "2026-11-24"
   },
   {
+   "repo": "ISTA-DASLab/Inkling-2-Mini-GSQ-RCO-GGUF",
+   "downloads": 24931,
+   "likes": 223,
+   "created": "2026-11-26"
+  },
+  {
    "repo": "nari-labs/Qwen3.8-27B-NariQ-GGUF",
-   "downloads": 14337,
-   "likes": 182,
+   "downloads": 30849,
+   "likes": 225,
    "created": "2026-11-20"
   },
   {
    "repo": "DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF",
-   "downloads": 1873950,
-   "likes": 4400,
+   "downloads": 1919755,
+   "likes": 4443,
    "created": "2026-09-01"
   },
   {
-   "repo": "DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF",
-   "downloads": 2236527,
-   "likes": 2196,
-   "created": "2026-07-19"
-  },
-  {
-   "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF",
-   "downloads": 4628141,
-   "likes": 2673,
-   "created": "2026-08-16"
-  },
-  {
-   "repo": "ggml-org/Inkling-2-Mini-GGUF",
-   "downloads": 762906,
-   "likes": 94,
+   "repo": "ccore/CCORE-Web-Coder-4B",
+   "downloads": 8810,
+   "likes": 106,
    "created": "2026-11-20"
   },
   {
    "repo": "AtomicChat/Ternary-Bonsai-2.5-27B-Uncensored-GGUF",
-   "downloads": 4055,
-   "likes": 105,
+   "downloads": 28699,
+   "likes": 142,
    "created": "2026-11-24"
   },
   {
-   "repo": "AtomicChat/Inkling-2-Mini-GGUF",
-   "downloads": 177045,
-   "likes": 164,
-   "created": "2026-11-20"
-  },
-  {
-   "repo": "nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-4GB",
-   "downloads": 196058,
-   "likes": 1553,
-   "created": "2026-10-05"
-  },
-  {
    "repo": "ai-sage/GigaChat4-37B-A4B-GGUF",
-   "downloads": 9,
-   "likes": 40,
+   "downloads": 16942,
+   "likes": 98,
    "created": "2026-11-22"
   },
   {
-   "repo": "sensenova/SenseNova-Loop-9B-GGUF",
-   "downloads": 117621,
-   "likes": 292,
-   "created": "2026-11-18"
+   "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF",
+   "downloads": 4694969,
+   "likes": 2710,
+   "created": "2026-08-16"
+  },
+  {
+   "repo": "DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF",
+   "downloads": 2180957,
+   "likes": 2237,
+   "created": "2026-07-19"
+  },
+  {
+   "repo": "nokeepai/Inkling-2-Mini-Unbound-GGUF",
+   "downloads": 157746,
+   "likes": 109,
+   "created": "2026-11-21"
+  },
+  {
+   "repo": "AtomicChat/Inkling-2-Mini-GGUF",
+   "downloads": 216748,
+   "likes": 184,
+   "created": "2026-11-20"
   }
  ],
  "new": [
   {
-   "repo": "AtomicChat/DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-GGUF",
-   "downloads": 246532,
-   "likes": 673,
-   "created": "2026-10-28"
-  },
-  {
    "repo": "ccore/Qwen3.5-4B-GLB-3D-Coder",
-   "downloads": 75378,
-   "likes": 412,
+   "downloads": 79557,
+   "likes": 414,
    "created": "2026-11-01"
   },
   {
    "repo": "mradermacher/DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic-GGUF",
-   "downloads": 1194651,
-   "likes": 324,
+   "downloads": 1261605,
+   "likes": 342,
    "created": "2026-11-12"
   },
   {
+   "repo": "sensenova/SenseNova-Loop-9B-GGUF",
+   "downloads": 134981,
+   "likes": 324,
+   "created": "2026-11-18"
+  },
+  {
    "repo": "DavidAU/Qwen3.8-27B-Ultimate-Heretic-Uncensored-Turbo-Brilliance-50x-AGI-NEO-GGUF",
-   "downloads": 159301,
-   "likes": 284,
+   "downloads": 170666,
+   "likes": 290,
    "created": "2026-11-04"
   },
   {
    "repo": "ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-GGUF",
-   "downloads": 592600,
-   "likes": 254,
+   "downloads": 616383,
+   "likes": 258,
    "created": "2026-11-02"
   },
   {
    "repo": "AngelSlim/Hy4-flash-GGUF",
-   "downloads": 154473,
-   "likes": 245,
-   "created": "2026-11-16"
-  },
-  {
-   "repo": "DavidAU/Qwen3.8-40B-Ultimate-Heretic-Uncensored-Turbo-Brilliance-50x-AGI-NEO-GGUF",
-   "downloads": 71161,
-   "likes": 154,
-   "created": "2026-11-10"
-  },
-  {
-   "repo": "harness-hub/Qwen3.8-27B-pi-adapted-GGUF",
-   "downloads": 13632,
-   "likes": 140,
+   "downloads": 207576,
+   "likes": 247,
    "created": "2026-11-16"
   },
   {
    "repo": "CaryPalmer/Kintsugi-27B",
-   "downloads": 14793,
-   "likes": 127,
+   "downloads": 21665,
+   "likes": 156,
    "created": "2026-11-20"
   },
   {
-   "repo": "nokeepai/Inkling-2-Mini-Unbound-GGUF",
-   "downloads": 122028,
-   "likes": 102,
-   "created": "2026-11-21"
+   "repo": "harness-hub/Qwen3.8-27B-pi-adapted-GGUF",
+   "downloads": 20157,
+   "likes": 141,
+   "created": "2026-11-16"
   },
   {
-   "repo": "jackjusko/Swift-1.5-Flash-Next-Heretic-ReverseEngineer",
-   "downloads": 10584,
-   "likes": 98,
-   "created": "2026-10-28"
-  },
-  {
-   "repo": "ccore/CCORE-Web-Coder-4B",
-   "downloads": 5796,
-   "likes": 96,
+   "repo": "ggml-org/Inkling-2-Mini-GGUF",
+   "downloads": 842324,
+   "likes": 120,
    "created": "2026-11-20"
+  },
+  {
+   "repo": "OVHaiLLM/Olala-v1.0-mini-7A1B-GGUF",
+   "downloads": 25033,
+   "likes": 93,
+   "created": "2026-10-30"
+  },
+  {
+   "repo": "peasantsmith/Hy4-Flash-Maya-GGUF",
+   "downloads": 412895,
+   "likes": 88,
+   "created": "2026-11-18"
+  },
+  {
+   "repo": "huihui-ai/Huihui-GLM-5.3-abliterated-GGUF",
+   "downloads": 35237,
+   "likes": 78,
+   "created": "2026-10-29"
   }
  ],
  "popular": [
   {
    "repo": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF",
-   "downloads": 7683242,
-   "likes": 1342,
+   "downloads": 7730694,
+   "likes": 1346,
    "created": "2026-09-07"
   },
   {
+   "repo": "ornith-ai/Ornith-1.5-9B-GGUF",
+   "downloads": 5180675,
+   "likes": 842,
+   "created": "2026-08-19"
+  },
+  {
    "repo": "Serveurperso/YuE2-GGUF",
-   "downloads": 5216198,
+   "downloads": 4665701,
    "likes": 33,
    "created": "2026-09-12"
   },
   {
-   "repo": "ornith-ai/Ornith-1.5-9B-GGUF",
-   "downloads": 5086272,
-   "likes": 831,
-   "created": "2026-08-19"
-  },
-  {
-   "repo": "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF",
-   "downloads": 4250081,
-   "likes": 150,
-   "created": "2026-05-19"
-  },
-  {
    "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
-   "downloads": 4051762,
-   "likes": 1988,
+   "downloads": 4562115,
+   "likes": 1995,
    "created": "2026-08-26"
   },
   {
    "repo": "SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF",
-   "downloads": 4051113,
-   "likes": 1198,
+   "downloads": 4231551,
+   "likes": 1203,
    "created": "2026-10-02"
   },
   {
    "repo": "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
-   "downloads": 3718592,
-   "likes": 690,
+   "downloads": 3793528,
+   "likes": 707,
    "created": "2026-08-18"
   },
   {
+   "repo": "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF",
+   "downloads": 3757656,
+   "likes": 150,
+   "created": "2026-05-19"
+  },
+  {
    "repo": "ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF",
-   "downloads": 3682279,
-   "likes": 689,
+   "downloads": 3440331,
+   "likes": 693,
    "created": "2026-10-23"
   },
   {
    "repo": "cdiamond/Qwen3.8-27B-iMatrix-NVFP4-MTP-GGUF",
-   "downloads": 3335303,
+   "downloads": 3252212,
    "likes": 55,
    "created": "2026-08-17"
   },
   {
+   "repo": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+   "downloads": 3103192,
+   "likes": 1088,
+   "created": "2026-05-11"
+  },
+  {
    "repo": "farbodtavakkoli/OTel-2.0-Decision-26B-A4B-4bit",
-   "downloads": 3193842,
+   "downloads": 2846471,
    "likes": 10,
    "created": "2026-10-06"
   },
   {
-   "repo": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
-   "downloads": 3049815,
-   "likes": 1087,
-   "created": "2026-05-11"
-  },
-  {
    "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
-   "downloads": 2641272,
-   "likes": 230,
+   "downloads": 2688741,
+   "likes": 231,
    "created": "2025-10-31"
   }
  ],
